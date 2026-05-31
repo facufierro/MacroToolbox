@@ -231,7 +231,7 @@ function parseSteps(behavior: string): Step[] {
     let m: RegExpMatchArray | null;
     if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
     if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
-    if ((m = s.match(/^goto\((-?\d+),\s*(-?\d+)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
+    if ((m = s.match(/^goto\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
     if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
     if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
     if (s === "lock") return [{ type: "lock" as const }];
@@ -273,8 +273,8 @@ function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe:
 
   return (
     <div className="goto-input">
-      <input type="number" value={x} onChange={e => onChange(e.target.value, y)} placeholder="x" />
-      <input type="number" value={y} onChange={e => onChange(x, e.target.value)} placeholder="y" />
+      <input type="number" min={0} max={100} step={0.1} value={x} onChange={e => onChange(e.target.value, y)} placeholder="x %" />
+      <input type="number" min={0} max={100} step={0.1} value={y} onChange={e => onChange(x, e.target.value)} placeholder="y %" />
       <button className="btn btn--ghost btn--sm" onClick={pick} disabled={picking}>
         {picking ? "Click game…" : "🎯 Pick"}
       </button>
@@ -531,7 +531,7 @@ function OverlayItemModal({ initial, gameExe, onSave, onClose }: {
   }
 
   function build(): OverlayItem {
-    const base = { id: initial.id, x: parseInt(x)||0, y: parseInt(y)||0 };
+    const base = { id: initial.id, x: parseFloat(x)||0, y: parseFloat(y)||0 };
     const ms = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
     switch (initial.type) {
       case "timer": return { ...base, type: "timer", duration_ms: ms||60000, label };

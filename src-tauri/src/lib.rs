@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, sync::{Mutex, OnceLock}};
 use tauri::{Emitter, Manager, State};
 
 mod ahk;
@@ -15,6 +15,15 @@ struct BorderlessWindowState {
     placement: winapi::um::winuser::WINDOWPLACEMENT,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct WindowClientBounds {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
 pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
@@ -24,9 +33,42 @@ pub struct AppState {
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
 }
 
+#[cfg(target_os = "windows")]
+static DEBUG_LOG_STATE: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn debug_log_once(key: &'static str, message: String) {
+    let state = DEBUG_LOG_STATE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut state = state.lock().unwrap();
+    if state.get(key).map(|prev| prev == &message).unwrap_or(false) {
+        return;
+    }
+    state.insert(key, message.clone());
+    eprintln!("{message}");
+}
+
+#[cfg(target_os = "windows")]
+fn get_window_title(hwnd: winapi::shared::windef::HWND) -> String {
+    use winapi::um::winuser::GetWindowTextW;
+
+    unsafe {
+        let mut buf = [0u16; 260];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
 #[tauri::command]
 fn get_database(state: State<AppState>) -> Result<Database, String> {
     config::load_db(&state.db_path)
+}
+
+#[tauri::command]
+fn debug_overlay_log(message: String) {
+    eprintln!("[debug][overlay_frontend] {message}");
 }
 
 #[tauri::command]
@@ -116,6 +158,66 @@ fn get_overlay_items(state: State<AppState>) -> Vec<config::OverlayItem> {
     state.overlay_items.lock().unwrap().clone()
 }
 
+#[tauri::command]
+fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let db = config::load_db(&state.db_path)?;
+        let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) else {
+            return Ok((0, 0, 0, 0));
+        };
+        let hwnd = find_window_by_exe(&game.exe)
+            .ok_or_else(|| format!("Game window not found for '{}'", game.exe))?;
+        let scale = get_window_scale_factor(hwnd);
+        let bounds = get_game_client_bounds(&game.exe)?;
+        let (virtual_left, virtual_top, _, _) = get_virtual_screen_bounds();
+        let origin = (
+            physical_to_logical(bounds.left - virtual_left, scale),
+            physical_to_logical(bounds.top - virtual_top, scale),
+            physical_to_logical(bounds.width, scale),
+            physical_to_logical(bounds.height, scale),
+        );
+        debug_log_once(
+            "overlay_origin",
+            format!(
+                "[debug][overlay_origin] exe={} screen_left={} screen_top={} width={} height={} virtual_left={} virtual_top={} scale={:.3}",
+                game.exe,
+                origin.0,
+                origin.1,
+                origin.2,
+                origin.3,
+                virtual_left,
+                virtual_top,
+                scale,
+            ),
+        );
+        Ok(origin)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = state;
+        Ok((0, 0, 0, 0))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_active_game_viewport(handle: &tauri::AppHandle) -> Result<WindowClientBounds, String> {
+    let state = handle.state::<AppState>();
+    let db = config::load_db(&state.db_path)?;
+    let game = db.games.iter().find(|g| g.active_profile.is_some())
+        .ok_or_else(|| "No active game".to_string())?;
+    let bounds = get_game_client_bounds(&game.exe)?;
+    debug_log_once(
+        "active_viewport",
+        format!(
+            "[debug][viewport] exe={} left={} top={} width={} height={}",
+            game.exe, bounds.left, bounds.top, bounds.width, bounds.height,
+        ),
+    );
+    Ok(bounds)
+}
+
 fn start_overlay_listener(handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{OVERLAY_PORT}")).await {
@@ -135,17 +237,48 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/");
-                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
-                    drop(stream);
-                    match action {
-                        "/show" => set_overlay_visible(&handle, true),
-                        "/hide" => set_overlay_visible(&handle, false),
+                    let (status, body) = match action {
+                        "/show" => {
+                            set_overlay_visible(&handle, true);
+                            ("200 OK", Vec::new())
+                        }
+                        "/hide" => {
+                            set_overlay_visible(&handle, false);
+                            ("200 OK", Vec::new())
+                        }
+                        "/viewport" => {
+                            #[cfg(target_os = "windows")]
+                            {
+                                match get_active_game_viewport(&handle) {
+                                    Ok(bounds) => (
+                                        "200 OK",
+                                        format!("{},{},{},{}", bounds.left, bounds.top, bounds.width, bounds.height).into_bytes(),
+                                    ),
+                                    Err(err) => ("404 Not Found", err.into_bytes()),
+                                }
+                            }
+
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                ("501 Not Implemented", b"Not supported on this platform".to_vec())
+                            }
+                        }
                         _ => {
                             if let Some(window) = handle.get_webview_window("overlay") {
                                 let visible = window.is_visible().unwrap_or(false);
                                 set_overlay_visible(&handle, !visible);
                             }
+                            ("200 OK", Vec::new())
                         }
+                    };
+
+                    let headers = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes()).await;
+                    if !body.is_empty() {
+                        let _ = stream.write_all(&body).await;
                     }
                 });
             }
@@ -205,44 +338,220 @@ fn get_ahk_status(state: State<AppState>) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn find_window_by_exe(exe: &str) -> Option<winapi::shared::windef::HWND> {
-    use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPARAM, TRUE};
-    use winapi::shared::windef::HWND;
+fn get_window_process_name(hwnd: winapi::shared::windef::HWND) -> Option<String> {
+    use winapi::shared::minwindef::DWORD;
     use winapi::um::handleapi::CloseHandle;
     use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::psapi::GetModuleFileNameExW;
     use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-    use winapi::um::winuser::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
+    use winapi::um::winuser::GetWindowThreadProcessId;
 
-    struct FindData { target: String, hwnd: HWND }
+    unsafe {
+        let mut pid: DWORD = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return None;
+        }
+
+        let proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if proc.is_null() {
+            return None;
+        }
+
+        let mut buf = [0u16; 260];
+        let len = GetModuleFileNameExW(proc, std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
+        CloseHandle(proc);
+        if len == 0 {
+            return None;
+        }
+
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        Some(path.split('\\').last().unwrap_or("").to_lowercase())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_window_client_area(hwnd: winapi::shared::windef::HWND) -> i64 {
+    use winapi::shared::windef::RECT;
+    use winapi::um::winuser::GetClientRect;
+
+    unsafe {
+        let mut rect: RECT = std::mem::zeroed();
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return 0;
+        }
+
+        let width = (rect.right - rect.left).max(0);
+        let height = (rect.bottom - rect.top).max(0);
+        i64::from(width) * i64::from(height)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_window_scale_factor(hwnd: winapi::shared::windef::HWND) -> f64 {
+    use winapi::um::winuser::GetDpiForWindow;
+
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        if dpi == 0 {
+            1.0
+        } else {
+            dpi as f64 / 96.0
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn physical_to_logical(value: i32, scale: f64) -> i32 {
+    ((value as f64) / scale).round() as i32
+}
+
+#[cfg(target_os = "windows")]
+fn find_window_by_exe(exe: &str) -> Option<winapi::shared::windef::HWND> {
+    use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+    use winapi::shared::windef::HWND;
+    use winapi::um::winuser::{EnumWindows, GetForegroundWindow, IsWindowVisible};
+
+    struct FindData {
+        target: String,
+        hwnd: HWND,
+        area: i64,
+    }
+
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if !foreground.is_null()
+            && IsWindowVisible(foreground) != 0
+            && get_window_process_name(foreground).as_deref() == Some(&exe.to_lowercase())
+        {
+            debug_log_once(
+                "selected_window",
+                format!(
+                    "[debug][window] source=foreground exe={} hwnd=0x{:X} title={:?} area={}",
+                    exe,
+                    foreground as usize,
+                    get_window_title(foreground),
+                    get_window_client_area(foreground),
+                ),
+            );
+            return Some(foreground);
+        }
+    }
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let data = &mut *(lparam as *mut FindData);
         if IsWindowVisible(hwnd) == 0 { return TRUE; }
-        let mut pid: DWORD = 0;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        let proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
-        if proc.is_null() { return TRUE; }
-        let mut buf = [0u16; 260];
-        let len = GetModuleFileNameExW(proc, std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
-        CloseHandle(proc);
-        if len > 0 {
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            let name = path.split('\\').last().unwrap_or("").to_lowercase();
-            if name == data.target { data.hwnd = hwnd; return FALSE; }
+        if get_window_process_name(hwnd).as_deref() == Some(&data.target) {
+            let area = get_window_client_area(hwnd);
+            if area > data.area {
+                data.hwnd = hwnd;
+                data.area = area;
+            }
         }
         TRUE
     }
 
-    let mut data = FindData { target: exe.to_lowercase(), hwnd: std::ptr::null_mut() };
+    let mut data = FindData {
+        target: exe.to_lowercase(),
+        hwnd: std::ptr::null_mut(),
+        area: 0,
+    };
     unsafe { EnumWindows(Some(enum_cb), &mut data as *mut _ as LPARAM); }
-    if data.hwnd.is_null() { None } else { Some(data.hwnd) }
+    if data.hwnd.is_null() {
+        debug_log_once(
+            "selected_window",
+            format!("[debug][window] source=enum exe={} hwnd=<none>", exe),
+        );
+        None
+    } else {
+        debug_log_once(
+            "selected_window",
+            format!(
+                "[debug][window] source=largest exe={} hwnd=0x{:X} title={:?} area={}",
+                exe,
+                data.hwnd as usize,
+                get_window_title(data.hwnd),
+                data.area,
+            ),
+        );
+        Some(data.hwnd)
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn focus_game_window(exe: &str) {
     if let Some(hwnd) = find_window_by_exe(exe) {
         unsafe { winapi::um::winuser::SetForegroundWindow(hwnd); }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_window_client_bounds(hwnd: winapi::shared::windef::HWND) -> Result<WindowClientBounds, String> {
+    use winapi::shared::windef::{POINT, RECT};
+    use winapi::um::winuser::{ClientToScreen, GetClientRect};
+
+    unsafe {
+        let mut rect: RECT = std::mem::zeroed();
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return Err("Failed to read game client area".to_string());
+        }
+
+        let mut top_left = POINT { x: rect.left, y: rect.top };
+        if ClientToScreen(hwnd, &mut top_left) == 0 {
+            return Err("Failed to convert game client origin".to_string());
+        }
+
+        let bounds = WindowClientBounds {
+            left: top_left.x,
+            top: top_left.y,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+        };
+        debug_log_once(
+            "client_bounds",
+            format!(
+                "[debug][client_bounds] hwnd=0x{:X} title={:?} left={} top={} width={} height={}",
+                hwnd as usize,
+                get_window_title(hwnd),
+                bounds.left,
+                bounds.top,
+                bounds.width,
+                bounds.height,
+            ),
+        );
+        Ok(bounds)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_game_client_bounds(exe: &str) -> Result<WindowClientBounds, String> {
+    let hwnd = find_window_by_exe(exe)
+        .ok_or_else(|| format!("Game window not found for '{exe}'"))?;
+    let bounds = get_window_client_bounds(hwnd)?;
+    debug_log_once(
+        "game_bounds",
+        format!(
+            "[debug][game_bounds] exe={} hwnd=0x{:X} left={} top={} width={} height={}",
+            exe, hwnd as usize, bounds.left, bounds.top, bounds.width, bounds.height,
+        ),
+    );
+    Ok(bounds)
+}
+
+#[cfg(target_os = "windows")]
+fn get_virtual_screen_bounds() -> (i32, i32, i32, i32) {
+    use winapi::um::winuser::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
     }
 }
 
@@ -373,13 +682,16 @@ fn make_borderless_fullscreen(state: State<AppState>, exe: String) -> Result<boo
 }
 
 #[tauri::command]
-async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(i32, i32), String> {
+async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(f64, f64), String> {
     #[cfg(target_os = "windows")]
     focus_game_window(&exe);
 
     window.minimize().map_err(|e| e.to_string())?;
 
-    let result = tokio::task::spawn_blocking(|| -> Result<(i32, i32), String> {
+    #[cfg(target_os = "windows")]
+    let exe_for_pick = exe.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(f64, f64), String> {
         use std::time::{Duration, Instant};
         std::thread::sleep(Duration::from_millis(400));
 
@@ -401,10 +713,39 @@ async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(i
                 if (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
+                    let bounds = get_game_client_bounds(&exe_for_pick)?;
                     while (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
                         std::thread::sleep(Duration::from_millis(15));
                     }
-                    return Ok((pt.x, pt.y));
+                    let rel_x = pt.x - bounds.left;
+                    let rel_y = pt.y - bounds.top;
+                    let x = if bounds.width <= 0 {
+                        0.0
+                    } else {
+                        (((rel_x as f64 / bounds.width as f64) * 1000.0).round() / 10.0)
+                            .clamp(0.0, 100.0)
+                    };
+                    let y = if bounds.height <= 0 {
+                        0.0
+                    } else {
+                        (((rel_y as f64 / bounds.height as f64) * 1000.0).round() / 10.0)
+                            .clamp(0.0, 100.0)
+                    };
+                    eprintln!(
+                        "[debug][pick] exe={} click_screen=({}, {}) bounds=({}, {}, {}, {}) rel=({}, {}) percent=({:.1}, {:.1})",
+                        exe_for_pick,
+                        pt.x,
+                        pt.y,
+                        bounds.left,
+                        bounds.top,
+                        bounds.width,
+                        bounds.height,
+                        rel_x,
+                        rel_y,
+                        x,
+                        y,
+                    );
+                    return Ok((x, y));
                 }
             }
         }
@@ -573,6 +914,28 @@ pub fn run() {
                 borderless_windows: Mutex::new(HashMap::new()),
             });
 
+            #[cfg(target_os = "windows")]
+            let (overlay_left, overlay_top, overlay_width, overlay_height) = {
+                use winapi::um::winuser::GetDesktopWindow;
+
+                let (physical_left, physical_top, physical_width, physical_height) = get_virtual_screen_bounds();
+                let scale = get_window_scale_factor(unsafe { GetDesktopWindow() });
+                (
+                    physical_to_logical(physical_left, scale),
+                    physical_to_logical(physical_top, scale),
+                    physical_to_logical(physical_width, scale),
+                    physical_to_logical(physical_height, scale),
+                )
+            };
+
+            #[cfg(not(target_os = "windows"))]
+            let (overlay_left, overlay_top, overlay_width, overlay_height) = (0, 0, 3840, 2160);
+
+            eprintln!(
+                "[debug][overlay_window] left={} top={} width={} height={}",
+                overlay_left, overlay_top, overlay_width, overlay_height,
+            );
+
             let overlay = tauri::WebviewWindowBuilder::new(
                 app,
                 "overlay",
@@ -582,8 +945,8 @@ pub fn run() {
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
-            .inner_size(3840.0, 2160.0)
-            .position(0.0, 0.0)
+            .inner_size(overlay_width as f64, overlay_height as f64)
+            .position(overlay_left as f64, overlay_top as f64)
             .visible(false)
             .build()
             .expect("failed to create overlay window");
@@ -605,7 +968,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            debug_overlay_log,
             get_overlay_items,
+            get_overlay_origin,
             toggle_overlay,
             pick_coordinate,
             kill_game,

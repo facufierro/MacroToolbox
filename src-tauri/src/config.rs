@@ -35,10 +35,10 @@ pub struct Profile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayItem {
-    Timer { id: String, x: i32, y: i32, duration_ms: u64, label: String },
-    Icon  { id: String, x: i32, y: i32, w: u32, h: u32, src: Option<String> },
-    Bar   { id: String, x: i32, y: i32, w: u32, h: u32, color: String, max_value: f64 },
-    Text  { id: String, x: i32, y: i32, font_size: u32, color: String, content: String },
+    Timer { id: String, x: f64, y: f64, duration_ms: u64, label: String },
+    Icon  { id: String, x: f64, y: f64, w: u32, h: u32, src: Option<String> },
+    Bar   { id: String, x: f64, y: f64, w: u32, h: u32, color: String, max_value: f64 },
+    Text  { id: String, x: f64, y: f64, font_size: u32, color: String, content: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

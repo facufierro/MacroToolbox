@@ -229,10 +229,11 @@ const BEHAVIOR_ENGINE: &str = r#"ExecuteBehavior(str) {
             } else if (token = "lock") {
                 BlockInput "MouseMove"
                 locked := true
-            } else if RegExMatch(token, "i)^goto\((\d+)\s*,\s*(\d+)\)$", &m) {
+            } else if RegExMatch(token, "i)^goto\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)$", &m) {
                 SendMode "Event"
                 SetMouseDelay -1
-                MouseMove Integer(m[1]), Integer(m[2]), 0
+                GetGameViewport(&gameX, &gameY, &gameW, &gameH)
+                MouseMove gameX + ResolveCoord(m[1], gameW), gameY + ResolveCoord(m[2], gameH), 0
             } else if RegExMatch(token, "i)^press\((.+)\)$", &m) {
                 for k in StrSplit(m[1], ",")
                     DoPress(Trim(k))
@@ -249,6 +250,74 @@ const BEHAVIOR_ENGINE: &str = r#"ExecuteBehavior(str) {
         if locked
             BlockInput "MouseMoveOff"
     }
+}
+
+ResolveCoord(value, size) {
+    numeric := Number(value)
+    if (Abs(numeric) <= 100)
+        return Round((numeric / 100) * size)
+    return Round(numeric)
+}
+
+GetGameViewport(&x, &y, &w, &h) {
+    if TryGetViewportFromApp(&x, &y, &w, &h)
+        return
+
+    WinGetClientPos &x, &y, &w, &h, "A"
+    bestArea := 0
+
+    for childHwnd in WinGetControlsHwnd("A") {
+        if !DllCall("IsWindowVisible", "ptr", childHwnd, "int")
+            continue
+
+        rect := Buffer(16, 0)
+        if !DllCall("GetWindowRect", "ptr", childHwnd, "ptr", rect.Ptr, "int")
+            continue
+
+        left := NumGet(rect, 0, "int")
+        top := NumGet(rect, 4, "int")
+        right := NumGet(rect, 8, "int")
+        bottom := NumGet(rect, 12, "int")
+
+        childX := Max(left, x)
+        childY := Max(top, y)
+        childRight := Min(right, x + w)
+        childBottom := Min(bottom, y + h)
+        childW := childRight - childX
+        childH := childBottom - childY
+        if (childW <= 0 || childH <= 0)
+            continue
+
+        area := childW * childH
+        if (area > bestArea) {
+            bestArea := area
+            x := childX
+            y := childY
+            w := childW
+            h := childH
+        }
+    }
+}
+
+TryGetViewportFromApp(&x, &y, &w, &h) {
+    try {
+        xhr := ComObject("WinHttp.WinHttpRequest.5.1")
+        xhr.Open("GET", "http://127.0.0.1:17823/viewport", false)
+        xhr.Send()
+        if (xhr.Status != 200)
+            return false
+
+        parts := StrSplit(Trim(xhr.ResponseText), ",")
+        if (parts.Length != 4)
+            return false
+
+        x := Integer(parts[1])
+        y := Integer(parts[2])
+        w := Integer(parts[3])
+        h := Integer(parts[4])
+        return (w > 0 && h > 0)
+    }
+    return false
 }
 
 DoPress(keyStr) {
