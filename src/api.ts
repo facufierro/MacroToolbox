@@ -11,6 +11,9 @@ export const api = {
   pickCoordinate: (exe: string) =>
     invoke<[number, number]>("pick_coordinate", { exe }),
 
+  makeBorderlessFullscreen: (exe: string) =>
+    invoke<void>("make_borderless_fullscreen", { exe }),
+
   upsertGame: (game: Game) =>
     invoke<Database>("upsert_game", { game }),
 

@@ -118,14 +118,14 @@ fn get_ahk_status(state: State<AppState>) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn focus_game_window(exe: &str) {
+fn find_window_by_exe(exe: &str) -> Option<winapi::shared::windef::HWND> {
     use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPARAM, TRUE};
     use winapi::shared::windef::HWND;
     use winapi::um::handleapi::CloseHandle;
     use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::psapi::GetModuleFileNameExW;
     use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-    use winapi::um::winuser::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow};
+    use winapi::um::winuser::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
 
     struct FindData { target: String, hwnd: HWND }
 
@@ -142,21 +142,48 @@ fn focus_game_window(exe: &str) {
         if len > 0 {
             let path = String::from_utf16_lossy(&buf[..len as usize]);
             let name = path.split('\\').last().unwrap_or("").to_lowercase();
-            if name == data.target {
-                data.hwnd = hwnd;
-                return FALSE;
-            }
+            if name == data.target { data.hwnd = hwnd; return FALSE; }
         }
         TRUE
     }
 
     let mut data = FindData { target: exe.to_lowercase(), hwnd: std::ptr::null_mut() };
-    unsafe {
-        EnumWindows(Some(enum_cb), &mut data as *mut _ as LPARAM);
-        if !data.hwnd.is_null() {
-            SetForegroundWindow(data.hwnd);
-        }
+    unsafe { EnumWindows(Some(enum_cb), &mut data as *mut _ as LPARAM); }
+    if data.hwnd.is_null() { None } else { Some(data.hwnd) }
+}
+
+#[cfg(target_os = "windows")]
+fn focus_game_window(exe: &str) {
+    if let Some(hwnd) = find_window_by_exe(exe) {
+        unsafe { winapi::um::winuser::SetForegroundWindow(hwnd); }
     }
+}
+
+#[tauri::command]
+fn make_borderless_fullscreen(exe: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = find_window_by_exe(&exe)
+            .ok_or_else(|| format!("Game window not found for '{exe}'"))?;
+        unsafe {
+            use winapi::um::winuser::*;
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_OVERLAPPEDWINDOW) as i32);
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(monitor, &mut mi);
+            let r = mi.rcMonitor;
+            SetWindowPos(
+                hwnd, HWND_TOP,
+                r.left, r.top, r.right - r.left, r.bottom - r.top,
+                SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Not supported on this platform".to_string())
 }
 
 #[tauri::command]
@@ -341,6 +368,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_database,
             pick_coordinate,
+            make_borderless_fullscreen,
             read_image_as_data_url,
             upsert_game,
             delete_game,

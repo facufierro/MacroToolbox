@@ -448,6 +448,10 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <p className="exe-label">{game.exe}</p>
           <div className="game-view__actions">
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editGame", game })}>Edit</button>
+            <button className="btn btn--ghost btn--sm" onClick={async () => {
+              try { await api.makeBorderlessFullscreen(game.exe); }
+              catch (e) { alert(String(e)); }
+            }}>⛶ Borderless</button>
             <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Game</button>
           </div>
         </div>
