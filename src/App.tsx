@@ -10,6 +10,7 @@ type Modal =
   | { type: "addGame" }
   | { type: "editGame"; game: Game }
   | { type: "addProfile"; gameId: string }
+  | { type: "editProfile"; gameId: string; profile: Profile }
   | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -110,15 +111,17 @@ function GameModal({ initial, onSave, onClose }: {
   );
 }
 
-function ProfileModal({ onSave, onClose }: {
+function ProfileModal({ initial = "", title, onSave, onClose }: {
+  initial?: string;
+  title: string;
   onSave: (name: string) => void;
   onClose: () => void;
 }) {
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initial);
   return (
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>New Profile</h2>
+        <h2>{title}</h2>
         <label>Name
           <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Default" autoFocus />
         </label>
@@ -170,11 +173,12 @@ function HotkeyModal({ initial, onSave, onClose }: {
 
 // ── Game detail view ──────────────────────────────────────────────────────────
 
-function GameView({ game, running, onDb, onModal }: {
+function GameView({ game, running, onDb, onModal, onBack }: {
   game: Game;
   running: boolean;
   onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
+  onBack: () => void;
 }) {
   const [profileId, setProfileId] = useState<string>(
     game.active_profile ?? game.profiles[0]?.id ?? ""
@@ -221,9 +225,12 @@ function GameView({ game, running, onDb, onModal }: {
 
   async function deleteGame() {
     if (!confirm(`Delete "${game.name}"?`)) return;
-    await api.deactivateAhk();
-    const db = await api.deleteGame(game.id);
-    onDb(db);
+    try {
+      if (game.active_profile) await api.deactivateAhk(game.id);
+      const db = await api.deleteGame(game.id);
+      onDb(db);
+      onBack();
+    } catch (e) { alert(String(e)); }
   }
 
   const isActive = game.active_profile === profileId;
@@ -256,6 +263,9 @@ function GameView({ game, running, onDb, onModal }: {
         <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "addProfile", gameId: game.id })}>
           + Profile
         </button>
+        {profile && (
+          <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editProfile", gameId: game.id, profile })}>Rename</button>
+        )}
         {profileId && (
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
@@ -411,6 +421,14 @@ export default function App() {
     } catch (e) { alert(`Error saving profile: ${e}`); }
   }
 
+  async function handleProfileRename(gameId: string, profile: Profile, name: string) {
+    try {
+      const updated = await api.upsertProfile(gameId, { ...profile, name });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error renaming profile: ${e}`); }
+  }
+
   async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
     try {
       const game = db!.games.find(g => g.id === gameId)!;
@@ -467,7 +485,8 @@ export default function App() {
           <SettingsView db={db} onDb={handleDb} />
         )}
         {view === "game" && selectedGame && (
-          <GameView game={selectedGame} running={running} onDb={handleDb} onModal={setModal} />
+          <GameView game={selectedGame} running={running} onDb={handleDb} onModal={setModal}
+            onBack={() => { setSelectedGameId(null); setView("dashboard"); }} />
         )}
         {view === "dashboard" && (
           <div className="dashboard">
@@ -495,7 +514,12 @@ export default function App() {
       )}
       {modal?.type === "addProfile" && (() => {
         const { gameId } = modal;
-        return <ProfileModal onSave={name => handleProfileSave(gameId, name)} onClose={() => setModal(null)} />;
+        return <ProfileModal title="New Profile" onSave={name => handleProfileSave(gameId, name)} onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "editProfile" && (() => {
+        const { gameId, profile } = modal;
+        return <ProfileModal title="Rename Profile" initial={profile.name}
+          onSave={name => handleProfileRename(gameId, profile, name)} onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editHotkey" && (() => {
         const { gameId, profileId: pid, index, hotkey } = modal;
