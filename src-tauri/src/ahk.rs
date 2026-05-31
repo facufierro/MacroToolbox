@@ -122,6 +122,11 @@ GroupAdd "GAME", "ahk_exe {exe}"
 {toggle_key}:: {{
     global enabled
     enabled := !enabled
+    try {{
+        xhr := ComObject("WinHttp.WinHttpRequest.5.1")
+        xhr.Open("GET", "http://127.0.0.1:17823/", false)
+        xhr.Send()
+    }}
 }}
 #HotIf
 

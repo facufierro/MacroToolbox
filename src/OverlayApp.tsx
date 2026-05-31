@@ -8,12 +8,16 @@ export default function OverlayApp() {
   const [items, setItems] = useState<OverlayItem[]>([]);
 
   useEffect(() => {
-    // Fetch current items immediately (avoids race with activate_profile event)
-    invoke<OverlayItem[]>("get_overlay_items").then(setItems).catch(() => {});
+    console.log("[overlay] OverlayApp mounted");
+    invoke<OverlayItem[]>("get_overlay_items")
+      .then(items => { console.log("[overlay] get_overlay_items:", items); setItems(items); })
+      .catch(e => console.error("[overlay] get_overlay_items error:", e));
 
     let unlisten: (() => void) | undefined;
-    listen<OverlayItem[]>("overlay-items", e => setItems(e.payload))
-      .then(fn => { unlisten = fn; });
+    listen<OverlayItem[]>("overlay-items", e => {
+      console.log("[overlay] overlay-items event:", e.payload);
+      setItems(e.payload);
+    }).then(fn => { unlisten = fn; });
     return () => unlisten?.();
   }, []);
 

@@ -177,7 +177,7 @@ function GameModal({ initial, onSave, onClose }: {
         <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(default: `)</span>
           <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} />
         </label>
-        <label>Toggle Overlay Key
+        <label>Toggle Overlay Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(use a modifier, e.g. ctrl F12)</span>
           <KeyInput value={toggleOverlayKey} onChange={setToggleOverlayKey} />
         </label>
         <div className="modal__actions">

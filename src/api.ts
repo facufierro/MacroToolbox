@@ -14,8 +14,10 @@ export const api = {
   getOverlayItems: () =>
     invoke<import("./types").OverlayItem[]>("get_overlay_items"),
 
-  toggleOverlay: () =>
-    invoke<void>("toggle_overlay"),
+  toggleOverlay: () => {
+    console.log("[overlay] toggleOverlay called");
+    return invoke<void>("toggle_overlay");
+  },
 
   killGame: (exe: string) =>
     invoke<void>("kill_game", { exe }),

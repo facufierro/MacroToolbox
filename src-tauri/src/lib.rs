@@ -1,17 +1,17 @@
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 mod ahk;
 mod config;
 
 use config::{Database, Game, Profile, Settings};
 
+const OVERLAY_PORT: u16 = 17823;
+
 pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     pub ahk_manager: Mutex<ahk::AhkManager>,
-    pub overlay_shortcut: Mutex<Option<String>>,
     pub overlay_items: Mutex<Vec<config::OverlayItem>>,
 }
 
@@ -91,73 +91,28 @@ fn get_overlay_items(state: State<AppState>) -> Vec<config::OverlayItem> {
     state.overlay_items.lock().unwrap().clone()
 }
 
-fn ahk_to_shortcut(key: &str) -> String {
-    key.split_whitespace().map(|p| match p.to_lowercase().as_str() {
-        "ctrl"      => "Ctrl".to_string(),
-        "shift"     => "Shift".to_string(),
-        "alt"       => "Alt".to_string(),
-        "win"       => "Super".to_string(),
-        "`"         => "Backquote".to_string(),
-        "\\"        => "Backslash".to_string(),
-        "space"     => "Space".to_string(),
-        "enter"     => "Enter".to_string(),
-        "esc"       => "Escape".to_string(),
-        "tab"       => "Tab".to_string(),
-        "backspace" => "Backspace".to_string(),
-        "del"       => "Delete".to_string(),
-        "ins"       => "Insert".to_string(),
-        "home"      => "Home".to_string(),
-        "end"       => "End".to_string(),
-        "pgup"      => "PageUp".to_string(),
-        "pgdn"      => "PageDown".to_string(),
-        "up"        => "ArrowUp".to_string(),
-        "down"      => "ArrowDown".to_string(),
-        "left"      => "ArrowLeft".to_string(),
-        "right"     => "ArrowRight".to_string(),
-        other       => {
-            if other.starts_with('f') && other[1..].parse::<u32>().is_ok() {
-                format!("F{}", &other[1..])
-            } else if other.len() == 1 && other.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
-                other.to_uppercase()
-            } else {
-                other.to_uppercase()
+fn start_overlay_listener(handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{OVERLAY_PORT}")).await {
+            Ok(l) => { eprintln!("[overlay] TCP listener bound on port {OVERLAY_PORT}"); l }
+            Err(e) => { eprintln!("[overlay] TCP bind FAILED: {e}"); return; }
+        };
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    drop(stream);
+                    if let Some(w) = handle.get_webview_window("overlay") {
+                        let visible = w.is_visible().unwrap_or(false);
+                        eprintln!("[overlay] TCP toggle: visible={visible}");
+                        let _ = if visible { w.hide() } else { w.show() };
+                    }
+                });
             }
         }
-    }).collect::<Vec<_>>().join("+")
-}
-
-fn register_overlay_shortcut(app: &tauri::AppHandle, state: &AppState, key: &str) {
-    let shortcut = ahk_to_shortcut(key);
-    if let Some(old) = state.overlay_shortcut.lock().unwrap().take() {
-        let _ = app.global_shortcut().unregister(old.as_str());
-    }
-    let result = app.global_shortcut().on_shortcut(
-        shortcut.as_str(),
-        |app_handle, _, event| {
-            use tauri_plugin_global_shortcut::ShortcutState;
-            if event.state() == ShortcutState::Pressed {
-                if let Some(w) = app_handle.get_webview_window("overlay") {
-                    if w.is_visible().unwrap_or(false) {
-                        let _ = w.hide();
-                    } else {
-                        let _ = w.show();
-                    }
-                }
-            }
-        },
-    );
-    if result.is_ok() {
-        *state.overlay_shortcut.lock().unwrap() = Some(shortcut);
-    }
-}
-
-fn unregister_overlay_shortcut(app: &tauri::AppHandle, state: &AppState) {
-    if let Some(old) = state.overlay_shortcut.lock().unwrap().take() {
-        let _ = app.global_shortcut().unregister(old.as_str());
-    }
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.hide();
-    }
+    });
 }
 
 #[tauri::command]
@@ -179,18 +134,11 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
     state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path)?;
     config::save_db(&state.db_path, &db)?;
 
-    // Send items to overlay window (stays hidden until toggle key pressed)
-    let items = db.games.iter().find(|g| g.id == game_id)
-        .and_then(|g| g.profiles.iter().find(|p| p.id == profile_id))
+    let game = db.games.iter().find(|g| g.id == game_id).unwrap();
+    let items = game.profiles.iter().find(|p| p.id == profile_id)
         .map(|p| p.overlay_items.as_slice())
         .unwrap_or_default();
     send_overlay(&app, items);
-
-    // Register overlay toggle — same key as hotkeys toggle (default backtick)
-    let toggle_key = db.games.iter().find(|g| g.id == game_id)
-        .and_then(|g| g.toggle_hotkeys_key.clone())
-        .unwrap_or_else(|| "`".to_string());
-    register_overlay_shortcut(&app, &state, &toggle_key);
 
     Ok(db)
 }
@@ -203,7 +151,7 @@ fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String
         game.active_profile = None;
     }
     config::save_db(&state.db_path, &db)?;
-    unregister_overlay_shortcut(&app, &state);
+    if let Some(w) = app.get_webview_window("overlay") { let _ = w.hide(); }
     Ok(db)
 }
 
@@ -391,11 +339,14 @@ fn read_image_as_data_url(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn toggle_overlay(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        if w.is_visible().unwrap_or(false) {
-            let _ = w.hide();
-        } else {
-            let _ = w.show();
+    eprintln!("[overlay] toggle_overlay command called");
+    match app.get_webview_window("overlay") {
+        None => eprintln!("[overlay] window not found in toggle_overlay"),
+        Some(w) => {
+            let visible = w.is_visible().unwrap_or(false);
+            eprintln!("[overlay] visible={visible}, toggling");
+            let result = if visible { w.hide() } else { w.show() };
+            eprintln!("[overlay] toggle result: {result:?}");
         }
     }
 }
@@ -471,8 +422,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
-                        let app_state = handle.state::<AppState>();
-                        unregister_overlay_shortcut(&handle, &app_state);
+                        if let Some(w) = handle.get_webview_window("overlay") { let _ = w.hide(); }
                     }
                 }
             }
@@ -485,7 +435,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window.app_handle().state::<AppState>()
@@ -509,7 +458,6 @@ pub fn run() {
                 db_path,
                 scripts_path: scripts_dir,
                 ahk_manager: Mutex::new(ahk::AhkManager::new()),
-                overlay_shortcut: Mutex::new(None),
                 overlay_items: Mutex::new(vec![]),
             });
 
@@ -530,6 +478,7 @@ pub fn run() {
 
             let _ = overlay.set_ignore_cursor_events(true);
 
+            start_overlay_listener(app.handle().clone());
             start_watcher(app.handle().clone());
             Ok(())
         })
