@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 use tauri::{Emitter, Manager, State};
 
 mod ahk;
@@ -8,11 +8,20 @@ use config::{Database, Game, Profile, Settings};
 
 const OVERLAY_PORT: u16 = 17823;
 
+#[cfg(target_os = "windows")]
+struct BorderlessWindowState {
+    style: i32,
+    ex_style: i32,
+    placement: winapi::um::winuser::WINDOWPLACEMENT,
+}
+
 pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     pub ahk_manager: Mutex<ahk::AhkManager>,
     pub overlay_items: Mutex<Vec<config::OverlayItem>>,
+    #[cfg(target_os = "windows")]
+    borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
 }
 
 #[tauri::command]
@@ -243,27 +252,86 @@ fn kill_game(exe: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn make_borderless_fullscreen(exe: String) -> Result<(), String> {
+fn make_borderless_fullscreen(state: State<AppState>, exe: String) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
+        let key = exe.to_lowercase();
         let hwnd = find_window_by_exe(&exe)
             .ok_or_else(|| format!("Game window not found for '{exe}'"))?;
+
         unsafe {
             use winapi::um::winuser::*;
-            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_OVERLAPPEDWINDOW) as i32);
+
+            let mut borderless_windows = state.borderless_windows.lock().unwrap();
+            if let Some(saved) = borderless_windows.remove(&key) {
+                let mut placement = saved.placement;
+                placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+
+                SetWindowLongW(hwnd, GWL_STYLE, saved.style);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, saved.ex_style);
+
+                if SetWindowPlacement(hwnd, &placement) == 0 {
+                    return Err("Failed to restore previous window placement".to_string());
+                }
+
+                if SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE,
+                ) == 0 {
+                    return Err("Failed to restore previous window frame".to_string());
+                }
+
+                return Ok(false);
+            }
+
+            let style = GetWindowLongW(hwnd, GWL_STYLE);
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(hwnd, &mut placement) == 0 {
+                return Err("Failed to read current window placement".to_string());
+            }
+
             let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             let mut mi: MONITORINFO = std::mem::zeroed();
             mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-            GetMonitorInfoW(monitor, &mut mi);
+            if GetMonitorInfoW(monitor, &mut mi) == 0 {
+                return Err("Failed to read monitor bounds".to_string());
+            }
+
+            SetWindowLongW(hwnd, GWL_STYLE, style & !(WS_OVERLAPPEDWINDOW as i32));
+            SetWindowLongW(
+                hwnd,
+                GWL_EXSTYLE,
+                ex_style & !((WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE) as i32),
+            );
+
             let r = mi.rcMonitor;
-            SetWindowPos(
+            if SetWindowPos(
                 hwnd, HWND_TOP,
                 r.left, r.top, r.right - r.left, r.bottom - r.top,
                 SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            ) == 0 {
+                SetWindowLongW(hwnd, GWL_STYLE, style);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style);
+                return Err("Failed to enable borderless fullscreen".to_string());
+            }
+
+            borderless_windows.insert(
+                key,
+                BorderlessWindowState {
+                    style,
+                    ex_style,
+                    placement,
+                },
             );
         }
-        Ok(())
+        Ok(true)
     }
     #[cfg(not(target_os = "windows"))]
     Err("Not supported on this platform".to_string())
@@ -460,6 +528,8 @@ pub fn run() {
                 scripts_path: scripts_dir,
                 ahk_manager: Mutex::new(ahk::AhkManager::new()),
                 overlay_items: Mutex::new(vec![]),
+                #[cfg(target_os = "windows")]
+                borderless_windows: Mutex::new(HashMap::new()),
             });
 
             let overlay = tauri::WebviewWindowBuilder::new(

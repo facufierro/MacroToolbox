@@ -23,7 +23,7 @@ export const api = {
     invoke<void>("kill_game", { exe }),
 
   makeBorderlessFullscreen: (exe: string) =>
-    invoke<void>("make_borderless_fullscreen", { exe }),
+    invoke<boolean>("make_borderless_fullscreen", { exe }),
 
   upsertGame: (game: Game) =>
     invoke<Database>("upsert_game", { game }),

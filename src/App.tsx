@@ -628,6 +628,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
     game.active_profile ?? game.profiles[0]?.id ?? ""
   );
   const [tab, setTab] = useState<"hotkeys" | "overlay">("hotkeys");
+  const [isBorderless, setIsBorderless] = useState(false);
 
   useEffect(() => {
     const valid = game.profiles.some(p => p.id === profileId);
@@ -635,6 +636,10 @@ function GameView({ game, running, onDb, onModal, onBack }: {
       setProfileId(game.active_profile ?? game.profiles[0]?.id ?? "");
     }
   }, [game.id, game.profiles.length, game.active_profile]);
+
+  useEffect(() => {
+    setIsBorderless(false);
+  }, [game.id]);
 
   const profile = game.profiles.find(p => p.id === profileId);
 
@@ -693,9 +698,9 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <div className="game-view__actions">
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editGame", game })}>Edit</button>
             <button className="btn btn--ghost btn--sm" onClick={async () => {
-              try { await api.makeBorderlessFullscreen(game.exe); }
+              try { setIsBorderless(await api.makeBorderlessFullscreen(game.exe)); }
               catch (e) { alert(String(e)); }
-            }}>⛶ Borderless</button>
+            }}>⛶ {isBorderless ? "Restore" : "Borderless"}</button>
             <button className="btn btn--danger btn--sm" onClick={async () => {
               if (!confirm(`Force-kill "${game.exe}"?`)) return;
               try { await api.killGame(game.exe); }
