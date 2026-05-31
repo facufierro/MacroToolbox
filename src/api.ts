@@ -8,6 +8,9 @@ export const api = {
   readImageAsDataUrl: (path: string) =>
     invoke<string>("read_image_as_data_url", { path }),
 
+  pickCoordinate: (exe: string) =>
+    invoke<[number, number]>("pick_coordinate", { exe }),
+
   upsertGame: (game: Game) =>
     invoke<Database>("upsert_game", { game }),
 

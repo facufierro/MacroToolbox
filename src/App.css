@@ -396,6 +396,54 @@ input, textarea, select {
 input:focus, textarea:focus { border-color: var(--accent); }
 textarea { resize: vertical; }
 
+/* ── Step builder ──────────────────────────────────────────────────────────── */
+.steps-section { display: flex; flex-direction: column; gap: 8px; }
+.steps-label { font-size: 0.85rem; color: var(--text2); }
+.steps-list { display: flex; flex-direction: column; gap: 4px; min-height: 40px; }
+.steps-empty { color: var(--text2); font-size: 0.85rem; padding: 10px 0; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); }
+
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+}
+.step-row__type {
+  font-family: monospace;
+  font-size: 0.82rem;
+  color: var(--accent-h);
+  min-width: 88px;
+  flex-shrink: 0;
+}
+.step-row__params { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.step-row__params input { min-width: 0; }
+.step-row__btns { display: flex; gap: 2px; flex-shrink: 0; }
+
+.step-add-btns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding-top: 4px; }
+.step-add-label { font-size: 0.82rem; color: var(--text2); }
+
+.key-recording {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent-h);
+  font-size: 0.88rem;
+  cursor: pointer;
+  animation: kpulse 0.9s ease-in-out infinite;
+}
+@keyframes kpulse {
+  0%, 100% { border-color: var(--accent); }
+  50% { border-color: var(--accent-h); box-shadow: 0 0 6px var(--accent); }
+}
+
+.goto-input { display: flex; align-items: center; gap: 6px; flex: 1; }
+.goto-input input { width: 72px; }
+
 .hint { font-size: 0.78rem; color: var(--text2); line-height: 1.6; }
 .hint code {
   background: var(--bg3);

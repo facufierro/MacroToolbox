@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type { Database, Game, Profile, Hotkey } from "./types";
@@ -11,7 +11,7 @@ type Modal =
   | { type: "editGame"; game: Game }
   | { type: "addProfile"; gameId: string }
   | { type: "editProfile"; gameId: string; profile: Profile }
-  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey };
+  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -134,35 +134,236 @@ function ProfileModal({ initial = "", title, onSave, onClose }: {
   );
 }
 
-function HotkeyModal({ initial, onSave, onClose }: {
+// ── Step types & helpers ──────────────────────────────────────────────────────
+
+type Step =
+  | { type: "press" | "hold"; key: string }
+  | { type: "goto"; x: string; y: string }
+  | { type: "sleep"; ms: string }
+  | { type: "send"; text: string }
+  | { type: "lock" | "savecursor" | "restorecursor" };
+
+function parseSteps(behavior: string): Step[] {
+  if (!behavior.trim()) return [];
+  return behavior.split(";").map(s => s.trim()).filter(Boolean).flatMap(s => {
+    let m: RegExpMatchArray | null;
+    if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
+    if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
+    if ((m = s.match(/^goto\((-?\d+),\s*(-?\d+)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
+    if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
+    if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
+    if (s === "lock") return [{ type: "lock" as const }];
+    if (s === "savecursor") return [{ type: "savecursor" as const }];
+    if (s === "restorecursor") return [{ type: "restorecursor" as const }];
+    return [];
+  });
+}
+
+function stepsToString(steps: Step[]): string {
+  return steps.map(s => {
+    switch (s.type) {
+      case "press": return `press(${s.key})`;
+      case "hold":  return `hold(${s.key})`;
+      case "goto":  return `goto(${s.x},${s.y})`;
+      case "sleep": return `sleep(${s.ms})`;
+      case "send":  return `send(${s.text})`;
+      default:      return s.type;
+    }
+  }).join(";");
+}
+
+function toAhkKey(e: KeyboardEvent): string {
+  if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return "";
+  const mods: string[] = [];
+  if (e.ctrlKey)  mods.push("ctrl");
+  if (e.shiftKey) mods.push("shift");
+  if (e.altKey)   mods.push("alt");
+  if (e.metaKey)  mods.push("win");
+  const keyMap: Record<string, string> = {
+    " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
+    Backspace: "Backspace", Delete: "Del", Insert: "Ins", Home: "Home", End: "End",
+    PrintScreen: "PrintScreen", NumLock: "NumLock", CapsLock: "CapsLock",
+  };
+  let key = e.key;
+  if (key in keyMap) key = keyMap[key];
+  else if (/^F\d+$/.test(key)) key = key.toLowerCase();
+  else if (key.length === 1) key = key.toLowerCase();
+  return [...mods, key].join(" ");
+}
+
+// ── Step sub-components ───────────────────────────────────────────────────────
+
+function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    if (!recording) return;
+    const handler = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const key = toAhkKey(e);
+      if (key) { onChangeRef.current(key); setRecording(false); }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [recording]);
+
+  return recording ? (
+    <div className="key-recording" onClick={() => setRecording(false)}>Press any key…</div>
+  ) : (
+    <div className="input-row" style={{ margin: 0, flex: 1 }}>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder="key" />
+      <button className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} title="Record key">⌨</button>
+    </div>
+  );
+}
+
+function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
+  const [picking, setPicking] = useState(false);
+
+  async function pick() {
+    setPicking(true);
+    try {
+      const [px, py] = await api.pickCoordinate(gameExe);
+      onChange(String(px), String(py));
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setPicking(false);
+    }
+  }
+
+  return (
+    <div className="goto-input">
+      <input type="number" value={x} onChange={e => onChange(e.target.value, y)} placeholder="x" />
+      <input type="number" value={y} onChange={e => onChange(x, e.target.value)} placeholder="y" />
+      <button className="btn btn--ghost btn--sm" onClick={pick} disabled={picking}>
+        {picking ? "Click game…" : "🎯 Pick"}
+      </button>
+    </div>
+  );
+}
+
+function StepRow({ step, index, total, gameExe, onChange, onDelete, onMove }: {
+  step: Step;
+  index: number;
+  total: number;
+  gameExe: string;
+  onChange: (s: Step) => void;
+  onDelete: () => void;
+  onMove: (dir: -1 | 1) => void;
+}) {
+  return (
+    <div className="step-row">
+      <span className="step-row__type">{step.type}</span>
+      <div className="step-row__params">
+        {(step.type === "press" || step.type === "hold") && (
+          <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} />
+        )}
+        {step.type === "goto" && (
+          <GotoInput x={step.x} y={step.y} gameExe={gameExe} onChange={(x, y) => onChange({ ...step, x, y })} />
+        )}
+        {step.type === "sleep" && (
+          <input type="number" value={step.ms} placeholder="ms"
+            onChange={e => onChange({ ...step, ms: e.target.value })} style={{ width: 90 }} />
+        )}
+        {step.type === "send" && (
+          <input value={step.text} placeholder="text"
+            onChange={e => onChange({ ...step, text: e.target.value })} />
+        )}
+      </div>
+      <div className="step-row__btns">
+        <button className="icon-btn" disabled={index === 0} onClick={() => onMove(-1)}>↑</button>
+        <button className="icon-btn" disabled={index === total - 1} onClick={() => onMove(1)}>↓</button>
+        <button className="icon-btn icon-btn--danger" onClick={onDelete}>×</button>
+      </div>
+    </div>
+  );
+}
+
+function HotkeyModal({ initial, gameExe, onSave, onClose }: {
   initial: Hotkey;
+  gameExe: string;
   onSave: (hk: Hotkey) => void;
   onClose: () => void;
 }) {
   const [trigger, setTrigger] = useState(initial.trigger);
-  const [behavior, setBehavior] = useState(initial.behavior);
+  const [recordingTrigger, setRecordingTrigger] = useState(false);
+  const [steps, setSteps] = useState<Step[]>(() => parseSteps(initial.behavior));
+
+  useEffect(() => {
+    if (!recordingTrigger) return;
+    const handler = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const key = toAhkKey(e);
+      if (key) { setTrigger(key); setRecordingTrigger(false); }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [recordingTrigger]);
+
+  function addStep(step: Step) { setSteps(s => [...s, step]); }
+  function removeStep(i: number) { setSteps(s => s.filter((_, idx) => idx !== i)); }
+  function updateStep(i: number, step: Step) { setSteps(s => s.map((x, idx) => idx === i ? step : x)); }
+  function moveStep(i: number, dir: -1 | 1) {
+    setSteps(s => {
+      const next = [...s];
+      const j = i + dir;
+      if (j < 0 || j >= next.length) return s;
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
 
   return (
     <div className="modal-overlay">
       <div className="modal modal--wide" onClick={e => e.stopPropagation()}>
         <h2>{initial.trigger ? "Edit Hotkey" : "Add Hotkey"}</h2>
+
         <label>Trigger
-          <input value={trigger} onChange={e => setTrigger(e.target.value)}
-            placeholder="e.g.  f1  /  shift f1  /  ctrl alt z" />
+          <div className="input-row">
+            {recordingTrigger
+              ? <div className="key-recording" onClick={() => setRecordingTrigger(false)}>Press any key combination…</div>
+              : <input value={trigger} onChange={e => setTrigger(e.target.value)} placeholder="e.g. f1 / shift f1 / ctrl alt z" />
+            }
+            <button className="btn btn--ghost btn--sm" onClick={() => setRecordingTrigger(r => !r)}>
+              {recordingTrigger ? "Cancel" : "⌨ Record"}
+            </button>
+          </div>
         </label>
-        <label>Behavior
-          <textarea rows={4} value={behavior} onChange={e => setBehavior(e.target.value)}
-            placeholder="e.g.  press(ctrl 0);lock;goto(1638,621);press(m1);restorecursor" />
-        </label>
-        <p className="hint">
-          Steps separated by <code>;</code> — available: <code>press(key)</code>, <code>hold(key)</code>,
-          <code>goto(x,y)</code>, <code>lock</code>, <code>restorecursor</code>,
-          <code>savecursor</code>, <code>sleep(ms)</code>, <code>send(text)</code>
-        </p>
+
+        <div className="steps-section">
+          <div className="steps-label">Steps</div>
+          <div className="steps-list">
+            {steps.map((step, i) => (
+              <StepRow key={i} step={step} index={i} total={steps.length} gameExe={gameExe}
+                onChange={s => updateStep(i, s)}
+                onDelete={() => removeStep(i)}
+                onMove={dir => moveStep(i, dir)} />
+            ))}
+            {steps.length === 0 && <div className="steps-empty">No steps — add one below</div>}
+          </div>
+          <div className="step-add-btns">
+            <span className="step-add-label">+ Add:</span>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "press", key: "" })}>press</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "hold", key: "" })}>hold</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "goto", x: "", y: "" })}>goto</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "lock" })}>lock</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "savecursor" })}>savecursor</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "restorecursor" })}>restorecursor</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "sleep", ms: "" })}>sleep</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "send", text: "" })}>send</button>
+          </div>
+        </div>
+
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
           <button className="btn btn--primary"
-            onClick={() => trigger.trim() && onSave({ trigger: trigger.trim(), behavior: behavior.trim() })}>
+            onClick={() => trigger.trim() && onSave({ trigger: trigger.trim(), behavior: stepsToString(steps) })}>
             Save
           </button>
         </div>
@@ -299,7 +500,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
                   <td className="hk-behavior">{hk.behavior}</td>
                   <td className="hk-actions">
                     <button className="icon-btn" title="Edit"
-                      onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: i, hotkey: hk })}>
+                      onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: i, hotkey: hk, gameExe: game.exe })}>
                       ✏
                     </button>
                     <button className="icon-btn icon-btn--danger" title="Delete" onClick={() => deleteHotkey(i)}>
@@ -314,7 +515,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
             </tbody>
           </table>
           <button className="btn btn--ghost btn--sm add-hk-btn"
-            onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: null, hotkey: { trigger: "", behavior: "" } })}>
+            onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: null, hotkey: { trigger: "", behavior: "" }, gameExe: game.exe })}>
             + Add Hotkey
           </button>
         </>
@@ -522,8 +723,8 @@ export default function App() {
           onSave={name => handleProfileRename(gameId, profile, name)} onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editHotkey" && (() => {
-        const { gameId, profileId: pid, index, hotkey } = modal;
-        return <HotkeyModal initial={hotkey}
+        const { gameId, profileId: pid, index, hotkey, gameExe } = modal;
+        return <HotkeyModal initial={hotkey} gameExe={gameExe}
           onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
           onClose={() => setModal(null)} />;
       })()}

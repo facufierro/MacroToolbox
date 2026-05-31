@@ -103,6 +103,96 @@ fn get_ahk_status(state: State<AppState>) -> bool {
     state.ahk_manager.lock().unwrap().is_running()
 }
 
+#[cfg(target_os = "windows")]
+fn focus_game_window(exe: &str) {
+    use winapi::shared::minwindef::{BOOL, DWORD, FALSE, LPARAM, TRUE};
+    use winapi::shared::windef::HWND;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::OpenProcess;
+    use winapi::um::psapi::GetModuleFileNameExW;
+    use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    use winapi::um::winuser::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow};
+
+    struct FindData { target: String, hwnd: HWND }
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let data = &mut *(lparam as *mut FindData);
+        if IsWindowVisible(hwnd) == 0 { return TRUE; }
+        let mut pid: DWORD = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if proc.is_null() { return TRUE; }
+        let mut buf = [0u16; 260];
+        let len = GetModuleFileNameExW(proc, std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
+        CloseHandle(proc);
+        if len > 0 {
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            let name = path.split('\\').last().unwrap_or("").to_lowercase();
+            if name == data.target {
+                data.hwnd = hwnd;
+                return FALSE;
+            }
+        }
+        TRUE
+    }
+
+    let mut data = FindData { target: exe.to_lowercase(), hwnd: std::ptr::null_mut() };
+    unsafe {
+        EnumWindows(Some(enum_cb), &mut data as *mut _ as LPARAM);
+        if !data.hwnd.is_null() {
+            SetForegroundWindow(data.hwnd);
+        }
+    }
+}
+
+#[tauri::command]
+async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(i32, i32), String> {
+    #[cfg(target_os = "windows")]
+    focus_game_window(&exe);
+
+    window.minimize().map_err(|e| e.to_string())?;
+
+    let result = tokio::task::spawn_blocking(|| -> Result<(i32, i32), String> {
+        use std::time::{Duration, Instant};
+        std::thread::sleep(Duration::from_millis(400));
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use winapi::um::winuser::{GetAsyncKeyState, GetCursorPos};
+            use winapi::shared::windef::POINT;
+
+            while (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
+                std::thread::sleep(Duration::from_millis(15));
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if Instant::now() > deadline {
+                    return Err("Timed out waiting for click".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(15));
+                if (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
+                    let mut pt = POINT { x: 0, y: 0 };
+                    GetCursorPos(&mut pt);
+                    while (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
+                        std::thread::sleep(Duration::from_millis(15));
+                    }
+                    return Ok((pt.x, pt.y));
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        Err("Not supported on this platform".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    result
+}
+
 #[tauri::command]
 fn read_image_as_data_url(path: String) -> Result<String, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -214,6 +304,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            pick_coordinate,
             read_image_as_data_url,
             upsert_game,
             delete_game,
