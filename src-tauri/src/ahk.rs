@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::{Child, Command};
 
-use crate::config::Profile;
+use crate::config::{Hotkey, Profile};
 
 pub struct AhkManager {
     process: Option<Child>,
@@ -106,8 +106,6 @@ pub fn generate_script(exe: &str, game_name: &str, profiles: &[Profile], profile
             "{ahk_key}:: ExecuteBehavior(\"{behavior}\")\n"
         ));
     }
-
-    let safe_name = game_name.replace('"', "\"\"");
 
     let header = format!(
         r###"#Requires AutoHotkey v2.0
