@@ -1,0 +1,61 @@
+html.is-overlay,
+body.is-overlay,
+body.is-overlay #root {
+  background: transparent !important;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+.overlay-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: transparent;
+}
+
+.ov-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
+  padding: 6px 12px;
+  min-width: 70px;
+  border: 1px solid rgba(255,255,255,0.12);
+  backdrop-filter: blur(4px);
+}
+.ov-timer__label {
+  font-size: 11px;
+  color: rgba(255,255,255,0.7);
+  margin-bottom: 2px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+.ov-timer__time {
+  font-size: 22px;
+  font-weight: 700;
+  color: #fff;
+  font-family: 'Segoe UI', monospace, system-ui;
+  letter-spacing: 1px;
+}
+.ov-timer--done .ov-timer__time {
+  color: #f87171;
+}
+
+.ov-bar {
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(0,0,0,0.5);
+}
+.ov-bar__fill {
+  height: 100%;
+  transition: width 0.2s;
+  border-radius: 4px;
+}
+
+.ov-text {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-weight: 600;
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,0.7);
+}

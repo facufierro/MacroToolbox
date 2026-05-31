@@ -11,6 +11,12 @@ export const api = {
   pickCoordinate: (exe: string) =>
     invoke<[number, number]>("pick_coordinate", { exe }),
 
+  getOverlayItems: () =>
+    invoke<import("./types").OverlayItem[]>("get_overlay_items"),
+
+  toggleOverlay: () =>
+    invoke<void>("toggle_overlay"),
+
   killGame: (exe: string) =>
     invoke<void>("kill_game", { exe }),
 

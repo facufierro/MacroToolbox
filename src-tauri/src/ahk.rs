@@ -92,20 +92,20 @@ fn resolve_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a
     base
 }
 
-pub fn generate_script(exe: &str, profiles: &[Profile], profile: &Profile) -> String {
+pub fn generate_script(exe: &str, toggle_hotkeys_key: Option<&str>, profiles: &[Profile], profile: &Profile) -> String {
     let resolved = resolve_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
     for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
-        if ahk_key.is_empty() {
-            continue;
-        }
+        if ahk_key.is_empty() { continue; }
         let behavior = hk.behavior.replace('"', "\"\"");
-        hotkey_lines.push_str(&format!(
-            "{ahk_key}:: ExecuteBehavior(\"{behavior}\")\n"
-        ));
+        hotkey_lines.push_str(&format!("{ahk_key}:: ExecuteBehavior(\"{behavior}\")\n"));
     }
+
+    let toggle_key = toggle_hotkeys_key
+        .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
+        .unwrap_or_else(|| "$`".to_string());
 
     let header = format!(
         r###"#Requires AutoHotkey v2.0
@@ -119,7 +119,7 @@ global enabled := false
 GroupAdd "GAME", "ahk_exe {exe}"
 
 #HotIf WinActive("ahk_group GAME")
-$`:: {{
+{toggle_key}:: {{
     global enabled
     enabled := !enabled
 }}

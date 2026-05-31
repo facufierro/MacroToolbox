@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import type { Database, Game, Profile, Hotkey } from "./types";
+import type { Database, Game, Profile, Hotkey, OverlayItem } from "./types";
 import "./App.css";
 
 type View = "dashboard" | "game" | "settings";
@@ -13,7 +13,8 @@ type Modal =
   | { type: "editProfile"; gameId: string; profile: Profile }
   | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string }
   | { type: "setParent"; gameId: string; profile: Profile }
-  | { type: "copyProfile"; sourceGameId: string; profile: Profile };
+  | { type: "copyProfile"; sourceGameId: string; profile: Profile }
+  | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,12 +23,64 @@ function uid() {
 }
 
 function blankGame(): Game {
-  return { id: uid(), name: "", exe: "", image: null, active_profile: null, profiles: [] };
+  return { id: uid(), name: "", exe: "", image: null, active_profile: null, profiles: [], toggle_hotkeys_key: null, toggle_overlay_key: null };
 }
 
 function blankProfile(gameId: string): Profile {
   void gameId;
-  return { id: uid(), name: "", parent_id: null, hotkeys: [] };
+  return { id: uid(), name: "", parent_id: null, hotkeys: [], overlay_items: [] };
+}
+
+function blankTimer():   OverlayItem { return { type: "timer", id: uid(), x: 0, y: 0, duration_ms: 60000, label: "" }; }
+function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), x: 0, y: 0, w: 64, h: 64, src: null }; }
+function blankBar():     OverlayItem { return { type: "bar",   id: uid(), x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100 }; }
+function blankText():    OverlayItem { return { type: "text",  id: uid(), x: 0, y: 0, font_size: 16, color: "#ffffff", content: "" }; }
+
+function toAhkKey(e: KeyboardEvent): string {
+  if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return "";
+  const mods: string[] = [];
+  if (e.ctrlKey)  mods.push("ctrl");
+  if (e.shiftKey) mods.push("shift");
+  if (e.altKey)   mods.push("alt");
+  if (e.metaKey)  mods.push("win");
+  const keyMap: Record<string, string> = {
+    " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
+    Backspace: "Backspace", Delete: "Del", Insert: "Ins", Home: "Home", End: "End",
+    PrintScreen: "PrintScreen", NumLock: "NumLock", CapsLock: "CapsLock",
+  };
+  let key = e.key;
+  if (key in keyMap) key = keyMap[key];
+  else if (/^F\d+$/.test(key)) key = key.toLowerCase();
+  else if (key.length === 1) key = key.toLowerCase();
+  return [...mods, key].join(" ");
+}
+
+function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    if (!recording) return;
+    const handler = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const key = toAhkKey(e);
+      if (key) { onChangeRef.current(key); setRecording(false); }
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [recording]);
+
+  return recording ? (
+    <div className="key-recording" onClick={() => setRecording(false)}>Press any key…</div>
+  ) : (
+    <div className="input-row" style={{ margin: 0, flex: 1 }}>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder="key" />
+      <button className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} title="Record key">⌨</button>
+    </div>
+  );
 }
 
 function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
@@ -82,6 +135,8 @@ function GameModal({ initial, onSave, onClose }: {
   const [name, setName] = useState(initial.name);
   const [exe, setExe] = useState(initial.exe);
   const [image, setImage] = useState<string | null>(initial.image);
+  const [toggleHotkeysKey, setToggleHotkeysKey] = useState(initial.toggle_hotkeys_key ?? "");
+  const [toggleOverlayKey, setToggleOverlayKey] = useState(initial.toggle_overlay_key ?? "");
 
   async function browseImage() {
     const selected = await openDialog({
@@ -119,9 +174,19 @@ function GameModal({ initial, onSave, onClose }: {
         <label>Executable
           <input value={exe} onChange={e => setExe(e.target.value)} placeholder="e.g. game.exe" />
         </label>
+        <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(default: `)</span>
+          <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} />
+        </label>
+        <label>Toggle Overlay Key
+          <KeyInput value={toggleOverlayKey} onChange={setToggleOverlayKey} />
+        </label>
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave({ ...initial, name, exe, image })}>Save</button>
+          <button className="btn btn--primary" onClick={() => onSave({
+            ...initial, name, exe, image,
+            toggle_hotkeys_key: toggleHotkeysKey || null,
+            toggle_overlay_key: toggleOverlayKey || null,
+          })}>Save</button>
         </div>
       </div>
     </div>
@@ -189,54 +254,7 @@ function stepsToString(steps: Step[]): string {
   }).join(";");
 }
 
-function toAhkKey(e: KeyboardEvent): string {
-  if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return "";
-  const mods: string[] = [];
-  if (e.ctrlKey)  mods.push("ctrl");
-  if (e.shiftKey) mods.push("shift");
-  if (e.altKey)   mods.push("alt");
-  if (e.metaKey)  mods.push("win");
-  const keyMap: Record<string, string> = {
-    " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
-    PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
-    Backspace: "Backspace", Delete: "Del", Insert: "Ins", Home: "Home", End: "End",
-    PrintScreen: "PrintScreen", NumLock: "NumLock", CapsLock: "CapsLock",
-  };
-  let key = e.key;
-  if (key in keyMap) key = keyMap[key];
-  else if (/^F\d+$/.test(key)) key = key.toLowerCase();
-  else if (key.length === 1) key = key.toLowerCase();
-  return [...mods, key].join(" ");
-}
-
 // ── Step sub-components ───────────────────────────────────────────────────────
-
-function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [recording, setRecording] = useState(false);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
-
-  useEffect(() => {
-    if (!recording) return;
-    const handler = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      const key = toAhkKey(e);
-      if (key) { onChangeRef.current(key); setRecording(false); }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [recording]);
-
-  return recording ? (
-    <div className="key-recording" onClick={() => setRecording(false)}>Press any key…</div>
-  ) : (
-    <div className="input-row" style={{ margin: 0, flex: 1 }}>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder="key" />
-      <button className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} title="Record key">⌨</button>
-    </div>
-  );
-}
 
 function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
   const [picking, setPicking] = useState(false);
@@ -451,6 +469,152 @@ function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
   );
 }
 
+// ── Overlay components ────────────────────────────────────────────────────────
+
+function overlayItemDesc(item: OverlayItem): string {
+  const pos = `(${item.x}, ${item.y})`;
+  switch (item.type) {
+    case "timer": {
+      const m = Math.floor(item.duration_ms / 60000);
+      const s = String(Math.floor((item.duration_ms % 60000) / 1000)).padStart(2, "0");
+      return `${m}:${s}${item.label ? ` — ${item.label}` : ""} at ${pos}`;
+    }
+    case "icon":  return `${item.w}×${item.h} at ${pos}`;
+    case "bar":   return `${item.w}×${item.h} max ${item.max_value} at ${pos}`;
+    case "text":  return `"${item.content}" ${item.font_size}px at ${pos}`;
+  }
+}
+
+function OverlayItemRow({ item, onEdit, onDelete }: { item: OverlayItem; onEdit: () => void; onDelete: () => void }) {
+  return (
+    <div className="step-row">
+      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{item.type}</span>
+      <span className="overlay-item-desc">{overlayItemDesc(item)}</span>
+      <div className="step-row__btns">
+        <button className="icon-btn" onClick={onEdit}>✏</button>
+        <button className="icon-btn icon-btn--danger" onClick={onDelete}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+function OverlayItemModal({ initial, gameExe, onSave, onClose }: {
+  initial: OverlayItem;
+  gameExe: string;
+  onSave: (item: OverlayItem) => void;
+  onClose: () => void;
+}) {
+  const [x, setX] = useState(String(initial.x));
+  const [y, setY] = useState(String(initial.y));
+
+  const [mins, setMins]         = useState(String(initial.type === "timer" ? Math.floor(initial.duration_ms / 60000) : 1));
+  const [secs, setSecs]         = useState(String(initial.type === "timer" ? Math.floor((initial.duration_ms % 60000) / 1000) : 0));
+  const [label, setLabel]       = useState(initial.type === "timer" ? initial.label : "");
+
+  const [iw, setIw]             = useState(String(initial.type === "icon" ? initial.w : 64));
+  const [ih, setIh]             = useState(String(initial.type === "icon" ? initial.h : 64));
+  const [src, setSrc]           = useState<string | null>(initial.type === "icon" ? initial.src : null);
+
+  const [bw, setBw]             = useState(String(initial.type === "bar" ? initial.w : 200));
+  const [bh, setBh]             = useState(String(initial.type === "bar" ? initial.h : 20));
+  const [barColor, setBarColor] = useState(initial.type === "bar" ? initial.color : "#4ade80");
+  const [maxVal, setMaxVal]     = useState(String(initial.type === "bar" ? initial.max_value : 100));
+
+  const [fontSize, setFontSize] = useState(String(initial.type === "text" ? initial.font_size : 16));
+  const [txtColor, setTxtColor] = useState(initial.type === "text" ? initial.color : "#ffffff");
+  const [content, setContent]   = useState(initial.type === "text" ? initial.content : "");
+
+  async function browseIcon() {
+    const selected = await openDialog({ title: "Select Icon", filters: [{ name: "Image", extensions: ["png","jpg","jpeg","webp","gif","ico"] }], multiple: false, directory: false });
+    if (!selected) return;
+    try { setSrc(await api.readImageAsDataUrl(selected as string)); } catch (e) { alert(String(e)); }
+  }
+
+  function build(): OverlayItem {
+    const base = { id: initial.id, x: parseInt(x)||0, y: parseInt(y)||0 };
+    const ms = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
+    switch (initial.type) {
+      case "timer": return { ...base, type: "timer", duration_ms: ms||60000, label };
+      case "icon":  return { ...base, type: "icon",  w: parseInt(iw)||64, h: parseInt(ih)||64, src };
+      case "bar":   return { ...base, type: "bar",   w: parseInt(bw)||200, h: parseInt(bh)||20, color: barColor, max_value: parseFloat(maxVal)||100 };
+      case "text":  return { ...base, type: "text",  font_size: parseInt(fontSize)||16, color: txtColor, content };
+    }
+  }
+
+  const typeLabel = initial.type.charAt(0).toUpperCase() + initial.type.slice(1);
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>{typeLabel}</h2>
+
+        <label>Position
+          <GotoInput x={x} y={y} gameExe={gameExe} onChange={(nx, ny) => { setX(nx); setY(ny); }} />
+        </label>
+
+        {initial.type === "timer" && <>
+          <label>Duration
+            <div className="input-row" style={{ margin: 0 }}>
+              <input type="number" value={mins} onChange={e => setMins(e.target.value)} placeholder="min" min={0} style={{ width: 70 }} />
+              <span style={{ color: "var(--text2)", alignSelf: "center", padding: "0 4px" }}>m</span>
+              <input type="number" value={secs} onChange={e => setSecs(e.target.value)} placeholder="sec" min={0} max={59} style={{ width: 70 }} />
+              <span style={{ color: "var(--text2)", alignSelf: "center", padding: "0 4px" }}>s</span>
+            </div>
+          </label>
+          <label>Label (optional)
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="e.g. Protection" />
+          </label>
+        </>}
+
+        {initial.type === "icon" && <>
+          <div className="image-picker" onClick={browseIcon}>
+            {src ? <img src={src} className="image-picker__preview" alt="icon" /> : <Placeholder label="click to set image" />}
+          </div>
+          {src && <button className="btn btn--ghost btn--sm" style={{ alignSelf: "flex-start" }} onClick={() => setSrc(null)}>✕ Remove</button>}
+          <div className="input-row">
+            <label style={{ flex: 1 }}>W <input type="number" value={iw} onChange={e => setIw(e.target.value)} /></label>
+            <label style={{ flex: 1 }}>H <input type="number" value={ih} onChange={e => setIh(e.target.value)} /></label>
+          </div>
+        </>}
+
+        {initial.type === "bar" && <>
+          <div className="input-row">
+            <label style={{ flex: 1 }}>W <input type="number" value={bw} onChange={e => setBw(e.target.value)} /></label>
+            <label style={{ flex: 1 }}>H <input type="number" value={bh} onChange={e => setBh(e.target.value)} /></label>
+            <label style={{ flex: 1 }}>Max <input type="number" value={maxVal} onChange={e => setMaxVal(e.target.value)} /></label>
+          </div>
+          <label>Color
+            <div className="input-row" style={{ margin: 0 }}>
+              <input type="color" value={barColor} onChange={e => setBarColor(e.target.value)} style={{ width: 48, padding: 2, height: 36, cursor: "pointer" }} />
+              <input value={barColor} onChange={e => setBarColor(e.target.value)} />
+            </div>
+          </label>
+        </>}
+
+        {initial.type === "text" && <>
+          <label>Content
+            <input value={content} onChange={e => setContent(e.target.value)} placeholder="e.g. HP: 100" />
+          </label>
+          <div className="input-row">
+            <label style={{ flex: 1 }}>Size <input type="number" value={fontSize} onChange={e => setFontSize(e.target.value)} /></label>
+            <label style={{ flex: 2 }}>Color
+              <div className="input-row" style={{ margin: 0 }}>
+                <input type="color" value={txtColor} onChange={e => setTxtColor(e.target.value)} style={{ width: 48, padding: 2, height: 36, cursor: "pointer" }} />
+                <input value={txtColor} onChange={e => setTxtColor(e.target.value)} />
+              </div>
+            </label>
+          </div>
+        </>}
+
+        <div className="modal__actions">
+          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn--primary" onClick={() => onSave(build())}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Game detail view ──────────────────────────────────────────────────────────
 
 function GameView({ game, running, onDb, onModal, onBack }: {
@@ -463,6 +627,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
   const [profileId, setProfileId] = useState<string>(
     game.active_profile ?? game.profiles[0]?.id ?? ""
   );
+  const [tab, setTab] = useState<"hotkeys" | "overlay">("hotkeys");
 
   useEffect(() => {
     const valid = game.profiles.some(p => p.id === profileId);
@@ -567,6 +732,9 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
         <div style={{ flex: 1 }} />
+        {isActive && (
+          <button className="btn btn--ghost btn--sm" onClick={() => api.toggleOverlay()} title="Toggle overlay">⊞</button>
+        )}
         {isActive
           ? <button className="btn btn--danger" onClick={deactivate}>■ Deactivate</button>
           : <button className="btn btn--primary" onClick={activate} disabled={!profileId}>▶ Activate</button>
@@ -578,15 +746,19 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         )}
       </div>
 
-      {/* Hotkeys table */}
-      {profile ? (
+      {/* Tabs */}
+      <div className="view-tabs">
+        <button className={`view-tab ${tab === "hotkeys" ? "view-tab--active" : ""}`} onClick={() => setTab("hotkeys")}>Hotkeys</button>
+        <button className={`view-tab ${tab === "overlay" ? "view-tab--active" : ""}`} onClick={() => setTab("overlay")}>Overlay</button>
+      </div>
+
+      {/* Hotkeys tab */}
+      {tab === "hotkeys" && (profile ? (
         <>
           <table className="hk-table">
             <thead>
               <tr>
-                <th>Trigger</th>
-                <th>Behavior</th>
-                <th style={{ width: 100 }}></th>
+                <th>Trigger</th><th>Behavior</th><th style={{ width: 100 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -597,22 +769,13 @@ function GameView({ game, running, onDb, onModal, onBack }: {
                     <td><code>{hk.trigger}</code></td>
                     <td className="hk-behavior">{hk.behavior}</td>
                     <td className="hk-actions">
-                      {own ? (
-                        <>
-                          <button className="icon-btn" title="Edit"
-                            onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: ownIndex, hotkey: hk, gameExe: game.exe })}>
-                            ✏
-                          </button>
-                          <button className="icon-btn icon-btn--danger" title="Delete" onClick={() => deleteHotkey(ownIndex)}>
-                            ✕
-                          </button>
-                        </>
-                      ) : (
-                        <button className="icon-btn" title="Override in this profile"
-                          onClick={async () => {
-                            const db = await api.upsertProfile(game.id, { ...profile, hotkeys: [...profile.hotkeys, { ...hk }] });
-                            onDb(db);
-                          }}>
+                      {own ? (<>
+                        <button className="icon-btn" title="Edit"
+                          onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: ownIndex, hotkey: hk, gameExe: game.exe })}>✏</button>
+                        <button className="icon-btn icon-btn--danger" title="Delete" onClick={() => deleteHotkey(ownIndex)}>✕</button>
+                      </>) : (
+                        <button className="icon-btn" title="Override"
+                          onClick={async () => { const db = await api.upsertProfile(game.id, { ...profile, hotkeys: [...profile.hotkeys, { ...hk }] }); onDb(db); }}>
                           ✎ Override
                         </button>
                       )}
@@ -632,7 +795,33 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         </>
       ) : (
         <p className="empty-row">Create a profile to start adding hotkeys.</p>
-      )}
+      ))}
+
+      {/* Overlay tab */}
+      {tab === "overlay" && (profile ? (
+        <div className="overlay-editor">
+          <div className="step-add-btns">
+            <span className="step-add-label">+ Add:</span>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankTimer(), gameExe: game.exe })}>Timer</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankIcon(),  gameExe: game.exe })}>Icon</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankBar(),   gameExe: game.exe })}>Bar</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankText(),  gameExe: game.exe })}>Text</button>
+          </div>
+          <div className="steps-list" style={{ marginTop: 8 }}>
+            {profile.overlay_items.map((item, i) => (
+              <OverlayItemRow key={item.id} item={item}
+                onEdit={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: i, item, gameExe: game.exe })}
+                onDelete={async () => {
+                  const updated = { ...profile, overlay_items: profile.overlay_items.filter((_, idx) => idx !== i) };
+                  onDb(await api.upsertProfile(game.id, updated));
+                }} />
+            ))}
+            {profile.overlay_items.length === 0 && <div className="steps-empty">No overlay items yet</div>}
+          </div>
+        </div>
+      ) : (
+        <p className="empty-row">Create a profile to start adding overlay items.</p>
+      ))}
     </div>
   );
 }
@@ -747,6 +936,19 @@ export default function App() {
       handleDb(updated);
       setModal(null);
     } catch (e) { alert(`Error setting parent: ${e}`); }
+  }
+
+  async function handleOverlayItemSave(gameId: string, profileId: string, index: number | null, item: OverlayItem) {
+    try {
+      const game = db!.games.find(g => g.id === gameId)!;
+      const profile = game.profiles.find(p => p.id === profileId)!;
+      const items = [...profile.overlay_items];
+      if (index === null) items.push(item);
+      else items[index] = item;
+      const updated = await api.upsertProfile(gameId, { ...profile, overlay_items: items });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error saving overlay item: ${e}`); }
   }
 
   async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
@@ -867,6 +1069,12 @@ export default function App() {
         const { sourceGameId, profile } = modal;
         return <CopyProfileModal games={db.games} sourceProfile={profile}
           onSave={(targetGameId, name) => handleCopyProfile(sourceGameId, profile, targetGameId, name)}
+          onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "overlayItem" && (() => {
+        const { gameId, profileId, index, item, gameExe } = modal;
+        return <OverlayItemModal initial={item} gameExe={gameExe}
+          onSave={it => handleOverlayItemSave(gameId, profileId, index, it)}
           onClose={() => setModal(null)} />;
       })()}
     </div>

@@ -1,5 +1,6 @@
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 mod ahk;
 mod config;
@@ -10,6 +11,8 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     pub ahk_manager: Mutex<ahk::AhkManager>,
+    pub overlay_shortcut: Mutex<Option<String>>,
+    pub overlay_items: Mutex<Vec<config::OverlayItem>>,
 }
 
 #[tauri::command]
@@ -52,7 +55,7 @@ fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if game.active_profile.as_ref() == Some(&profile_id) {
         if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
-            let script = ahk::generate_script(&game.exe, &game.profiles, p);
+            let script = ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, p);
             let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
@@ -76,39 +79,131 @@ fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -
     Ok(db)
 }
 
+fn send_overlay(app: &tauri::AppHandle, items: &[config::OverlayItem]) {
+    *app.state::<AppState>().overlay_items.lock().unwrap() = items.to_vec();
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.emit("overlay-items", items);
+    }
+}
+
 #[tauri::command]
-fn activate_profile(state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
+fn get_overlay_items(state: State<AppState>) -> Vec<config::OverlayItem> {
+    state.overlay_items.lock().unwrap().clone()
+}
+
+fn ahk_to_shortcut(key: &str) -> String {
+    key.split_whitespace().map(|p| match p.to_lowercase().as_str() {
+        "ctrl"      => "Ctrl".to_string(),
+        "shift"     => "Shift".to_string(),
+        "alt"       => "Alt".to_string(),
+        "win"       => "Super".to_string(),
+        "`"         => "Backquote".to_string(),
+        "\\"        => "Backslash".to_string(),
+        "space"     => "Space".to_string(),
+        "enter"     => "Enter".to_string(),
+        "esc"       => "Escape".to_string(),
+        "tab"       => "Tab".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "del"       => "Delete".to_string(),
+        "ins"       => "Insert".to_string(),
+        "home"      => "Home".to_string(),
+        "end"       => "End".to_string(),
+        "pgup"      => "PageUp".to_string(),
+        "pgdn"      => "PageDown".to_string(),
+        "up"        => "ArrowUp".to_string(),
+        "down"      => "ArrowDown".to_string(),
+        "left"      => "ArrowLeft".to_string(),
+        "right"     => "ArrowRight".to_string(),
+        other       => {
+            if other.starts_with('f') && other[1..].parse::<u32>().is_ok() {
+                format!("F{}", &other[1..])
+            } else if other.len() == 1 && other.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+                other.to_uppercase()
+            } else {
+                other.to_uppercase()
+            }
+        }
+    }).collect::<Vec<_>>().join("+")
+}
+
+fn register_overlay_shortcut(app: &tauri::AppHandle, state: &AppState, key: &str) {
+    let shortcut = ahk_to_shortcut(key);
+    if let Some(old) = state.overlay_shortcut.lock().unwrap().take() {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+    let result = app.global_shortcut().on_shortcut(
+        shortcut.as_str(),
+        |app_handle, _, event| {
+            use tauri_plugin_global_shortcut::ShortcutState;
+            if event.state() == ShortcutState::Pressed {
+                if let Some(w) = app_handle.get_webview_window("overlay") {
+                    if w.is_visible().unwrap_or(false) {
+                        let _ = w.hide();
+                    } else {
+                        let _ = w.show();
+                    }
+                }
+            }
+        },
+    );
+    if result.is_ok() {
+        *state.overlay_shortcut.lock().unwrap() = Some(shortcut);
+    }
+}
+
+fn unregister_overlay_shortcut(app: &tauri::AppHandle, state: &AppState) {
+    if let Some(old) = state.overlay_shortcut.lock().unwrap().take() {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.hide();
+    }
+}
+
+#[tauri::command]
+fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     let ahk_exe = db.settings.ahk_exe.clone();
 
-    // Scoped so borrows of db.games are dropped before save_db needs &db
     let script = {
         let game = db.games.iter_mut().find(|g| g.id == game_id)
             .ok_or_else(|| "Game not found".to_string())?;
         game.active_profile = Some(profile_id.clone());
-
         let profile = game.profiles.iter().find(|p| p.id == profile_id)
             .ok_or_else(|| "Profile not found".to_string())?;
-
-        ahk::generate_script(&game.exe, &game.profiles, profile)
+        ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, profile)
     };
 
     let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
     std::fs::write(&script_path, &script).map_err(|e| e.to_string())?;
     state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path)?;
-
     config::save_db(&state.db_path, &db)?;
+
+    // Send items to overlay window (stays hidden until toggle key pressed)
+    let items = db.games.iter().find(|g| g.id == game_id)
+        .and_then(|g| g.profiles.iter().find(|p| p.id == profile_id))
+        .map(|p| p.overlay_items.as_slice())
+        .unwrap_or_default();
+    send_overlay(&app, items);
+
+    // Register overlay toggle — same key as hotkeys toggle (default backtick)
+    let toggle_key = db.games.iter().find(|g| g.id == game_id)
+        .and_then(|g| g.toggle_hotkeys_key.clone())
+        .unwrap_or_else(|| "`".to_string());
+    register_overlay_shortcut(&app, &state, &toggle_key);
+
     Ok(db)
 }
 
 #[tauri::command]
-fn deactivate_ahk(state: State<AppState>, game_id: String) -> Result<Database, String> {
+fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String) -> Result<Database, String> {
     state.ahk_manager.lock().unwrap().kill();
     let mut db = config::load_db(&state.db_path)?;
     if let Some(game) = db.games.iter_mut().find(|g| g.id == game_id) {
         game.active_profile = None;
     }
     config::save_db(&state.db_path, &db)?;
+    unregister_overlay_shortcut(&app, &state);
     Ok(db)
 }
 
@@ -295,6 +390,17 @@ fn read_image_as_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn toggle_overlay(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.hide();
+        } else {
+            let _ = w.show();
+        }
+    }
+}
+
+#[tauri::command]
 fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     db.settings = settings;
@@ -357,7 +463,7 @@ fn start_watcher(handle: tauri::AppHandle) {
 
                     if game_open && !script_live {
                         if let Some(profile) = game.profiles.iter().find(|p| p.id == *profile_id) {
-                            let script      = ahk::generate_script(&game.exe, &game.profiles, profile);
+                            let script      = ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, profile);
                             let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
@@ -365,6 +471,8 @@ fn start_watcher(handle: tauri::AppHandle) {
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
+                        let app_state = handle.state::<AppState>();
+                        unregister_overlay_shortcut(&handle, &app_state);
                     }
                 }
             }
@@ -377,6 +485,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window.app_handle().state::<AppState>()
@@ -400,13 +509,34 @@ pub fn run() {
                 db_path,
                 scripts_path: scripts_dir,
                 ahk_manager: Mutex::new(ahk::AhkManager::new()),
+                overlay_shortcut: Mutex::new(None),
+                overlay_items: Mutex::new(vec![]),
             });
+
+            let overlay = tauri::WebviewWindowBuilder::new(
+                app,
+                "overlay",
+                tauri::WebviewUrl::App("index.html?window=overlay".into()),
+            )
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .inner_size(3840.0, 2160.0)
+            .position(0.0, 0.0)
+            .visible(false)
+            .build()
+            .expect("failed to create overlay window");
+
+            let _ = overlay.set_ignore_cursor_events(true);
 
             start_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            get_overlay_items,
+            toggle_overlay,
             pick_coordinate,
             kill_game,
             make_borderless_fullscreen,

@@ -15,6 +15,10 @@ pub struct Game {
     pub image: Option<String>,
     pub active_profile: Option<String>,
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub toggle_hotkeys_key: Option<String>,
+    #[serde(default)]
+    pub toggle_overlay_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +28,17 @@ pub struct Profile {
     #[serde(default)]
     pub parent_id: Option<String>,
     pub hotkeys: Vec<Hotkey>,
+    #[serde(default)]
+    pub overlay_items: Vec<OverlayItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OverlayItem {
+    Timer { id: String, x: i32, y: i32, duration_ms: u64, label: String },
+    Icon  { id: String, x: i32, y: i32, w: u32, h: u32, src: Option<String> },
+    Bar   { id: String, x: i32, y: i32, w: u32, h: u32, color: String, max_value: f64 },
+    Text  { id: String, x: i32, y: i32, font_size: u32, color: String, content: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
