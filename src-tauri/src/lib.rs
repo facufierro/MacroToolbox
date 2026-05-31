@@ -49,7 +49,7 @@ fn delete_game(state: State<AppState>, id: String) -> Result<Database, String> {
 }
 
 #[tauri::command]
-fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
@@ -75,6 +75,7 @@ fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> 
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
             }
+            send_overlay(&app, &p.overlay_items);
         }
     }
 
