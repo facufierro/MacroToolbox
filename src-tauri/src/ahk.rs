@@ -105,7 +105,6 @@ GroupAdd "GAME", "ahk_exe {exe}"
 $`:: {{
     global enabled
     enabled := !enabled
-    TrayTip(enabled ? "ON" : "OFF", "{safe_name}", 1)
 }}
 #HotIf
 
