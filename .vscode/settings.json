@@ -2,12 +2,6 @@
     "actionButtons": {
         "commands": [
             {
-                "name": "$(package) Compile Script",
-                "color": "#4CAF50",
-                "useVsCodeApi": true,
-                "command": "workbench.action.tasks.build"
-            },
-            {
                 "name": "$(play) HKM Dev",
                 "color": "#7c6af7",
                 "useVsCodeApi": true,
@@ -23,5 +17,4 @@
             }
         ]
     }
-
 }

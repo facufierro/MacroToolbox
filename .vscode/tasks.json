@@ -26,7 +26,7 @@
         ,{
             "label": "HKM: Dev",
             "type": "shell",
-            "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Apps\\AutoHotkey\\HotkeyManager\\dev.ps1'",
+            "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Projects\\Games\\HotkeyManager\\dev.ps1'",
             "options": {
                 "shell": {
                     "executable": "powershell.exe",
@@ -45,7 +45,7 @@
             "type": "shell",
             "command": "$env:PATH += ';C:\\Users\\fierr\\.cargo\\bin'; npm run tauri build",
             "options": {
-                "cwd": "D:\\Apps\\AutoHotkey\\HotkeyManager",
+                "cwd": "D:\\Projects\\Games\\HotkeyManager",
                 "shell": {
                     "executable": "powershell.exe",
                     "args": ["-NoProfile", "-Command"]
