@@ -1,0 +1,51 @@
+# ── Rust / Cargo ──────────────────────────────────────────────────────────────
+target/
+src-tauri/target/
+src-tauri/gen/
+Cargo.lock
+
+# ── Node / npm ────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ── Vite / Build output ────────────────────────────────────────────────────────
+dist/
+dist-ssr/
+*.local
+
+# ── TypeScript ────────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ── Tauri bundles ─────────────────────────────────────────────────────────────
+src-tauri/target/release/bundle/
+
+# ── Runtime / generated files ─────────────────────────────────────────────────
+*.pid
+*.log
+logs/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.user
+*.rsuser
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Secrets / local config ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example

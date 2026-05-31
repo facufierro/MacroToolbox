@@ -1,0 +1,28 @@
+fn main() {
+    // Release builds require admin so spawned AHK scripts can interact with elevated games.
+    // Dev builds rely on VS Code being launched as administrator (inherited elevation).
+    let is_release = std::env::var("PROFILE").unwrap_or_default() == "release";
+
+    if is_release {
+        let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>"#;
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(
+                    tauri_build::WindowsAttributes::new()
+                        .app_manifest(manifest)
+                )
+        )
+        .expect("failed to run tauri build script");
+    } else {
+        tauri_build::build();
+    }
+}
