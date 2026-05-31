@@ -222,13 +222,35 @@ fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database,
 }
 
 fn is_process_running(exe: &str) -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {exe}"), "/NH", "/FO", "CSV"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout)
-            .to_lowercase()
-            .contains(&exe.to_lowercase()))
-        .unwrap_or(false)
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::shared::minwindef::FALSE;
+        use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+        use winapi::um::tlhelp32::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+            PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        let exe_lower = exe.to_lowercase();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE { return false; }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = false;
+            if Process32FirstW(snap, &mut entry) != FALSE {
+                loop {
+                    let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                    if name == exe_lower { found = true; break; }
+                    if Process32NextW(snap, &mut entry) == FALSE { break; }
+                }
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
 }
 
 fn start_watcher(handle: tauri::AppHandle) {

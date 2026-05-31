@@ -22,4 +22,4 @@ base64 = "0.22"
 tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "psapi", "processthreadsapi", "handleapi", "winnt"] }
+winapi = { version = "0.3", features = ["winuser", "psapi", "processthreadsapi", "handleapi", "winnt", "tlhelp32"] }
