@@ -38,14 +38,28 @@ fn delete_game(state: State<AppState>, id: String) -> Result<Database, String> {
 
 #[tauri::command]
 fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+    let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Game not found".to_string())?;
-    match game.profiles.iter_mut().find(|p| p.id == profile.id) {
+    match game.profiles.iter_mut().find(|p| p.id == profile_id) {
         Some(existing) => *existing = profile,
         None => game.profiles.push(profile),
     }
     config::save_db(&state.db_path, &db)?;
+
+    // If this profile is currently active, regenerate and reload the script
+    let game = db.games.iter().find(|g| g.id == game_id).unwrap();
+    if game.active_profile.as_ref() == Some(&profile_id) {
+        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
+            let script = ahk::generate_script(&game.exe, &game.name, p);
+            let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
+            if std::fs::write(&script_path, &script).is_ok() {
+                let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
+            }
+        }
+    }
+
     Ok(db)
 }
 
