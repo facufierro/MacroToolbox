@@ -34,8 +34,6 @@ Thumbs.db
 desktop.ini
 
 # ── Editor ────────────────────────────────────────────────────────────────────
-.vscode/*
-!.vscode/extensions.json
 .idea/
 *.suo
 *.user

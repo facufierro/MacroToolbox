@@ -1,0 +1,62 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Compile Current AHK",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "& { $ErrorActionPreference = 'Stop'; $baseFilePath = 'D:\\Apps\\AutoHotkey\\_App\\v2\\AutoHotkey64.exe'; $compilerPath = 'D:\\Apps\\AutoHotkey\\_App\\Compiler\\Ahk2Exe.exe'; $scriptPath = '${file}'; if (-not (Test-Path -LiteralPath $compilerPath -PathType Leaf)) { throw \"AHK compiler not found at '$compilerPath'.\" }; if (-not (Test-Path -LiteralPath $baseFilePath -PathType Leaf)) { throw \"AHK base file not found at '$baseFilePath'.\" }; $resolvedScriptPath = (Resolve-Path -LiteralPath $scriptPath).Path; if ([System.IO.Path]::GetExtension($resolvedScriptPath) -ne '.ahk') { throw \"Expected an .ahk file, got '$resolvedScriptPath'.\" }; $scriptDirectory = Split-Path -Path $resolvedScriptPath -Parent; $scriptBaseName = [System.IO.Path]::GetFileNameWithoutExtension($resolvedScriptPath); $outputPath = Join-Path -Path $scriptDirectory -ChildPath ($scriptBaseName + '.exe'); $iconPath = Join-Path -Path $scriptDirectory -ChildPath 'icon.ico'; $arguments = @('/in', $resolvedScriptPath, '/out', $outputPath, '/bin', $baseFilePath); if (Test-Path -LiteralPath $iconPath -PathType Leaf) { $arguments += @('/icon', $iconPath) }; & $compilerPath @arguments; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "clear": true,
+                "panel": "shared",
+                "reveal": "always"
+            },
+            "problemMatcher": []
+        }
+        ,{
+            "label": "HKM: Dev",
+            "type": "shell",
+            "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Apps\\AutoHotkey\\HotkeyManager\\dev.ps1'",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-NoProfile", "-Command"]
+                }
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "HKM: Build",
+            "type": "shell",
+            "command": "$env:PATH += ';C:\\Users\\fierr\\.cargo\\bin'; npm run tauri build",
+            "options": {
+                "cwd": "D:\\Apps\\AutoHotkey\\HotkeyManager",
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-NoProfile", "-Command"]
+                }
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}
