@@ -160,6 +160,46 @@ fn focus_game_window(exe: &str) {
 }
 
 #[tauri::command]
+fn kill_game(exe: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winapi::shared::minwindef::{FALSE};
+        use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+        use winapi::um::processthreadsapi::{OpenProcess, TerminateProcess};
+        use winapi::um::tlhelp32::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        use winapi::um::winnt::PROCESS_TERMINATE;
+
+        let exe_lower = exe.to_lowercase();
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE { return Err("Failed to snapshot processes".to_string()); }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut killed = false;
+            if Process32FirstW(snap, &mut entry) != FALSE {
+                loop {
+                    let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+                    if name == exe_lower {
+                        let proc = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
+                        if !proc.is_null() {
+                            TerminateProcess(proc, 1);
+                            CloseHandle(proc);
+                            killed = true;
+                        }
+                    }
+                    if Process32NextW(snap, &mut entry) == FALSE { break; }
+                }
+            }
+            CloseHandle(snap);
+            if killed { Ok(()) } else { Err(format!("Process '{}' not found", exe)) }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Not supported on this platform".to_string())
+}
+
+#[tauri::command]
 fn make_borderless_fullscreen(exe: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -368,6 +408,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_database,
             pick_coordinate,
+            kill_game,
             make_borderless_fullscreen,
             read_image_as_data_url,
             upsert_game,

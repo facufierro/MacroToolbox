@@ -531,6 +531,11 @@ function GameView({ game, running, onDb, onModal, onBack }: {
               try { await api.makeBorderlessFullscreen(game.exe); }
               catch (e) { alert(String(e)); }
             }}>⛶ Borderless</button>
+            <button className="btn btn--danger btn--sm" onClick={async () => {
+              if (!confirm(`Force-kill "${game.exe}"?`)) return;
+              try { await api.killGame(game.exe); }
+              catch (e) { alert(String(e)); }
+            }}>Kill Game</button>
             <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Game</button>
           </div>
         </div>
