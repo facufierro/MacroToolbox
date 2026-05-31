@@ -11,7 +11,9 @@ type Modal =
   | { type: "editGame"; game: Game }
   | { type: "addProfile"; gameId: string }
   | { type: "editProfile"; gameId: string; profile: Profile }
-  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string };
+  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string }
+  | { type: "setParent"; gameId: string; profile: Profile }
+  | { type: "copyProfile"; sourceGameId: string; profile: Profile };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,7 +27,22 @@ function blankGame(): Game {
 
 function blankProfile(gameId: string): Profile {
   void gameId;
-  return { id: uid(), name: "", hotkeys: [] };
+  return { id: uid(), name: "", parent_id: null, hotkeys: [] };
+}
+
+function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
+  const base: Array<{ hotkey: Hotkey; own: boolean }> = profile.parent_id
+    ? (() => {
+        const parent = profiles.find(p => p.id === profile.parent_id);
+        return parent ? resolveHotkeys(profiles, parent).map(r => ({ ...r, own: false })) : [];
+      })()
+    : [];
+  for (const hk of profile.hotkeys) {
+    const idx = base.findIndex(r => r.hotkey.trigger === hk.trigger);
+    if (idx >= 0) base[idx] = { hotkey: hk, own: true };
+    else base.push({ hotkey: hk, own: true });
+  }
+  return base;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -372,6 +389,68 @@ function HotkeyModal({ initial, gameExe, onSave, onClose }: {
   );
 }
 
+function SetParentModal({ profiles, current, onSave, onClose }: {
+  profiles: Profile[];
+  current: Profile;
+  onSave: (parentId: string | null) => void;
+  onClose: () => void;
+}) {
+  const [parentId, setParentId] = useState(current.parent_id ?? "");
+  const options = profiles.filter(p => p.id !== current.id);
+  return (
+    <div className="modal-overlay">
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>Set Parent Profile</h2>
+        <label>Inherit from
+          <select value={parentId} onChange={e => setParentId(e.target.value)}>
+            <option value="">— None —</option>
+            {options.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </label>
+        <p className="hint">Hotkeys from the parent are inherited. Hotkeys with the same trigger in this profile override the parent.</p>
+        <div className="modal__actions">
+          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn--primary" onClick={() => onSave(parentId || null)}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
+  games: Game[];
+  sourceProfile: Profile;
+  onSave: (targetGameId: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [targetGameId, setTargetGameId] = useState(games[0]?.id ?? "");
+  const [name, setName] = useState(`${sourceProfile.name} (copy)`);
+  return (
+    <div className="modal-overlay">
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>Copy Profile</h2>
+        <label>Target Game
+          <select value={targetGameId} onChange={e => setTargetGameId(e.target.value)}>
+            {[...games].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
+              <option key={g.id} value={g.id}>{g.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>Profile Name
+          <input value={name} onChange={e => setName(e.target.value)} />
+        </label>
+        <div className="modal__actions">
+          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn--primary"
+            onClick={() => targetGameId && name.trim() && onSave(targetGameId, name.trim())}>
+            Copy
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Game detail view ──────────────────────────────────────────────────────────
 
 function GameView({ game, running, onDb, onModal, onBack }: {
@@ -471,6 +550,14 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         {profile && (
           <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editProfile", gameId: game.id, profile })}>Rename</button>
         )}
+        {profile && (
+          <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "setParent", gameId: game.id, profile })}>
+            {profile.parent_id ? "⬆ Parent" : "⬆ Inherit"}
+          </button>
+        )}
+        {profile && (
+          <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "copyProfile", sourceGameId: game.id, profile })}>⧉ Copy</button>
+        )}
         {profileId && (
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
@@ -494,26 +581,41 @@ function GameView({ game, running, onDb, onModal, onBack }: {
               <tr>
                 <th>Trigger</th>
                 <th>Behavior</th>
-                <th style={{ width: 80 }}></th>
+                <th style={{ width: 100 }}></th>
               </tr>
             </thead>
             <tbody>
-              {profile.hotkeys.map((hk, i) => (
-                <tr key={i}>
-                  <td><code>{hk.trigger}</code></td>
-                  <td className="hk-behavior">{hk.behavior}</td>
-                  <td className="hk-actions">
-                    <button className="icon-btn" title="Edit"
-                      onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: i, hotkey: hk, gameExe: game.exe })}>
-                      ✏
-                    </button>
-                    <button className="icon-btn icon-btn--danger" title="Delete" onClick={() => deleteHotkey(i)}>
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {profile.hotkeys.length === 0 && (
+              {resolveHotkeys(game.profiles, profile).map(({ hotkey: hk, own }, i) => {
+                const ownIndex = own ? profile.hotkeys.findIndex(h => h.trigger === hk.trigger) : -1;
+                return (
+                  <tr key={i} className={own ? "" : "hk-row--inherited"}>
+                    <td><code>{hk.trigger}</code></td>
+                    <td className="hk-behavior">{hk.behavior}</td>
+                    <td className="hk-actions">
+                      {own ? (
+                        <>
+                          <button className="icon-btn" title="Edit"
+                            onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: ownIndex, hotkey: hk, gameExe: game.exe })}>
+                            ✏
+                          </button>
+                          <button className="icon-btn icon-btn--danger" title="Delete" onClick={() => deleteHotkey(ownIndex)}>
+                            ✕
+                          </button>
+                        </>
+                      ) : (
+                        <button className="icon-btn" title="Override in this profile"
+                          onClick={async () => {
+                            const db = await api.upsertProfile(game.id, { ...profile, hotkeys: [...profile.hotkeys, { ...hk }] });
+                            onDb(db);
+                          }}>
+                          ✎ Override
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {resolveHotkeys(game.profiles, profile).length === 0 && (
                 <tr><td colSpan={3} className="empty-row">No hotkeys yet</td></tr>
               )}
             </tbody>
@@ -634,6 +736,23 @@ export default function App() {
     } catch (e) { alert(`Error renaming profile: ${e}`); }
   }
 
+  async function handleSetParent(gameId: string, profile: Profile, parentId: string | null) {
+    try {
+      const updated = await api.upsertProfile(gameId, { ...profile, parent_id: parentId });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error setting parent: ${e}`); }
+  }
+
+  async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
+    try {
+      const copy: Profile = { id: uid(), name, parent_id: null, hotkeys: [...profile.hotkeys] };
+      const updated = await api.upsertProfile(targetGameId, copy);
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error copying profile: ${e}`); }
+  }
+
   async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
     try {
       const game = db!.games.find(g => g.id === gameId)!;
@@ -730,6 +849,19 @@ export default function App() {
         const { gameId, profileId: pid, index, hotkey, gameExe } = modal;
         return <HotkeyModal initial={hotkey} gameExe={gameExe}
           onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
+          onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "setParent" && (() => {
+        const { gameId, profile } = modal;
+        const game = db.games.find(g => g.id === gameId)!;
+        return <SetParentModal profiles={game.profiles} current={profile}
+          onSave={parentId => handleSetParent(gameId, profile, parentId)}
+          onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "copyProfile" && (() => {
+        const { sourceGameId, profile } = modal;
+        return <CopyProfileModal games={db.games} sourceProfile={profile}
+          onSave={(targetGameId, name) => handleCopyProfile(sourceGameId, profile, targetGameId, name)}
           onClose={() => setModal(null)} />;
       })()}
     </div>

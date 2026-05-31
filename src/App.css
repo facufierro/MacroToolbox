@@ -269,6 +269,8 @@ body {
 
 .hk-table tr:last-child td { border-bottom: none; }
 .hk-table tr:hover td { background: var(--bg3); }
+.hk-row--inherited td { opacity: 0.5; }
+.hk-row--inherited:hover td { opacity: 0.75; }
 
 .hk-behavior {
   font-family: monospace;

@@ -21,6 +21,8 @@ pub struct Game {
 pub struct Profile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub hotkeys: Vec<Hotkey>,
 }
 

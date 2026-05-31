@@ -74,10 +74,29 @@ fn resolve_ahk_exe(configured: &str) -> String {
     configured.to_string()
 }
 
-pub fn generate_script(exe: &str, game_name: &str, profile: &Profile) -> String {
+fn resolve_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a Hotkey> {
+    let mut base: Vec<&Hotkey> = match &profile.parent_id {
+        Some(pid) => profiles.iter()
+            .find(|p| p.id == *pid)
+            .map(|p| resolve_hotkeys(profiles, p))
+            .unwrap_or_default(),
+        None => vec![],
+    };
+    for hk in &profile.hotkeys {
+        if let Some(slot) = base.iter_mut().find(|h| h.trigger == hk.trigger) {
+            *slot = hk;
+        } else {
+            base.push(hk);
+        }
+    }
+    base
+}
+
+pub fn generate_script(exe: &str, game_name: &str, profiles: &[Profile], profile: &Profile) -> String {
+    let resolved = resolve_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
-    for hk in &profile.hotkeys {
+    for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() {
             continue;

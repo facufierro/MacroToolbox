@@ -6,6 +6,7 @@ export interface Hotkey {
 export interface Profile {
   id: string;
   name: string;
+  parent_id: string | null;
   hotkeys: Hotkey[];
 }
 

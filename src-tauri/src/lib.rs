@@ -52,7 +52,7 @@ fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if game.active_profile.as_ref() == Some(&profile_id) {
         if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
-            let script = ahk::generate_script(&game.exe, &game.name, p);
+            let script = ahk::generate_script(&game.exe, &game.name, &game.profiles, p);
             let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
@@ -90,7 +90,7 @@ fn activate_profile(state: State<AppState>, game_id: String, profile_id: String)
         let profile = game.profiles.iter().find(|p| p.id == profile_id)
             .ok_or_else(|| "Profile not found".to_string())?;
 
-        ahk::generate_script(&game.exe, &game.name, profile)
+        ahk::generate_script(&game.exe, &game.name, &game.profiles, profile)
     };
 
     let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
@@ -317,7 +317,7 @@ fn start_watcher(handle: tauri::AppHandle) {
 
                     if game_open && !script_live {
                         if let Some(profile) = game.profiles.iter().find(|p| p.id == *profile_id) {
-                            let script      = ahk::generate_script(&game.exe, &game.name, profile);
+                            let script      = ahk::generate_script(&game.exe, &game.name, &game.profiles, profile);
                             let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
