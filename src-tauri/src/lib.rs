@@ -419,6 +419,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
                             }
+                            send_overlay(&handle, &profile.overlay_items);
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
@@ -477,6 +478,15 @@ pub fn run() {
             .expect("failed to create overlay window");
 
             let _ = overlay.set_ignore_cursor_events(true);
+
+            // Pre-populate overlay items from any already-active profile
+            if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
+                if let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) {
+                    if let Some(profile) = game.profiles.iter().find(|p| Some(&p.id) == game.active_profile.as_ref()) {
+                        send_overlay(app.handle(), &profile.overlay_items);
+                    }
+                }
+            }
 
             start_overlay_listener(app.handle().clone());
             start_watcher(app.handle().clone());
