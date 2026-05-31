@@ -92,7 +92,13 @@ fn resolve_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a
     base
 }
 
-pub fn generate_script(exe: &str, toggle_hotkeys_key: Option<&str>, profiles: &[Profile], profile: &Profile) -> String {
+pub fn generate_script(
+    exe: &str,
+    toggle_hotkeys_key: Option<&str>,
+    toggle_overlay_key: Option<&str>,
+    profiles: &[Profile],
+    profile: &Profile,
+) -> String {
     let resolved = resolve_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
@@ -107,6 +113,12 @@ pub fn generate_script(exe: &str, toggle_hotkeys_key: Option<&str>, profiles: &[
         .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
         .unwrap_or_else(|| "$`".to_string());
 
+    let overlay_toggle_block = toggle_overlay_key
+        .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
+        .filter(|k| k != &toggle_key)
+        .map(|k| format!("{k}:: ToggleEnabled()\n"))
+        .unwrap_or_default();
+
     let header = format!(
         r###"#Requires AutoHotkey v2.0
 #SingleInstance Force
@@ -115,19 +127,48 @@ CoordMode "Pixel", "Screen"
 CoordMode "Mouse", "Screen"
 SetTitleMatchMode 2
 
-global enabled := false
+global enabled := true
+global overlayVisible := false
 GroupAdd "GAME", "ahk_exe {exe}"
+OnExit HideOverlayOnExit
 
-#HotIf WinActive("ahk_group GAME")
-{toggle_key}:: {{
-    global enabled
-    enabled := !enabled
+SendOverlayCommand(path) {{
     try {{
         xhr := ComObject("WinHttp.WinHttpRequest.5.1")
-        xhr.Open("GET", "http://127.0.0.1:17823/", false)
+        xhr.Open("GET", "http://127.0.0.1:17823/" path, false)
         xhr.Send()
     }}
 }}
+
+SyncOverlay(*) {{
+    global enabled, overlayVisible
+    shouldShow := enabled && WinActive("ahk_group GAME")
+    if (shouldShow = overlayVisible)
+        return
+    overlayVisible := shouldShow
+    SendOverlayCommand(shouldShow ? "show" : "hide")
+}}
+
+ToggleEnabled(*) {{
+    global enabled
+    enabled := !enabled
+    SyncOverlay()
+}}
+
+HideOverlayOnExit(*) {{
+    global overlayVisible
+    if !overlayVisible
+        return
+    overlayVisible := false
+    SendOverlayCommand("hide")
+}}
+
+SetTimer SyncOverlay, 200
+SyncOverlay()
+
+#HotIf WinActive("ahk_group GAME")
+{toggle_key}:: ToggleEnabled()
+{overlay_toggle_block}
 #HotIf
 
 #HotIf WinActive("ahk_group GAME") && enabled

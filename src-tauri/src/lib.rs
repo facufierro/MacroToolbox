@@ -64,7 +64,13 @@ fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if game.active_profile.as_ref() == Some(&profile_id) {
         if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
-            let script = ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, p);
+            let script = ahk::generate_script(
+                &game.exe,
+                game.toggle_hotkeys_key.as_deref(),
+                game.toggle_overlay_key.as_deref(),
+                &game.profiles,
+                p,
+            );
             let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
@@ -95,6 +101,15 @@ fn send_overlay(app: &tauri::AppHandle, items: &[config::OverlayItem]) {
     }
 }
 
+fn set_overlay_visible(app: &tauri::AppHandle, visible: bool) {
+    if let Some(window) = app.get_webview_window("overlay") {
+        let is_visible = window.is_visible().unwrap_or(false);
+        if visible != is_visible {
+            let _ = if visible { window.show() } else { window.hide() };
+        }
+    }
+}
+
 #[tauri::command]
 fn get_overlay_items(state: State<AppState>) -> Vec<config::OverlayItem> {
     state.overlay_items.lock().unwrap().clone()
@@ -108,15 +123,28 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
         };
         loop {
             if let Ok((mut stream, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
+                    let mut buffer = [0u8; 1024];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let action = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
                     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                     drop(stream);
-                    if let Some(w) = handle.get_webview_window("overlay") {
-                        let visible = w.is_visible().unwrap_or(false);
-                        eprintln!("[overlay] TCP toggle: visible={visible}");
-                        let _ = if visible { w.hide() } else { w.show() };
+                    match action {
+                        "/show" => set_overlay_visible(&handle, true),
+                        "/hide" => set_overlay_visible(&handle, false),
+                        _ => {
+                            if let Some(window) = handle.get_webview_window("overlay") {
+                                let visible = window.is_visible().unwrap_or(false);
+                                set_overlay_visible(&handle, !visible);
+                            }
+                        }
                     }
                 });
             }
@@ -135,7 +163,13 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
         game.active_profile = Some(profile_id.clone());
         let profile = game.profiles.iter().find(|p| p.id == profile_id)
             .ok_or_else(|| "Profile not found".to_string())?;
-        ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, profile)
+        ahk::generate_script(
+            &game.exe,
+            game.toggle_hotkeys_key.as_deref(),
+            game.toggle_overlay_key.as_deref(),
+            &game.profiles,
+            profile,
+        )
     };
 
     let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
@@ -160,7 +194,7 @@ fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String
         game.active_profile = None;
     }
     config::save_db(&state.db_path, &db)?;
-    if let Some(w) = app.get_webview_window("overlay") { let _ = w.hide(); }
+    set_overlay_visible(&app, false);
     Ok(db)
 }
 
@@ -482,7 +516,13 @@ fn start_watcher(handle: tauri::AppHandle) {
 
                     if game_open && !script_live {
                         if let Some(profile) = game.profiles.iter().find(|p| p.id == *profile_id) {
-                            let script      = ahk::generate_script(&game.exe, game.toggle_hotkeys_key.as_deref(), &game.profiles, profile);
+                            let script      = ahk::generate_script(
+                                &game.exe,
+                                game.toggle_hotkeys_key.as_deref(),
+                                game.toggle_overlay_key.as_deref(),
+                                &game.profiles,
+                                profile,
+                            );
                             let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
@@ -491,7 +531,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
-                        if let Some(w) = handle.get_webview_window("overlay") { let _ = w.hide(); }
+                        set_overlay_visible(&handle, false);
                     }
                 }
             }

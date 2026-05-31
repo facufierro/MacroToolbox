@@ -177,7 +177,7 @@ function GameModal({ initial, onSave, onClose }: {
         <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(default: `)</span>
           <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} />
         </label>
-        <label>Toggle Overlay Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(use a modifier, e.g. ctrl F12)</span>
+        <label>Toggle Overlay And Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(use a modifier, e.g. ctrl F12)</span>
           <KeyInput value={toggleOverlayKey} onChange={setToggleOverlayKey} />
         </label>
         <div className="modal__actions">
@@ -737,9 +737,6 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
         <div style={{ flex: 1 }} />
-        {isActive && (
-          <button className="btn btn--ghost btn--sm" onClick={() => api.toggleOverlay()} title="Toggle overlay">⊞</button>
-        )}
         {isActive
           ? <button className="btn btn--danger" onClick={deactivate}>■ Deactivate</button>
           : <button className="btn btn--primary" onClick={activate} disabled={!profileId}>▶ Activate</button>
