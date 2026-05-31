@@ -92,7 +92,7 @@ fn resolve_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a
     base
 }
 
-pub fn generate_script(exe: &str, game_name: &str, profiles: &[Profile], profile: &Profile) -> String {
+pub fn generate_script(exe: &str, profiles: &[Profile], profile: &Profile) -> String {
     let resolved = resolve_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
