@@ -5,6 +5,9 @@ export const api = {
   getDatabase: () =>
     invoke<Database>("get_database"),
 
+  readImageAsDataUrl: (path: string) =>
+    invoke<string>("read_image_as_data_url", { path }),
+
   upsertGame: (game: Game) =>
     invoke<Database>("upsert_game", { game }),
 

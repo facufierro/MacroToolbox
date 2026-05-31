@@ -104,6 +104,26 @@ fn get_ahk_status(state: State<AppState>) -> bool {
 }
 
 #[tauri::command]
+fn read_image_as_data_url(path: String) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let mime = match std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif"          => "image/gif",
+        "webp"         => "image/webp",
+        "ico"          => "image/x-icon",
+        _              => "image/png",
+    };
+    Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&bytes)))
+}
+
+#[tauri::command]
 fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     db.settings = settings;
@@ -194,6 +214,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            read_image_as_data_url,
             upsert_game,
             delete_game,
             upsert_profile,

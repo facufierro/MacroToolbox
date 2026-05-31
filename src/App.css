@@ -365,6 +365,19 @@ body {
 
 .modal__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
+.image-picker {
+  width: 100%;
+  height: 120px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px dashed var(--border);
+  transition: border-color 0.15s;
+}
+.image-picker:hover { border-color: var(--accent); }
+.image-picker .placeholder { height: 100%; border: none; border-radius: 0; }
+.image-picker__preview { width: 100%; height: 100%; object-fit: cover; display: block; }
+
 /* ── Form elements ─────────────────────────────────────────────────────────── */
 label { display: flex; flex-direction: column; gap: 6px; font-size: 0.85rem; color: var(--text2); }
 

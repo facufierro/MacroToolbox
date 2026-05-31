@@ -63,20 +63,47 @@ function GameModal({ initial, onSave, onClose }: {
 }) {
   const [name, setName] = useState(initial.name);
   const [exe, setExe] = useState(initial.exe);
+  const [image, setImage] = useState<string | null>(initial.image);
+
+  async function browseImage() {
+    const selected = await openDialog({
+      title: "Select Game Image",
+      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "ico"] }],
+      multiple: false,
+      directory: false,
+    });
+    if (!selected) return;
+    try {
+      setImage(await api.readImageAsDataUrl(selected as string));
+    } catch (e) {
+      alert(`Failed to load image: ${e}`);
+    }
+  }
 
   return (
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>{initial.name ? "Edit Game" : "Add Game"}</h2>
+        <div className="image-picker" onClick={browseImage}>
+          {image
+            ? <img src={image} alt="game" className="image-picker__preview" />
+            : <Placeholder label="click to set image" />}
+        </div>
+        {image && (
+          <button className="btn btn--ghost btn--sm" style={{ alignSelf: "flex-start" }}
+            onClick={e => { e.stopPropagation(); setImage(null); }}>
+            ✕ Remove image
+          </button>
+        )}
         <label>Name
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Helbreath Olympia" />
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. My Game" />
         </label>
         <label>Executable
-          <input value={exe} onChange={e => setExe(e.target.value)} placeholder="e.g. OlympiaGame_32.exe" />
+          <input value={exe} onChange={e => setExe(e.target.value)} placeholder="e.g. game.exe" />
         </label>
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave({ ...initial, name, exe })}>Save</button>
+          <button className="btn btn--primary" onClick={() => onSave({ ...initial, name, exe, image })}>Save</button>
         </div>
       </div>
     </div>
