@@ -39,10 +39,10 @@ function blankProfile(gameId: string): Profile {
   return { id: uid(), name: "", parent_id: null, hotkeys: [], states: [], overlay_items: [], overlay_triggers: [] };
 }
 
-function blankTimer():   OverlayItem { return { type: "timer", id: uid(), x: 0, y: 0, duration_ms: 60000, color: "#ffffff", font_size: 22, state_id: null, timer_state_id: null }; }
-function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), x: 0, y: 0, w: 64, h: 64, src: null, state_id: null }; }
-function blankBar():     OverlayItem { return { type: "bar",   id: uid(), x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100, state_id: null }; }
-function blankText():    OverlayItem { return { type: "text",  id: uid(), x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
+function blankTimer():   OverlayItem { return { type: "timer", id: uid(), name: "", x: 0, y: 0, duration_ms: 60000, color: "#ffffff", font_size: 22, state_id: null, timer_state_id: null }; }
+function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), name: "", x: 0, y: 0, w: 64, h: 64, src: null, state_id: null }; }
+function blankBar():     OverlayItem { return { type: "bar",   id: uid(), name: "", x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100, state_id: null }; }
+function blankText():    OverlayItem { return { type: "text",  id: uid(), name: "", x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
 function blankState(): ProfileState { return { id: uid(), name: "", duration_ms: null }; }
 
 function normalizeOptional(value: string): string | null {
@@ -379,6 +379,7 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
   onSave: (hk: Hotkey) => void;
   onClose: () => void;
 }) {
+  const [name, setName] = useState(initial.name);
   const [trigger, setTrigger] = useState(initial.trigger);
   const [recordingTrigger, setRecordingTrigger] = useState(false);
   const [steps, setSteps] = useState<Step[]>(() => {
@@ -418,6 +419,10 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
     <div className="modal-overlay">
       <div className="modal modal--wide" onClick={e => e.stopPropagation()}>
         <h2>{initial.trigger ? "Edit Hotkey" : "Add Hotkey"}</h2>
+
+        <label>Name
+          <input value={name} onChange={e => setName(e.target.value)} />
+        </label>
 
         <label>Trigger
           <div className="input-row">
@@ -459,7 +464,7 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
           <button className="btn btn--primary"
-            onClick={() => trigger.trim() && onSave({ trigger: trigger.trim(), behavior: stepsToString(steps), state_id: null })}>
+            onClick={() => trigger.trim() && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), state_id: null })}>
             Save
           </button>
         </div>
@@ -535,17 +540,18 @@ function overlayItemDesc(item: OverlayItem, states: ProfileState[]): string {
   const pos = `(${item.x}, ${item.y})`;
   const stateLabel = stateNameById(states, item.state_id);
   const stateText = stateLabel ? `, visible with ${stateLabel}` : "";
+  const nameText = item.name.trim() ? `${item.name}, ` : "";
   switch (item.type) {
     case "timer": {
       const m = Math.floor(item.duration_ms / 60000);
       const s = String(Math.floor((item.duration_ms % 60000) / 1000)).padStart(2, "0");
       const timerStateLabel = stateNameById(states, item.timer_state_id);
       const timerText = timerStateLabel ? `, reads ${timerStateLabel} timer` : "";
-      return `${m}:${s}, ${item.font_size}px at ${pos}${stateText}${timerText}`;
+      return `${nameText}${m}:${s}, ${item.font_size}px at ${pos}${stateText}${timerText}`;
     }
-    case "icon":  return `${item.w}x${item.h} at ${pos}${stateText}`;
-    case "bar":   return `${item.w}x${item.h} max ${item.max_value} at ${pos}${stateText}`;
-    case "text":  return `"${item.content}" ${item.font_size}px at ${pos}${stateText}`;
+    case "icon":  return `${nameText}${item.w}x${item.h} at ${pos}${stateText}`;
+    case "bar":   return `${nameText}${item.w}x${item.h} max ${item.max_value} at ${pos}${stateText}`;
+    case "text":  return `${nameText}"${item.content}" ${item.font_size}px at ${pos}${stateText}`;
   }
 }
 
@@ -557,7 +563,7 @@ function hotkeyDesc(hotkey: Hotkey, states: ProfileState[]): string {
   const behavior = hotkey.behavior.replace(/state\(([^)]+)\)/g, (_, stateId: string) => {
     return `state(${stateNameById(states, stateId) ?? stateId})`;
   });
-  return behavior || "No behavior";
+  return `${hotkey.name.trim() ? `${hotkey.name}, ` : ""}${behavior || "No behavior"}`;
 }
 
 function HotkeyRow({ hotkey, states, inherited, onEdit, onDelete, onOverride }: {
@@ -620,6 +626,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
   onSave: (item: OverlayItem) => void;
   onClose: () => void;
 }) {
+  const [name, setName] = useState(initial.name);
   const [x, setX] = useState(String(initial.x));
   const [y, setY] = useState(String(initial.y));
   const [stateId, setStateId] = useState(initial.state_id ?? "");
@@ -652,6 +659,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
   function build(): OverlayItem {
     const base = {
       id: initial.id,
+      name: name.trim(),
       x: parseFloat(x)||0,
       y: parseFloat(y)||0,
       state_id: stateId || null,
@@ -671,6 +679,10 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>{typeLabel}</h2>
+
+        <label>Name
+          <input value={name} onChange={e => setName(e.target.value)} />
+        </label>
 
         <label>Visible State
           <select value={stateId} onChange={e => setStateId(e.target.value)}>
@@ -966,7 +978,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <div className="step-add-btns">
             <span className="step-add-label">Add:</span>
             <button className="btn btn--ghost btn--sm"
-              onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: null, hotkey: { trigger: "", behavior: "", state_id: null }, gameExe: game.exe, states: stateOptions })}>
+              onClick={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", state_id: null }, gameExe: game.exe, states: stateOptions })}>
               Hotkey
             </button>
           </div>

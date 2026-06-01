@@ -78,6 +78,8 @@ fn default_timer_font_size() -> u32 {
 pub enum OverlayItem {
     Timer {
         id: String,
+        #[serde(default)]
+        name: String,
         x: f64,
         y: f64,
         duration_ms: u64,
@@ -102,6 +104,8 @@ pub enum OverlayItem {
     },
     Icon  {
         id: String,
+        #[serde(default)]
+        name: String,
         x: f64,
         y: f64,
         w: u32,
@@ -120,6 +124,8 @@ pub enum OverlayItem {
     },
     Bar   {
         id: String,
+        #[serde(default)]
+        name: String,
         x: f64,
         y: f64,
         w: u32,
@@ -139,6 +145,8 @@ pub enum OverlayItem {
     },
     Text  {
         id: String,
+        #[serde(default)]
+        name: String,
         x: f64,
         y: f64,
         font_size: u32,
@@ -171,6 +179,8 @@ pub struct OverlayTrigger {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hotkey {
+    #[serde(default)]
+    pub name: String,
     pub trigger: String,
     pub behavior: String,
     #[serde(default)]

@@ -1,4 +1,5 @@
 export interface Hotkey {
+  name: string;
   trigger: string;
   behavior: string;
   state_id: string | null;
@@ -38,6 +39,7 @@ export type OverlayDisplayMode = "always" | "timed_hotkey" | "toggle_hotkey";
 
 interface OverlayItemBase {
   id: string;
+  name: string;
   x: number;
   y: number;
   state_id: string | null;
