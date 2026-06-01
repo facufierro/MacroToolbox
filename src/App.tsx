@@ -60,13 +60,18 @@ function stateNameById(states: ProfileState[], stateId: string | null | undefine
   return states.find(state => state.id === stateId)?.name ?? null;
 }
 
+function bindingModifiers(e: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }) {
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push("ctrl");
+  if (e.shiftKey) mods.push("shift");
+  if (e.altKey) mods.push("alt");
+  if (e.metaKey) mods.push("win");
+  return mods;
+}
+
 function toAhkKey(e: KeyboardEvent): string {
   if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return "";
-  const mods: string[] = [];
-  if (e.ctrlKey)  mods.push("ctrl");
-  if (e.shiftKey) mods.push("shift");
-  if (e.altKey)   mods.push("alt");
-  if (e.metaKey)  mods.push("win");
+  const mods = bindingModifiers(e);
   const keyMap: Record<string, string> = {
     " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
     PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
@@ -80,25 +85,64 @@ function toAhkKey(e: KeyboardEvent): string {
   return [...mods, key].join(" ");
 }
 
-function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [recording, setRecording] = useState(false);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+function toAhkMouseButton(e: MouseEvent): string {
+  const buttonMap: Record<number, string> = {
+    0: "LButton",
+    1: "MButton",
+    2: "RButton",
+    3: "XButton1",
+    4: "XButton2",
+  };
+  const button = buttonMap[e.button];
+  if (!button) return "";
+  return [...bindingModifiers(e), button].join(" ");
+}
+
+function useBindingRecorder(recording: boolean, onCapture: (value: string) => void) {
+  const onCaptureRef = useRef(onCapture);
+  onCaptureRef.current = onCapture;
 
   useEffect(() => {
     if (!recording) return;
-    const handler = (e: KeyboardEvent) => {
+
+    const capture = (value: string) => {
+      if (value) onCaptureRef.current(value);
+    };
+    const keyHandler = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      const key = toAhkKey(e);
-      if (key) { onChangeRef.current(key); setRecording(false); }
+      capture(toAhkKey(e));
     };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
+    const mouseHandler = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      capture(toAhkMouseButton(e));
+    };
+    const contextMenuHandler = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+
+    window.addEventListener("keydown", keyHandler, true);
+    window.addEventListener("mousedown", mouseHandler, true);
+    window.addEventListener("contextmenu", contextMenuHandler, true);
+    return () => {
+      window.removeEventListener("keydown", keyHandler, true);
+      window.removeEventListener("mousedown", mouseHandler, true);
+      window.removeEventListener("contextmenu", contextMenuHandler, true);
+    };
   }, [recording]);
+}
+
+function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  useBindingRecorder(recording, key => {
+    onChange(key);
+    setRecording(false);
+  });
 
   return recording ? (
-    <div className="key-recording" onClick={() => setRecording(false)}>Press any key…</div>
+    <div className="key-recording">Press any key or mouse button…</div>
   ) : (
     <div className="input-row" style={{ margin: 0, flex: 1 }}>
       <input value={value} onChange={e => onChange(e.target.value)} placeholder="key" />
@@ -373,17 +417,10 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
     return parsed;
   });
 
-  useEffect(() => {
-    if (!recordingTrigger) return;
-    const handler = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      const key = toAhkKey(e);
-      if (key) { setTrigger(key); setRecordingTrigger(false); }
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [recordingTrigger]);
+  useBindingRecorder(recordingTrigger, key => {
+    setTrigger(key);
+    setRecordingTrigger(false);
+  });
 
   function addStep(step: Step) { setSteps(s => [...s, step]); }
   function removeStep(i: number) { setSteps(s => s.filter((_, idx) => idx !== i)); }
@@ -410,7 +447,7 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
         <label>Trigger
           <div className="input-row">
             {recordingTrigger
-              ? <div className="key-recording" onClick={() => setRecordingTrigger(false)}>Press any key combination…</div>
+              ? <div className="key-recording">Press any key or mouse combination…</div>
               : <input value={trigger} onChange={e => setTrigger(e.target.value)} />
             }
             <button className="btn btn--ghost btn--sm" onClick={() => setRecordingTrigger(r => !r)}>
