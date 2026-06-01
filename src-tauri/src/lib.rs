@@ -199,16 +199,53 @@ fn set_overlay_visible(app: &tauri::AppHandle, visible: bool) {
     }
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+fn main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window("main").or_else(|| {
+        app.webview_windows()
+            .into_iter()
+            .find_map(|(label, window)| (label != "overlay").then_some(window))
+    })
+}
+
+fn restore_main_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            use winapi::um::winuser::{SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW};
+
+            let hwnd = hwnd.0 as winapi::shared::windef::HWND;
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
     }
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = main_window(app) {
+        restore_main_window(&window);
+        return;
+    }
+
+    let app = app.clone();
+    let main_thread_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = main_window(&main_thread_app) {
+            restore_main_window(&window);
+        } else {
+            let labels = main_thread_app.webview_windows().keys().cloned().collect::<Vec<_>>();
+            eprintln!("[tray] restore failed: no main window found, labels={labels:?}");
+        }
+    });
+}
+
 fn hide_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = main_window(app) {
         let _ = window.hide();
     }
 }
