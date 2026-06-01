@@ -65,6 +65,14 @@ fn default_overlay_display_mode() -> String {
     "always".to_string()
 }
 
+fn default_timer_color() -> String {
+    "#ffffff".to_string()
+}
+
+fn default_timer_font_size() -> u32 {
+    22
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayItem {
@@ -73,7 +81,10 @@ pub enum OverlayItem {
         x: f64,
         y: f64,
         duration_ms: u64,
-        label: String,
+        #[serde(default = "default_timer_color")]
+        color: String,
+        #[serde(default = "default_timer_font_size")]
+        font_size: u32,
         #[serde(default)]
         state_id: Option<String>,
         #[serde(default)]

@@ -16,31 +16,23 @@ body.is-overlay #root {
 }
 
 .ov-timer {
-  display: flex;
-  flex-direction: column;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   background: rgba(0, 0, 0, 0.55);
   border-radius: 8px;
-  padding: 6px 12px;
-  min-width: 70px;
+  padding: 4px 10px;
+  min-width: 64px;
   border: 1px solid rgba(255,255,255,0.12);
   backdrop-filter: blur(4px);
 }
-.ov-timer__label {
-  font-size: 11px;
-  color: rgba(255,255,255,0.7);
-  margin-bottom: 2px;
-  font-family: 'Segoe UI', system-ui, sans-serif;
-}
 .ov-timer__time {
-  font-size: 22px;
   font-weight: 700;
-  color: #fff;
+  color: inherit;
+  font-size: 1em;
   font-family: 'Segoe UI', monospace, system-ui;
-  letter-spacing: 1px;
-}
-.ov-timer--done .ov-timer__time {
-  color: #f87171;
+  line-height: 1;
+  letter-spacing: 0.04em;
 }
 
 .ov-bar {

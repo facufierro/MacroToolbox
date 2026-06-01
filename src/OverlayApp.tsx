@@ -231,10 +231,10 @@ function TimerView({ item, style, remainingMs }: { item: OverlayItem & { type: "
   const ms = Math.max(0, remainingMs);
   const m = Math.floor(ms / 60000);
   const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
+  const color = ms === 0 ? "#f87171" : item.color;
 
   return (
-    <div style={style} className={`ov-timer${ms === 0 ? " ov-timer--done" : ""}`}>
-      {item.label && <div className="ov-timer__label">{item.label}</div>}
+    <div style={{ ...style, color, fontSize: item.font_size }} className={`ov-timer${ms === 0 ? " ov-timer--done" : ""}`}>
       <div className="ov-timer__time">{m}:{s}</div>
     </div>
   );
