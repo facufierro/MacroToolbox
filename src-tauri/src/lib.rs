@@ -208,11 +208,6 @@ fn main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow) {
-    let _ = window.set_skip_taskbar(false);
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
-
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
@@ -224,9 +219,30 @@ fn restore_main_window(window: &tauri::WebviewWindow) {
             SetForegroundWindow(hwnd);
         }
     }
+
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn hide_window_for_tray(window: &tauri::WebviewWindow) {
+    let _ = window.set_skip_taskbar(true);
+    let _ = window.minimize();
+
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            use winapi::um::winuser::{ShowWindow, SW_MINIMIZE};
+
+            let hwnd = hwnd.0 as winapi::shared::windef::HWND;
+            ShowWindow(hwnd, SW_MINIMIZE);
+        }
+    }
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    eprintln!("[tray] restore requested");
     if let Some(window) = main_window(app) {
         restore_main_window(&window);
         return;
@@ -245,8 +261,12 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 fn hide_main_window(app: &tauri::AppHandle) {
+    eprintln!("[tray] hide requested");
     if let Some(window) = main_window(app) {
-        let _ = window.hide();
+        hide_window_for_tray(&window);
+    } else {
+        let labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
+        eprintln!("[tray] hide failed: no main window found, labels={labels:?}");
     }
 }
 
@@ -1095,12 +1115,19 @@ pub fn run() {
 
                     if close_to_tray {
                         api.prevent_close();
-                        let _ = window.hide();
+                        hide_main_window(&app);
                     }
                 }
                 tauri::WindowEvent::Destroyed if window.label() == "main" => {
-                    window.app_handle().state::<AppState>()
-                        .ahk_manager.lock().unwrap().kill();
+                    let app = window.app_handle();
+                    let state = app.state::<AppState>();
+                    let close_to_tray = config::load_db(&state.db_path)
+                        .map(|db| db.settings.close_to_tray)
+                        .unwrap_or(false);
+
+                    if !close_to_tray {
+                        state.ahk_manager.lock().unwrap().kill();
+                    }
                 }
                 _ => {}
             }
