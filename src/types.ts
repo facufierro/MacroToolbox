@@ -78,6 +78,8 @@ export interface Game {
 
 export interface Settings {
   ahk_exe: string;
+  open_to_tray: boolean;
+  close_to_tray: boolean;
 }
 
 export interface Database {

@@ -326,6 +326,26 @@ body {
 .settings-view h2 { font-size: 1.2rem; }
 .settings-view small { color: var(--text2); font-size: 0.8rem; display: block; margin-top: 4px; }
 
+.checkbox-row {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text);
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.checkbox-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .input-row {
   display: flex;
   gap: 8px;

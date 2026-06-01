@@ -190,6 +190,10 @@ pub struct Hotkey {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub ahk_exe: String,
+    #[serde(default)]
+    pub open_to_tray: bool,
+    #[serde(default)]
+    pub close_to_tray: bool,
 }
 
 pub fn load_db(path: &Path) -> Result<Database, String> {

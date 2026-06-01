@@ -1,5 +1,7 @@
 use serde::Serialize;
 use std::{collections::HashMap, sync::{Mutex, OnceLock}};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod ahk;
@@ -8,6 +10,9 @@ mod config;
 use config::{Database, Game, Profile, Settings};
 
 const OVERLAY_PORT: u16 = 17823;
+const TRAY_SHOW_ID: &str = "tray_show";
+const TRAY_HIDE_ID: &str = "tray_hide";
+const TRAY_QUIT_ID: &str = "tray_quit";
 
 #[cfg(target_os = "windows")]
 struct BorderlessWindowState {
@@ -192,6 +197,66 @@ fn set_overlay_visible(app: &tauri::AppHandle, visible: bool) {
             let _ = if visible { window.show() } else { window.hide() };
         }
     }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn quit_app(app: &tauri::AppHandle) {
+    app.state::<AppState>().ahk_manager.lock().unwrap().kill();
+    app.exit(0);
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show_item = MenuItem::with_id(app, TRAY_SHOW_ID, "Show Hotkey Manager", true, None::<&str>)?;
+    let hide_item = MenuItem::with_id(app, TRAY_HIDE_ID, "Hide to Tray", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show_item, &hide_item, &separator, &quit_item])?;
+
+    let mut tray = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("Hotkey Manager")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_SHOW_ID => show_main_window(app),
+            TRAY_HIDE_ID => hide_main_window(app),
+            TRAY_QUIT_ID => quit_app(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+
+    tray.build(app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -983,9 +1048,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                window.app_handle().state::<AppState>()
-                    .ahk_manager.lock().unwrap().kill();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    let app = window.app_handle();
+                    let state = app.state::<AppState>();
+                    let close_to_tray = config::load_db(&state.db_path)
+                        .map(|db| db.settings.close_to_tray)
+                        .unwrap_or(false);
+
+                    if close_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+                tauri::WindowEvent::Destroyed if window.label() == "main" => {
+                    window.app_handle().state::<AppState>()
+                        .ahk_manager.lock().unwrap().kill();
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -1000,15 +1080,25 @@ pub fn run() {
                 config::save_db(&db_path, &Database::default())
                     .expect("failed to write initial db");
             }
+            let startup_settings = config::load_db(&db_path)
+                .map(|db| db.settings)
+                .unwrap_or_default();
 
             app.manage(AppState {
-                db_path,
+                db_path: db_path.clone(),
                 scripts_path: scripts_dir,
                 ahk_manager: Mutex::new(ahk::AhkManager::new()),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
             });
+
+            build_tray(app)?;
+            if startup_settings.open_to_tray {
+                hide_main_window(app.handle());
+            } else {
+                show_main_window(app.handle());
+            }
 
             #[cfg(target_os = "windows")]
             let (overlay_left, overlay_top, overlay_width, overlay_height) = {

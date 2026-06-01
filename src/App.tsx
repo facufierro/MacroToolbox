@@ -45,11 +45,6 @@ function blankBar():     OverlayItem { return { type: "bar",   id: uid(), name: 
 function blankText():    OverlayItem { return { type: "text",  id: uid(), name: "", x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
 function blankState(): ProfileState { return { id: uid(), name: "", duration_ms: null }; }
 
-function normalizeOptional(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
 function formatDuration(ms: number | null) {
   if (!ms || ms <= 0) return "0s";
   const totalSeconds = Math.round(ms / 1000);
@@ -108,18 +103,6 @@ function KeyInput({ value, onChange }: { value: string; onChange: (v: string) =>
     <div className="input-row" style={{ margin: 0, flex: 1 }}>
       <input value={value} onChange={e => onChange(e.target.value)} placeholder="key" />
       <button className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} title="Record key">⌨</button>
-    </div>
-  );
-}
-
-function HotkeySuggestions({ options, onPick }: { options: string[]; onPick: (value: string) => void }) {
-  if (options.length === 0) return null;
-  return (
-    <div className="step-add-btns" style={{ marginTop: 8 }}>
-      <span className="step-add-label">Use existing:</span>
-      {options.map(option => (
-        <button key={option} type="button" className="btn btn--ghost btn--sm" onClick={() => onPick(option)}>{option}</button>
-      ))}
     </div>
   );
 }
@@ -269,7 +252,7 @@ type Step =
 
 function parseSteps(behavior: string): Step[] {
   if (!behavior.trim()) return [];
-  return behavior.split(";").map(s => s.trim()).filter(Boolean).flatMap(s => {
+  return behavior.split(";").map(s => s.trim()).filter(Boolean).flatMap((s): Step[] => {
     let m: RegExpMatchArray | null;
     if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
     if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
@@ -1076,6 +1059,8 @@ function GameView({ game, running, onDb, onModal, onBack }: {
 
 function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void }) {
   const [ahkExe, setAhkExe] = useState(db.settings.ahk_exe);
+  const [openToTray, setOpenToTray] = useState(db.settings.open_to_tray);
+  const [closeToTray, setCloseToTray] = useState(db.settings.close_to_tray);
   const [saved, setSaved] = useState(false);
 
   async function browse() {
@@ -1090,7 +1075,11 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
 
   async function save() {
     try {
-      const updated = await api.saveSettings({ ahk_exe: ahkExe });
+      const updated = await api.saveSettings({
+        ahk_exe: ahkExe,
+        open_to_tray: openToTray,
+        close_to_tray: closeToTray,
+      });
       onDb(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -1106,6 +1095,28 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
           <button className="btn btn--ghost" onClick={browse}>Browse…</button>
         </div>
         <small>Example: C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe</small>
+      </label>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={openToTray}
+          onChange={e => setOpenToTray(e.target.checked)}
+        />
+        <span>
+          Open to tray
+          <small>Start hidden and restore from the tray icon.</small>
+        </span>
+      </label>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={closeToTray}
+          onChange={e => setCloseToTray(e.target.checked)}
+        />
+        <span>
+          Close to tray
+          <small>Hide the main window instead of quitting when closing it.</small>
+        </span>
       </label>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <button className="btn btn--primary" onClick={save}>Save</button>
@@ -1210,6 +1221,7 @@ export default function App() {
   }
 
   async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
+    void sourceGameId;
     try {
       const copy: Profile = {
         id: uid(),
