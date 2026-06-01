@@ -717,7 +717,17 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
 
         {initial.type === "icon" && <>
           <div className="image-picker" onClick={browseIcon}>
-            {src ? <img src={src} className="image-picker__preview" alt="icon" /> : <Placeholder />}
+            {src ? (
+              <img
+                src={src}
+                className="image-picker__preview image-picker__preview--contain"
+                alt="icon"
+                style={{
+                  width: `${Math.max(1, parseInt(iw) || 64)}px`,
+                  height: `${Math.max(1, parseInt(ih) || 64)}px`,
+                }}
+              />
+            ) : <Placeholder />}
           </div>
           {src && <button className="btn btn--ghost btn--sm modal-inline-action" onClick={() => setSrc(null)}>✕ Remove</button>}
           <div className="form-grid form-grid--2">
