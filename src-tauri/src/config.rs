@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -207,4 +208,82 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
 pub fn save_db(path: &Path, db: &Database) -> Result<(), String> {
     let content = serde_json::to_string_pretty(db).map_err(|e| e.to_string())?;
     std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+fn overlay_item_id(item: &OverlayItem) -> String {
+    match item {
+        OverlayItem::Timer { id, .. }
+        | OverlayItem::Icon { id, .. }
+        | OverlayItem::Bar { id, .. }
+        | OverlayItem::Text { id, .. } => id.clone(),
+    }
+}
+
+fn resolve_profile_entries<'a, T, F, K>(
+    profiles: &'a [Profile],
+    profile: &'a Profile,
+    select: F,
+    key_of: fn(&T) -> K,
+    visited: &mut HashSet<&'a str>,
+) -> Vec<&'a T>
+where
+    F: Copy + Fn(&'a Profile) -> &'a [T],
+    K: PartialEq,
+{
+    if !visited.insert(profile.id.as_str()) {
+        return vec![];
+    }
+
+    let mut resolved = match &profile.parent_id {
+        Some(parent_id) => profiles
+            .iter()
+            .find(|candidate| candidate.id == *parent_id)
+            .map(|parent| resolve_profile_entries(profiles, parent, select, key_of, visited))
+            .unwrap_or_default(),
+        None => vec![],
+    };
+
+    for value in select(profile) {
+        let key = key_of(value);
+        if let Some(slot) = resolved.iter_mut().find(|entry| key_of(*entry) == key) {
+            *slot = value;
+        } else {
+            resolved.push(value);
+        }
+    }
+
+    resolved
+}
+
+pub fn resolve_profile_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a Hotkey> {
+    let mut visited = HashSet::new();
+    resolve_profile_entries(
+        profiles,
+        profile,
+        |current| current.hotkeys.as_slice(),
+        |hotkey| hotkey.trigger.clone(),
+        &mut visited,
+    )
+}
+
+pub fn resolve_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a ProfileState> {
+    let mut visited = HashSet::new();
+    resolve_profile_entries(
+        profiles,
+        profile,
+        |current| current.states.as_slice(),
+        |state| state.id.clone(),
+        &mut visited,
+    )
+}
+
+pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a OverlayItem> {
+    let mut visited = HashSet::new();
+    resolve_profile_entries(
+        profiles,
+        profile,
+        |current| current.overlay_items.as_slice(),
+        overlay_item_id,
+        &mut visited,
+    )
 }

@@ -130,7 +130,7 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
             }
-            send_overlay(&app, p);
+            send_overlay(&app, &game.profiles, p);
         }
     }
 
@@ -150,19 +150,28 @@ fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -
     Ok(db)
 }
 
-fn build_overlay_config(profile: &Profile) -> config::OverlayConfig {
+fn build_overlay_config(profiles: &[Profile], profile: &Profile) -> config::OverlayConfig {
     config::OverlayConfig {
-        items: profile.overlay_items.clone(),
-        states: profile.states.clone(),
-        hotkeys: profile.hotkeys.iter().map(|hotkey| config::OverlayHotkeyStateBinding {
-            trigger: hotkey.trigger.clone(),
-            state_id: hotkey.state_id.clone(),
-        }).collect(),
+        items: config::resolve_profile_overlay_items(profiles, profile)
+            .into_iter()
+            .cloned()
+            .collect(),
+        states: config::resolve_profile_states(profiles, profile)
+            .into_iter()
+            .cloned()
+            .collect(),
+        hotkeys: config::resolve_profile_hotkeys(profiles, profile)
+            .into_iter()
+            .map(|hotkey| config::OverlayHotkeyStateBinding {
+                trigger: hotkey.trigger.clone(),
+                state_id: hotkey.state_id.clone(),
+            })
+            .collect(),
     }
 }
 
-fn send_overlay(app: &tauri::AppHandle, profile: &Profile) {
-    let overlay_config = build_overlay_config(profile);
+fn send_overlay(app: &tauri::AppHandle, profiles: &[Profile], profile: &Profile) {
+    let overlay_config = build_overlay_config(profiles, profile);
     *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.emit("overlay-config", &overlay_config);
@@ -526,7 +535,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
-        send_overlay(&app, profile);
+        send_overlay(&app, &game.profiles, profile);
         emit_overlay_event(&app, "profile_activated", None, None);
     }
 
@@ -1084,7 +1093,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
                             }
-                            send_overlay(&handle, profile);
+                            send_overlay(&handle, &game.profiles, profile);
                             emit_overlay_event(&handle, "profile_activated", None, None);
                         }
                     } else if !game_open && script_live {
@@ -1207,7 +1216,7 @@ pub fn run() {
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
                 if let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) {
                     if let Some(profile) = game.profiles.iter().find(|p| Some(&p.id) == game.active_profile.as_ref()) {
-                        send_overlay(app.handle(), profile);
+                        send_overlay(app.handle(), &game.profiles, profile);
                     }
                 }
             }

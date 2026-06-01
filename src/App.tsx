@@ -151,19 +151,53 @@ function KeyInput({ value, onChange }: { value: string; onChange: (v: string) =>
   );
 }
 
-function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
-  const base: Array<{ hotkey: Hotkey; own: boolean }> = profile.parent_id
+type ResolvedProfileEntry<T> = { value: T; own: boolean };
+
+function resolveProfileEntries<T>(
+  profiles: Profile[],
+  profile: Profile,
+  select: (profile: Profile) => T[],
+  keyOf: (value: T) => string,
+  visited = new Set<string>(),
+): Array<ResolvedProfileEntry<T>> {
+  if (visited.has(profile.id)) return [];
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(profile.id);
+
+  const resolved: Array<ResolvedProfileEntry<T>> = profile.parent_id
     ? (() => {
-        const parent = profiles.find(p => p.id === profile.parent_id);
-        return parent ? resolveHotkeys(profiles, parent).map(r => ({ ...r, own: false })) : [];
+        const parent = profiles.find(candidate => candidate.id === profile.parent_id);
+        return parent
+          ? resolveProfileEntries(profiles, parent, select, keyOf, nextVisited).map(entry => ({ ...entry, own: false }))
+          : [];
       })()
     : [];
-  for (const hk of profile.hotkeys) {
-    const idx = base.findIndex(r => r.hotkey.trigger === hk.trigger);
-    if (idx >= 0) base[idx] = { hotkey: hk, own: true };
-    else base.push({ hotkey: hk, own: true });
+
+  for (const value of select(profile)) {
+    const key = keyOf(value);
+    const index = resolved.findIndex(entry => keyOf(entry.value) === key);
+    const entry = { value, own: true };
+    if (index >= 0) resolved[index] = entry;
+    else resolved.push(entry);
   }
-  return base;
+
+  return resolved;
+}
+
+function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
+  return resolveProfileEntries(profiles, profile, current => current.hotkeys, hotkey => hotkey.trigger)
+    .map(({ value, own }) => ({ hotkey: value, own }));
+}
+
+function resolveStates(profiles: Profile[], profile: Profile): Array<{ state: ProfileState; own: boolean }> {
+  return resolveProfileEntries(profiles, profile, current => current.states, state => state.id)
+    .map(({ value, own }) => ({ state: value, own }));
+}
+
+function resolveOverlayItems(profiles: Profile[], profile: Profile): Array<{ item: OverlayItem; own: boolean }> {
+  return resolveProfileEntries(profiles, profile, current => current.overlay_items, item => item.id)
+    .map(({ value, own }) => ({ item: value, own }));
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -613,27 +647,52 @@ function HotkeyRow({ hotkey, states, inherited, onEdit, onDelete, onOverride }: 
   );
 }
 
-function OverlayItemRow({ item, states, onEdit, onDelete }: { item: OverlayItem; states: ProfileState[]; onEdit: () => void; onDelete: () => void }) {
+function OverlayItemRow({ item, states, inherited, onEdit, onDelete, onOverride }: {
+  item: OverlayItem;
+  states: ProfileState[];
+  inherited: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  onOverride?: () => void;
+}) {
   return (
-    <div className="step-row">
+    <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
       <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{item.type}</span>
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
-        <button className="icon-btn" onClick={onEdit}>✏</button>
-        <button className="icon-btn icon-btn--danger" onClick={onDelete}>✕</button>
+        {inherited ? (
+          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+        ) : (
+          <>
+            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function StateRow({ state, onEdit, onDelete }: { state: ProfileState; onEdit: () => void; onDelete: () => void }) {
+function StateRow({ state, inherited, onEdit, onDelete, onOverride }: {
+  state: ProfileState;
+  inherited: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  onOverride?: () => void;
+}) {
   return (
-    <div className="step-row">
+    <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
       <span className="overlay-type-badge overlay-type-badge--text">state</span>
       <span className="overlay-item-desc">{stateDesc(state)}</span>
       <div className="step-row__btns">
-        <button className="icon-btn" onClick={onEdit}>✏</button>
-        <button className="icon-btn icon-btn--danger" onClick={onDelete}>✕</button>
+        {inherited ? (
+          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+        ) : (
+          <>
+            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -920,7 +979,10 @@ function GameView({ game, running, onDb, onModal, onBack }: {
   }
 
   const isActive = game.active_profile === profileId;
-  const stateOptions = profile?.states ?? [];
+  const resolvedHotkeys = profile ? resolveHotkeys(game.profiles, profile) : [];
+  const resolvedStates = profile ? resolveStates(game.profiles, profile) : [];
+  const resolvedOverlayItems = profile ? resolveOverlayItems(game.profiles, profile) : [];
+  const stateOptions = resolvedStates.map(({ state }) => state);
 
   return (
     <div className="game-view">
@@ -1003,7 +1065,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
             </button>
           </div>
           <div className="steps-list" style={{ marginTop: 8 }}>
-            {resolveHotkeys(game.profiles, profile).map(({ hotkey: hk, own }, i) => {
+            {resolvedHotkeys.map(({ hotkey: hk, own }, i) => {
               const ownIndex = own ? profile.hotkeys.findIndex(h => h.trigger === hk.trigger) : -1;
               return (
                 <HotkeyRow
@@ -1020,7 +1082,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
                 />
               );
             })}
-            {resolveHotkeys(game.profiles, profile).length === 0 && (
+            {resolvedHotkeys.length === 0 && (
               <div className="steps-empty">No hotkeys yet</div>
             )}
           </div>
@@ -1036,27 +1098,33 @@ function GameView({ game, running, onDb, onModal, onBack }: {
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "profileState", gameId: game.id, profileId, index: null, state: blankState() })}>State</button>
           </div>
           <div className="steps-list" style={{ marginTop: 8 }}>
-            {profile.states.map((state, i) => (
-              <StateRow key={state.id} state={state}
-                onEdit={() => onModal({ type: "profileState", gameId: game.id, profileId, index: i, state })}
-                onDelete={async () => {
-                  const remainingStates = profile.states.filter((_, idx) => idx !== i);
-                  const updated = {
-                    ...profile,
-                    states: remainingStates,
-                    hotkeys: profile.hotkeys.map(hotkey => hotkey.state_id === state.id ? { ...hotkey, state_id: null } : hotkey),
-                    overlay_items: profile.overlay_items.map(item => item.type === "timer"
-                      ? {
-                          ...item,
-                          state_id: item.state_id === state.id ? null : item.state_id,
-                          timer_state_id: item.timer_state_id === state.id ? null : item.timer_state_id,
-                        }
-                      : { ...item, state_id: item.state_id === state.id ? null : item.state_id }),
-                  };
-                  onDb(await api.upsertProfile(game.id, updated));
-                }} />
-            ))}
-            {profile.states.length === 0 && <div className="steps-empty">No states yet</div>}
+            {resolvedStates.map(({ state, own }) => {
+              const ownIndex = own ? profile.states.findIndex(candidate => candidate.id === state.id) : -1;
+              return (
+                <StateRow key={state.id} state={state} inherited={!own}
+                  onEdit={own ? () => onModal({ type: "profileState", gameId: game.id, profileId, index: ownIndex, state }) : undefined}
+                  onDelete={own ? async () => {
+                    const remainingStates = profile.states.filter((_, idx) => idx !== ownIndex);
+                    const updated = {
+                      ...profile,
+                      states: remainingStates,
+                      hotkeys: profile.hotkeys.map(hotkey => hotkey.state_id === state.id ? { ...hotkey, state_id: null } : hotkey),
+                      overlay_items: profile.overlay_items.map(item => item.type === "timer"
+                        ? {
+                            ...item,
+                            state_id: item.state_id === state.id ? null : item.state_id,
+                            timer_state_id: item.timer_state_id === state.id ? null : item.timer_state_id,
+                          }
+                        : { ...item, state_id: item.state_id === state.id ? null : item.state_id }),
+                    };
+                    onDb(await api.upsertProfile(game.id, updated));
+                  } : undefined}
+                  onOverride={!own ? async () => {
+                    onDb(await api.upsertProfile(game.id, { ...profile, states: [...profile.states, { ...state }] }));
+                  } : undefined} />
+              );
+            })}
+            {resolvedStates.length === 0 && <div className="steps-empty">No states yet</div>}
           </div>
         </div>
       ) : (
@@ -1074,15 +1142,21 @@ function GameView({ game, running, onDb, onModal, onBack }: {
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankText(),  gameExe: game.exe, states: stateOptions })}>Text</button>
           </div>
           <div className="steps-list" style={{ marginTop: 8 }}>
-            {profile.overlay_items.map((item, i) => (
-              <OverlayItemRow key={item.id} item={item} states={stateOptions}
-                onEdit={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: i, item, gameExe: game.exe, states: stateOptions })}
-                onDelete={async () => {
-                  const updated = { ...profile, overlay_items: profile.overlay_items.filter((_, idx) => idx !== i) };
-                  onDb(await api.upsertProfile(game.id, updated));
-                }} />
-            ))}
-            {profile.overlay_items.length === 0 && <div className="steps-empty">No overlay items yet</div>}
+            {resolvedOverlayItems.map(({ item, own }) => {
+              const ownIndex = own ? profile.overlay_items.findIndex(candidate => candidate.id === item.id) : -1;
+              return (
+                <OverlayItemRow key={item.id} item={item} states={stateOptions} inherited={!own}
+                  onEdit={own ? () => onModal({ type: "overlayItem", gameId: game.id, profileId, index: ownIndex, item, gameExe: game.exe, states: stateOptions }) : undefined}
+                  onDelete={own ? async () => {
+                    const updated = { ...profile, overlay_items: profile.overlay_items.filter((_, idx) => idx !== ownIndex) };
+                    onDb(await api.upsertProfile(game.id, updated));
+                  } : undefined}
+                  onOverride={!own ? async () => {
+                    onDb(await api.upsertProfile(game.id, { ...profile, overlay_items: [...profile.overlay_items, { ...item }] }));
+                  } : undefined} />
+              );
+            })}
+            {resolvedOverlayItems.length === 0 && <div className="steps-empty">No overlay items yet</div>}
           </div>
         </div>
       ) : (

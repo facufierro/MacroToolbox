@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::{Child, Command};
 
-use crate::config::{Hotkey, Profile};
+use crate::config::{self, Profile};
 
 pub struct AhkManager {
     process: Option<Child>,
@@ -74,24 +74,6 @@ fn resolve_ahk_exe(configured: &str) -> String {
     configured.to_string()
 }
 
-fn resolve_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a Hotkey> {
-    let mut base: Vec<&Hotkey> = match &profile.parent_id {
-        Some(pid) => profiles.iter()
-            .find(|p| p.id == *pid)
-            .map(|p| resolve_hotkeys(profiles, p))
-            .unwrap_or_default(),
-        None => vec![],
-    };
-    for hk in &profile.hotkeys {
-        if let Some(slot) = base.iter_mut().find(|h| h.trigger == hk.trigger) {
-            *slot = hk;
-        } else {
-            base.push(hk);
-        }
-    }
-    base
-}
-
 pub fn generate_script(
     exe: &str,
     toggle_hotkeys_key: Option<&str>,
@@ -99,7 +81,7 @@ pub fn generate_script(
     profiles: &[Profile],
     profile: &Profile,
 ) -> String {
-    let resolved = resolve_hotkeys(profiles, profile);
+    let resolved = config::resolve_profile_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
     for hk in resolved {
