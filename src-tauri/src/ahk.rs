@@ -106,7 +106,10 @@ pub fn generate_script(
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() { continue; }
         let behavior = hk.behavior.replace('"', "\"\"");
-        hotkey_lines.push_str(&format!("{ahk_key}:: ExecuteBehavior(\"{behavior}\")\n"));
+        let trigger = hk.trigger.replace('"', "\"\"");
+        hotkey_lines.push_str(&format!(
+            "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
+        ));
     }
 
     let toggle_key = toggle_hotkeys_key
@@ -138,6 +141,26 @@ SendOverlayCommand(path) {{
         xhr.Open("GET", "http://127.0.0.1:17823/" path, false)
         xhr.Send()
     }}
+}}
+
+UriEncode(str) {{
+    result := ""
+    loop parse, str
+    {{
+        code := Ord(A_LoopField)
+        if ((code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A) || code = 0x2D || code = 0x2E || code = 0x5F || code = 0x7E)
+            result .= Chr(code)
+        else
+            result .= Format("%{{:02X}}", code)
+    }}
+    return result
+}}
+
+SendAppEvent(eventType, hotkeyTrigger := "") {{
+    path := "event?type=" UriEncode(eventType)
+    if (hotkeyTrigger != "")
+        path .= "&hotkey_trigger=" UriEncode(hotkeyTrigger)
+    SendOverlayCommand(path)
 }}
 
 SyncOverlay(*) {{

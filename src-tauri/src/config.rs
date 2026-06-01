@@ -30,15 +30,75 @@ pub struct Profile {
     pub hotkeys: Vec<Hotkey>,
     #[serde(default)]
     pub overlay_items: Vec<OverlayItem>,
+    #[serde(default)]
+    pub overlay_triggers: Vec<OverlayTrigger>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OverlayConfig {
+    #[serde(default)]
+    pub items: Vec<OverlayItem>,
+    #[serde(default)]
+    pub triggers: Vec<OverlayTrigger>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayItem {
-    Timer { id: String, x: f64, y: f64, duration_ms: u64, label: String },
-    Icon  { id: String, x: f64, y: f64, w: u32, h: u32, src: Option<String> },
-    Bar   { id: String, x: f64, y: f64, w: u32, h: u32, color: String, max_value: f64 },
-    Text  { id: String, x: f64, y: f64, font_size: u32, color: String, content: String },
+    Timer {
+        id: String,
+        x: f64,
+        y: f64,
+        duration_ms: u64,
+        label: String,
+        #[serde(default)]
+        visible_when: Option<String>,
+        #[serde(default)]
+        timer_key: Option<String>,
+    },
+    Icon  {
+        id: String,
+        x: f64,
+        y: f64,
+        w: u32,
+        h: u32,
+        src: Option<String>,
+        #[serde(default)]
+        visible_when: Option<String>,
+    },
+    Bar   {
+        id: String,
+        x: f64,
+        y: f64,
+        w: u32,
+        h: u32,
+        color: String,
+        max_value: f64,
+        #[serde(default)]
+        visible_when: Option<String>,
+    },
+    Text  {
+        id: String,
+        x: f64,
+        y: f64,
+        font_size: u32,
+        color: String,
+        content: String,
+        #[serde(default)]
+        visible_when: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayTrigger {
+    pub id: String,
+    pub event: String,
+    #[serde(default)]
+    pub hotkey_trigger: Option<String>,
+    pub action: String,
+    pub state_key: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

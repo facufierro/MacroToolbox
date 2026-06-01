@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::{collections::HashMap, sync::{Mutex, OnceLock}};
 use tauri::{Emitter, Manager, State};
 
@@ -28,9 +29,15 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     pub ahk_manager: Mutex<ahk::AhkManager>,
-    pub overlay_items: Mutex<Vec<config::OverlayItem>>,
+    pub overlay_config: Mutex<config::OverlayConfig>,
     #[cfg(target_os = "windows")]
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OverlayEventPayload {
+    event: String,
+    hotkey_trigger: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -117,7 +124,7 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
             }
-            send_overlay(&app, &p.overlay_items);
+            send_overlay(&app, p);
         }
     }
 
@@ -137,10 +144,38 @@ fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -
     Ok(db)
 }
 
-fn send_overlay(app: &tauri::AppHandle, items: &[config::OverlayItem]) {
-    *app.state::<AppState>().overlay_items.lock().unwrap() = items.to_vec();
+fn build_overlay_config(profile: &Profile) -> config::OverlayConfig {
+    config::OverlayConfig {
+        items: profile.overlay_items.clone(),
+        triggers: profile.overlay_triggers.clone(),
+    }
+}
+
+fn send_overlay(app: &tauri::AppHandle, profile: &Profile) {
+    let overlay_config = build_overlay_config(profile);
+    *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
     if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.emit("overlay-items", items);
+        let _ = w.emit("overlay-config", &overlay_config);
+    }
+}
+
+fn clear_overlay(app: &tauri::AppHandle) {
+    let overlay_config = config::OverlayConfig::default();
+    *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.emit("overlay-config", &overlay_config);
+    }
+}
+
+fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.emit(
+            "overlay-event",
+            OverlayEventPayload {
+                event: event.to_string(),
+                hotkey_trigger,
+            },
+        );
     }
 }
 
@@ -154,8 +189,8 @@ fn set_overlay_visible(app: &tauri::AppHandle, visible: bool) {
 }
 
 #[tauri::command]
-fn get_overlay_items(state: State<AppState>) -> Vec<config::OverlayItem> {
-    state.overlay_items.lock().unwrap().clone()
+fn get_overlay_config(state: State<AppState>) -> config::OverlayConfig {
+    state.overlay_config.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -218,6 +253,43 @@ fn get_active_game_viewport(handle: &tauri::AppHandle) -> Result<WindowClientBou
     Ok(bounds)
 }
 
+fn decode_query_value(value: &str) -> String {
+    let mut out = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'+' => {
+                out.push(b' ');
+                idx += 1;
+            }
+            b'%' if idx + 2 < bytes.len() => {
+                let hex = &value[idx + 1..idx + 3];
+                if let Ok(parsed) = u8::from_str_radix(hex, 16) {
+                    out.push(parsed);
+                    idx += 3;
+                } else {
+                    out.push(bytes[idx]);
+                    idx += 1;
+                }
+            }
+            byte => {
+                out.push(byte);
+                idx += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn get_query_param(path: &str, key: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(name, value)| (name == key).then(|| decode_query_value(value)))
+}
+
 fn start_overlay_listener(handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{OVERLAY_PORT}")).await {
@@ -237,38 +309,49 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/");
-                    let (status, body) = match action {
-                        "/show" => {
-                            set_overlay_visible(&handle, true);
-                            ("200 OK", Vec::new())
-                        }
-                        "/hide" => {
-                            set_overlay_visible(&handle, false);
-                            ("200 OK", Vec::new())
-                        }
-                        "/viewport" => {
-                            #[cfg(target_os = "windows")]
-                            {
-                                match get_active_game_viewport(&handle) {
-                                    Ok(bounds) => (
-                                        "200 OK",
-                                        format!("{},{},{},{}", bounds.left, bounds.top, bounds.width, bounds.height).into_bytes(),
-                                    ),
-                                    Err(err) => ("404 Not Found", err.into_bytes()),
+                    let route = action.split('?').next().unwrap_or(action);
+                    let (status, body) = if route == "/event" {
+                        let event = get_query_param(action, "type")
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| "hotkey_triggered".to_string());
+                        let hotkey_trigger = get_query_param(action, "hotkey_trigger")
+                            .filter(|value| !value.is_empty());
+                        emit_overlay_event(&handle, &event, hotkey_trigger);
+                        ("200 OK", Vec::new())
+                    } else {
+                        match route {
+                            "/show" => {
+                                set_overlay_visible(&handle, true);
+                                ("200 OK", Vec::new())
+                            }
+                            "/hide" => {
+                                set_overlay_visible(&handle, false);
+                                ("200 OK", Vec::new())
+                            }
+                            "/viewport" => {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    match get_active_game_viewport(&handle) {
+                                        Ok(bounds) => (
+                                            "200 OK",
+                                            format!("{},{},{},{}", bounds.left, bounds.top, bounds.width, bounds.height).into_bytes(),
+                                        ),
+                                        Err(err) => ("404 Not Found", err.into_bytes()),
+                                    }
+                                }
+
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    ("501 Not Implemented", b"Not supported on this platform".to_vec())
                                 }
                             }
-
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                ("501 Not Implemented", b"Not supported on this platform".to_vec())
+                            _ => {
+                                if let Some(window) = handle.get_webview_window("overlay") {
+                                    let visible = window.is_visible().unwrap_or(false);
+                                    set_overlay_visible(&handle, !visible);
+                                }
+                                ("200 OK", Vec::new())
                             }
-                        }
-                        _ => {
-                            if let Some(window) = handle.get_webview_window("overlay") {
-                                let visible = window.is_visible().unwrap_or(false);
-                                set_overlay_visible(&handle, !visible);
-                            }
-                            ("200 OK", Vec::new())
                         }
                     };
 
@@ -312,10 +395,10 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
     config::save_db(&state.db_path, &db)?;
 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
-    let items = game.profiles.iter().find(|p| p.id == profile_id)
-        .map(|p| p.overlay_items.as_slice())
-        .unwrap_or_default();
-    send_overlay(&app, items);
+    if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
+        send_overlay(&app, profile);
+        emit_overlay_event(&app, "profile_activated", None);
+    }
 
     Ok(db)
 }
@@ -328,6 +411,8 @@ fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String
         game.active_profile = None;
     }
     config::save_db(&state.db_path, &db)?;
+    emit_overlay_event(&app, "profile_deactivated", None);
+    clear_overlay(&app);
     set_overlay_visible(&app, false);
     Ok(db)
 }
@@ -869,10 +954,13 @@ fn start_watcher(handle: tauri::AppHandle) {
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
                             }
-                            send_overlay(&handle, &profile.overlay_items);
+                            send_overlay(&handle, profile);
+                            emit_overlay_event(&handle, "profile_activated", None);
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
+                        emit_overlay_event(&handle, "profile_deactivated", None);
+                        clear_overlay(&handle);
                         set_overlay_visible(&handle, false);
                     }
                 }
@@ -909,7 +997,7 @@ pub fn run() {
                 db_path,
                 scripts_path: scripts_dir,
                 ahk_manager: Mutex::new(ahk::AhkManager::new()),
-                overlay_items: Mutex::new(vec![]),
+                overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
             });
@@ -957,7 +1045,7 @@ pub fn run() {
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
                 if let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) {
                     if let Some(profile) = game.profiles.iter().find(|p| Some(&p.id) == game.active_profile.as_ref()) {
-                        send_overlay(app.handle(), &profile.overlay_items);
+                        send_overlay(app.handle(), profile);
                     }
                 }
             }
@@ -969,7 +1057,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_database,
             debug_overlay_log,
-            get_overlay_items,
+            get_overlay_config,
             get_overlay_origin,
             toggle_overlay,
             pick_coordinate,
