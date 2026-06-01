@@ -3,7 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type {
   Database,
-  Game,
+  Scope,
   Profile,
   Hotkey,
   OverlayItem,
@@ -15,7 +15,7 @@ type View = "dashboard" | "game" | "settings";
 
 type Modal =
   | { type: "addGame" }
-  | { type: "editGame"; game: Game }
+  | { type: "editGame"; game: Scope }
   | { type: "addProfile"; gameId: string }
   | { type: "editProfile"; gameId: string; profile: Profile }
   | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string; states: ProfileState[] }
@@ -29,12 +29,27 @@ type Modal =
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+const GLOBAL_GAME_EXE = "*";
+
 function uid() {
   return crypto.randomUUID();
 }
 
-function blankGame(): Game {
-  return { id: uid(), name: "", exe: "", image: null, active_profile: null, profiles: [], toggle_hotkeys_key: null, toggle_overlay_key: null };
+function blankGame(): Scope {
+  return { id: uid(), name: "", exe: "", image: null, active_profile: null, profiles: [], overlay_disabled: false, toggle_hotkeys_key: null, toggle_overlay_key: null };
+}
+
+function isGlobalGame(game: Pick<Scope, "exe">) {
+  return game.exe.trim() === GLOBAL_GAME_EXE;
+}
+
+function blankGlobalGame(): Scope {
+  return {
+    ...blankGame(),
+    name: "Global",
+    exe: GLOBAL_GAME_EXE,
+    profiles: [{ ...blankProfile("global"), name: "Global" }],
+  };
 }
 
 function blankProfile(gameId: string): Profile {
@@ -214,7 +229,7 @@ function Placeholder({ label }: { label?: string }) {
 }
 
 function GameCard({ game, active, running, onClick }: {
-  game: Game; active: boolean; running: boolean; onClick: () => void;
+  game: Scope; active: boolean; running: boolean; onClick: () => void;
 }) {
   const armed = !!game.active_profile;
   return (
@@ -233,10 +248,11 @@ function GameCard({ game, active, running, onClick }: {
 }
 
 function GameModal({ initial, onSave, onClose }: {
-  initial: Game;
-  onSave: (g: Game) => void;
+  initial: Scope;
+  onSave: (g: Scope) => void;
   onClose: () => void;
 }) {
+  const globalGame = isGlobalGame(initial);
   const [name, setName] = useState(initial.name);
   const [exe, setExe] = useState(initial.exe);
   const [image, setImage] = useState<string | null>(initial.image);
@@ -245,7 +261,7 @@ function GameModal({ initial, onSave, onClose }: {
 
   async function browseImage() {
     const selected = await openDialog({
-      title: "Select Game Image",
+      title: "Select Scope Image",
       filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "ico"] }],
       multiple: false,
       directory: false,
@@ -261,10 +277,10 @@ function GameModal({ initial, onSave, onClose }: {
   return (
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>{initial.name ? "Edit Game" : "Add Game"}</h2>
+        <h2>{initial.name ? "Edit Scope" : "Add Scope"}</h2>
         <div className="image-picker" onClick={browseImage}>
           {image
-            ? <img src={image} alt="game" className="image-picker__preview" />
+            ? <img src={image} alt="scope" className="image-picker__preview" />
             : <Placeholder />}
         </div>
         {image && (
@@ -277,7 +293,8 @@ function GameModal({ initial, onSave, onClose }: {
           <input value={name} onChange={e => setName(e.target.value)} />
         </label>
         <label>Executable
-          <input value={exe} onChange={e => setExe(e.target.value)} />
+          <input value={exe} onChange={e => setExe(e.target.value)} disabled={globalGame} />
+          {globalGame && <small>Global scopes apply to every app instead of a single executable.</small>}
         </label>
         <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(default: `)</span>
           <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} />
@@ -384,7 +401,7 @@ function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe:
       <input type="number" min={0} max={100} step={0.1} value={x} onChange={e => onChange(e.target.value, y)} placeholder="x %" />
       <input type="number" min={0} max={100} step={0.1} value={y} onChange={e => onChange(x, e.target.value)} placeholder="y %" />
       <button className="btn btn--ghost btn--sm" onClick={pick} disabled={picking}>
-        {picking ? "Click game…" : "🎯 Pick"}
+        {picking ? "Click target window…" : "🎯 Pick"}
       </button>
     </div>
   );
@@ -558,7 +575,7 @@ function SetParentModal({ profiles, current, onSave, onClose }: {
 }
 
 function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
-  games: Game[];
+  games: Scope[];
   sourceProfile: Profile;
   onSave: (targetGameId: string, name: string) => void;
   onClose: () => void;
@@ -569,7 +586,7 @@ function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>Copy Profile</h2>
-        <label>Target Game
+        <label>Target Scope
           <select value={targetGameId} onChange={e => setTargetGameId(e.target.value)}>
             {[...games].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
               <option key={g.id} value={g.id}>{g.name}</option>
@@ -599,7 +616,7 @@ function CopyToProfileModal({
   onSave,
   onClose,
 }: {
-  games: Game[];
+  games: Scope[];
   title: string;
   sourceGameId: string;
   sourceProfileId: string;
@@ -620,7 +637,7 @@ function CopyToProfileModal({
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>{title}</h2>
-        <label>Target Game
+        <label>Target Scope
           <select value={targetGameId} onChange={e => setTargetGameId(e.target.value)}>
             {[...games].sort((a, b) => a.name.localeCompare(b.name)).map(game => (
               <option key={game.id} value={game.id}>{game.name}</option>
@@ -991,12 +1008,13 @@ function StateModal({ initial, onSave, onClose }: {
 // ── Game detail view ──────────────────────────────────────────────────────────
 
 function GameView({ game, running, onDb, onModal, onBack }: {
-  game: Game;
+  game: Scope;
   running: boolean;
   onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
   onBack: () => void;
 }) {
+  const globalGame = isGlobalGame(game);
   const [profileId, setProfileId] = useState<string>(
     game.active_profile ?? game.profiles[0]?.id ?? ""
   );
@@ -1062,28 +1080,40 @@ function GameView({ game, running, onDb, onModal, onBack }: {
   const resolvedOverlayItems = profile ? resolveOverlayItems(game.profiles, profile) : [];
   const stateOptions = resolvedStates.map(({ state }) => state);
 
+  async function toggleOverlayDisabled() {
+    try {
+      const db = await api.upsertGame({ ...game, overlay_disabled: !game.overlay_disabled });
+      onDb(db);
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
   return (
     <div className="game-view">
       {/* Header */}
       <div className="game-view__header">
         <div className="game-view__art">
-          {game.image ? <img src={game.image} alt={game.name} /> : <Placeholder label="game banner" />}
+          {game.image ? <img src={game.image} alt={game.name} /> : <Placeholder label="scope banner" />}
         </div>
         <div className="game-view__meta">
           <h1>{game.name}</h1>
-          <p className="exe-label">{game.exe}</p>
+          <p className="exe-label">{globalGame ? "Global profile for every app" : game.exe}</p>
           <div className="game-view__actions">
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editGame", game })}>Edit</button>
-            <button className="btn btn--ghost btn--sm" onClick={async () => {
+            <button className="btn btn--ghost btn--sm" onClick={toggleOverlayDisabled}>
+              {game.overlay_disabled ? "Enable Overlay" : "Disable Overlay"}
+            </button>
+            {!globalGame && <button className="btn btn--ghost btn--sm" onClick={async () => {
               try { setIsBorderless(await api.makeBorderlessFullscreen(game.exe)); }
               catch (e) { alert(String(e)); }
-            }}>⛶ {isBorderless ? "Restore" : "Borderless"}</button>
-            <button className="btn btn--danger btn--sm" onClick={async () => {
+            }}>⛶ {isBorderless ? "Restore" : "Borderless"}</button>}
+            {!globalGame && <button className="btn btn--danger btn--sm" onClick={async () => {
               if (!confirm(`Force-kill "${game.exe}"?`)) return;
               try { await api.killGame(game.exe); }
               catch (e) { alert(String(e)); }
-            }}>Kill Game</button>
-            <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Game</button>
+            }}>Kill Process</button>}
+            <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Scope</button>
           </div>
         </div>
       </div>
@@ -1344,15 +1374,31 @@ export default function App() {
     setDb(updated);
   }
 
-  const selectedGame = db?.games.find(g => g.id === selectedGameId) ?? null;
+  const selectedGame = db?.scopes.find(g => g.id === selectedGameId) ?? null;
 
   function selectGame(id: string) {
     setSelectedGameId(id);
     setView("game");
   }
 
+  async function handleCreateGlobalGame() {
+    if (!db) return;
+    const existing = db.scopes.find(isGlobalGame);
+    if (existing) {
+      selectGame(existing.id);
+      return;
+    }
+
+    try {
+      const globalGame = blankGlobalGame();
+      const updated = await api.upsertGame(globalGame);
+      handleDb(updated);
+      selectGame(globalGame.id);
+    } catch (e) { alert(`Error creating global game: ${e}`); }
+  }
+
   // Modal handlers
-  async function handleGameSave(game: Game) {
+  async function handleGameSave(game: Scope) {
     try {
       const updated = await api.upsertGame(game);
       handleDb(updated);
@@ -1388,7 +1434,7 @@ export default function App() {
 
   async function handleOverlayItemSave(gameId: string, profileId: string, index: number | null, item: OverlayItem) {
     try {
-      const game = db!.games.find(g => g.id === gameId)!;
+      const game = db!.scopes.find(g => g.id === gameId)!;
       const profile = game.profiles.find(p => p.id === profileId)!;
       const items = [...profile.overlay_items];
       if (index === null) items.push(item);
@@ -1401,7 +1447,7 @@ export default function App() {
 
   async function handleStateSave(gameId: string, profileId: string, index: number | null, state: ProfileState) {
     try {
-      const game = db!.games.find(g => g.id === gameId)!;
+      const game = db!.scopes.find(g => g.id === gameId)!;
       const profile = game.profiles.find(p => p.id === profileId)!;
       const states = [...profile.states];
       if (index === null) states.push(state);
@@ -1432,7 +1478,7 @@ export default function App() {
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
     try {
-      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
@@ -1446,7 +1492,7 @@ export default function App() {
 
   async function handleCopyOverlayItem(sourceGameId: string, sourceProfileId: string, item: OverlayItem, targetGameId: string, targetProfileId: string) {
     try {
-      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = {
@@ -1462,7 +1508,7 @@ export default function App() {
 
   async function handleCopyState(sourceGameId: string, sourceProfileId: string, state: ProfileState, targetGameId: string, targetProfileId: string) {
     try {
-      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = {
@@ -1478,7 +1524,7 @@ export default function App() {
 
   async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
     try {
-      const game = db!.games.find(g => g.id === gameId)!;
+      const game = db!.scopes.find(g => g.id === gameId)!;
       const profile = game.profiles.find(p => p.id === profileId)!;
       const hotkeys = [...profile.hotkeys];
       if (index === null) hotkeys.push(hotkey);
@@ -1493,13 +1539,15 @@ export default function App() {
     return <div className="loading">Loading…</div>;
   }
 
+  const globalGame = db.scopes.find(isGlobalGame) ?? null;
+
   return (
     <div className="layout">
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar__logo">⌨ HKM</div>
         <nav className="sidebar__games">
-          {[...db.games].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
+          {[...db.scopes].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
             <button key={g.id}
               className={`sidebar__item ${selectedGameId === g.id ? "sidebar__item--active" : ""}`}
               onClick={() => selectGame(g.id)}
@@ -1515,9 +1563,12 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar__bottom">
+          <button className="btn btn--ghost btn--full" onClick={handleCreateGlobalGame}>
+            {globalGame ? "◎ Open Global Scope" : "◎ Add Global Scope"}
+          </button>
           <button className="btn btn--ghost btn--full"
             onClick={() => { setModal({ type: "addGame" }); setView("dashboard"); }}>
-            + Add Game
+            + Add Scope
           </button>
           <button className={`sidebar__nav-btn ${view === "settings" ? "sidebar__nav-btn--active" : ""}`}
             onClick={() => setView("settings")}>
@@ -1537,15 +1588,21 @@ export default function App() {
         )}
         {view === "dashboard" && (
           <div className="dashboard">
-            <h2>Games</h2>
+            <h2>Scopes</h2>
             <div className="game-grid">
-              {[...db.games].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
+              {!globalGame && (
+                <div className="game-card game-card--add" onClick={handleCreateGlobalGame}>
+                  <span>◎</span>
+                  <div className="game-card__name">Add Global Scope</div>
+                </div>
+              )}
+              {[...db.scopes].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
                 <GameCard key={g.id} game={g} active={selectedGameId === g.id}
                   running={running} onClick={() => selectGame(g.id)} />
               ))}
               <div className="game-card game-card--add" onClick={() => setModal({ type: "addGame" })}>
                 <span>＋</span>
-                <div className="game-card__name">Add Game</div>
+                <div className="game-card__name">Add Scope</div>
               </div>
             </div>
           </div>
@@ -1576,20 +1633,20 @@ export default function App() {
       })()}
       {modal?.type === "copyHotkey" && (() => {
         const { sourceGameId, sourceProfileId, hotkey } = modal;
-        return <CopyToProfileModal games={db.games} title="Copy Behavior To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+        return <CopyToProfileModal games={db.scopes} title="Copy Behavior To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
           onSave={(targetGameId, targetProfileId) => handleCopyHotkey(sourceGameId, sourceProfileId, hotkey, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "setParent" && (() => {
         const { gameId, profile } = modal;
-        const game = db.games.find(g => g.id === gameId)!;
+        const game = db.scopes.find(g => g.id === gameId)!;
         return <SetParentModal profiles={game.profiles} current={profile}
           onSave={parentId => handleSetParent(gameId, profile, parentId)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "copyProfile" && (() => {
         const { sourceGameId, profile } = modal;
-        return <CopyProfileModal games={db.games} sourceProfile={profile}
+        return <CopyProfileModal games={db.scopes} sourceProfile={profile}
           onSave={(targetGameId, name) => handleCopyProfile(sourceGameId, profile, targetGameId, name)}
           onClose={() => setModal(null)} />;
       })()}
@@ -1601,7 +1658,7 @@ export default function App() {
       })()}
       {modal?.type === "copyOverlayItem" && (() => {
         const { sourceGameId, sourceProfileId, item } = modal;
-        return <CopyToProfileModal games={db.games} title="Copy Widget To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+        return <CopyToProfileModal games={db.scopes} title="Copy Widget To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
           onSave={(targetGameId, targetProfileId) => handleCopyOverlayItem(sourceGameId, sourceProfileId, item, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
@@ -1613,7 +1670,7 @@ export default function App() {
       })()}
       {modal?.type === "copyState" && (() => {
         const { sourceGameId, sourceProfileId, state } = modal;
-        return <CopyToProfileModal games={db.games} title="Copy State To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+        return <CopyToProfileModal games={db.scopes} title="Copy State To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
           onSave={(targetGameId, targetProfileId) => handleCopyState(sourceGameId, sourceProfileId, state, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}

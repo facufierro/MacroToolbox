@@ -3,6 +3,8 @@ use std::process::{Child, Command};
 
 use crate::config::{self, Profile};
 
+const GLOBAL_GAME_EXE: &str = "*";
+
 pub struct AhkManager {
     process: Option<Child>,
 }
@@ -76,11 +78,13 @@ fn resolve_ahk_exe(configured: &str) -> String {
 
 pub fn generate_script(
     exe: &str,
+    overlay_enabled: bool,
     toggle_hotkeys_key: Option<&str>,
     toggle_overlay_key: Option<&str>,
     profiles: &[Profile],
     profile: &Profile,
 ) -> String {
+    let global_game = exe.trim() == GLOBAL_GAME_EXE;
     let resolved = config::resolve_profile_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
 
@@ -99,10 +103,32 @@ pub fn generate_script(
         .unwrap_or_else(|| "$`".to_string());
 
     let overlay_toggle_block = toggle_overlay_key
+        .filter(|_| overlay_enabled)
         .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
         .filter(|k| k != &toggle_key)
         .map(|k| format!("{k}:: ToggleEnabled()\n"))
         .unwrap_or_default();
+
+    let game_group = if global_game {
+        String::new()
+    } else {
+        format!("GroupAdd \"GAME\", \"ahk_exe {exe}\"\n")
+    };
+    let overlay_visibility_condition = if global_game {
+        if overlay_enabled { "enabled".to_string() } else { "false".to_string() }
+    } else {
+        if overlay_enabled { "enabled && WinActive(\"ahk_group GAME\")".to_string() } else { "false".to_string() }
+    };
+    let toggle_scope = if global_game {
+        format!("{toggle_key}:: ToggleEnabled()\n{overlay_toggle_block}")
+    } else {
+        format!("#HotIf WinActive(\"ahk_group GAME\")\n{toggle_key}:: ToggleEnabled()\n{overlay_toggle_block}#HotIf\n")
+    };
+    let hotkey_scope = if global_game {
+        format!("#HotIf enabled\n{hotkey_lines}#HotIf\n")
+    } else {
+        format!("#HotIf WinActive(\"ahk_group GAME\") && enabled\n{hotkey_lines}#HotIf\n")
+    };
 
     let header = format!(
         r###"#Requires AutoHotkey v2.0
@@ -114,8 +140,7 @@ SetTitleMatchMode 2
 
 global enabled := true
 global overlayVisible := false
-GroupAdd "GAME", "ahk_exe {exe}"
-OnExit HideOverlayOnExit
+{game_group}OnExit HideOverlayOnExit
 
 SendOverlayCommand(path) {{
     try {{
@@ -149,7 +174,7 @@ SendAppEvent(eventType, hotkeyTrigger := "", stateId := "") {{
 
 SyncOverlay(*) {{
     global enabled, overlayVisible
-    shouldShow := enabled && WinActive("ahk_group GAME")
+    shouldShow := {overlay_visibility_condition}
     if (shouldShow = overlayVisible)
         return
     overlayVisible := shouldShow
@@ -173,14 +198,8 @@ HideOverlayOnExit(*) {{
 SetTimer SyncOverlay, 200
 SyncOverlay()
 
-#HotIf WinActive("ahk_group GAME")
-{toggle_key}:: ToggleEnabled()
-{overlay_toggle_block}
-#HotIf
-
-#HotIf WinActive("ahk_group GAME") && enabled
-{hotkey_lines}
-#HotIf
+{toggle_scope}
+{hotkey_scope}
 
 "###
     );

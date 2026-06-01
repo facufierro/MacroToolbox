@@ -65,13 +65,14 @@ export interface Profile {
   overlay_triggers: OverlayTrigger[];
 }
 
-export interface Game {
+export interface Scope {
   id: string;
   name: string;
   exe: string;
   image: string | null;
   active_profile: string | null;
   profiles: Profile[];
+  overlay_disabled?: boolean;
   toggle_hotkeys_key: string | null;
   toggle_overlay_key: string | null;
 }
@@ -83,6 +84,6 @@ export interface Settings {
 }
 
 export interface Database {
-  games: Game[];
+  scopes: Scope[];
   settings: Settings;
 }

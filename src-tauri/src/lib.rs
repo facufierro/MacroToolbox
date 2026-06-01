@@ -13,6 +13,7 @@ const OVERLAY_PORT: u16 = 17823;
 const TRAY_SHOW_ID: &str = "tray_show";
 const TRAY_HIDE_ID: &str = "tray_hide";
 const TRAY_QUIT_ID: &str = "tray_quit";
+const GLOBAL_GAME_EXE: &str = "*";
 
 #[cfg(target_os = "windows")]
 struct BorderlessWindowState {
@@ -85,11 +86,39 @@ fn debug_overlay_log(message: String) {
 }
 
 #[tauri::command]
-fn upsert_game(state: State<AppState>, game: Game) -> Result<Database, String> {
+fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
+    let game_id = game.id.clone();
     match db.games.iter_mut().find(|g| g.id == game.id) {
         Some(existing) => *existing = game,
         None => db.games.push(game),
+    }
+
+    let active_game = db.games.iter().find(|g| g.id == game_id && g.active_profile.is_some());
+    if let Some(game) = active_game {
+        if let Some(profile_id) = game.active_profile.as_ref() {
+            if let Some(profile) = game.profiles.iter().find(|p| &p.id == profile_id) {
+                let script = ahk::generate_script(
+                    &game.exe,
+                    !game.overlay_disabled,
+                    game.toggle_hotkeys_key.as_deref(),
+                    game.toggle_overlay_key.as_deref(),
+                    &game.profiles,
+                    profile,
+                );
+                let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
+                if std::fs::write(&script_path, &script).is_ok() {
+                    let ahk_exe = db.settings.ahk_exe.clone();
+                    let _ = state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path);
+                }
+                if game.overlay_disabled {
+                    clear_overlay(&app);
+                    set_overlay_visible(&app, false);
+                } else {
+                    send_overlay(&app, &game.profiles, profile, true);
+                }
+            }
+        }
     }
     config::save_db(&state.db_path, &db)?;
     Ok(db)
@@ -121,6 +150,7 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
         if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
             let script = ahk::generate_script(
                 &game.exe,
+                !game.overlay_disabled,
                 game.toggle_hotkeys_key.as_deref(),
                 game.toggle_overlay_key.as_deref(),
                 &game.profiles,
@@ -130,7 +160,7 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
             }
-            send_overlay(&app, &game.profiles, p);
+            send_overlay(&app, &game.profiles, p, !game.overlay_disabled);
         }
     }
 
@@ -170,8 +200,12 @@ fn build_overlay_config(profiles: &[Profile], profile: &Profile) -> config::Over
     }
 }
 
-fn send_overlay(app: &tauri::AppHandle, profiles: &[Profile], profile: &Profile) {
-    let overlay_config = build_overlay_config(profiles, profile);
+fn send_overlay(app: &tauri::AppHandle, profiles: &[Profile], profile: &Profile, enabled: bool) {
+    let overlay_config = if enabled {
+        build_overlay_config(profiles, profile)
+    } else {
+        config::OverlayConfig::default()
+    };
     *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.emit("overlay-config", &overlay_config);
@@ -330,14 +364,45 @@ fn get_overlay_config(state: State<AppState>) -> config::OverlayConfig {
     state.overlay_config.lock().unwrap().clone()
 }
 
+fn is_global_game_exe(exe: &str) -> bool {
+    exe.trim() == GLOBAL_GAME_EXE
+}
+
+fn active_game<'a>(db: &'a Database) -> Option<&'a Game> {
+    db.games.iter().find(|game| game.active_profile.is_some())
+}
+
+#[cfg(target_os = "windows")]
+fn get_global_overlay_origin() -> (i32, i32, i32, i32) {
+    use winapi::um::winuser::GetDesktopWindow;
+
+    let (physical_left, physical_top, physical_width, physical_height) = get_virtual_screen_bounds();
+    let scale = get_window_scale_factor(unsafe { GetDesktopWindow() });
+    (
+        physical_to_logical(physical_left, scale),
+        physical_to_logical(physical_top, scale),
+        physical_to_logical(physical_width, scale),
+        physical_to_logical(physical_height, scale),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn get_global_viewport() -> WindowClientBounds {
+    let (left, top, width, height) = get_virtual_screen_bounds();
+    WindowClientBounds { left, top, width, height }
+}
+
 #[tauri::command]
 fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
     #[cfg(target_os = "windows")]
     {
         let db = config::load_db(&state.db_path)?;
-        let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) else {
+        let Some(game) = active_game(&db) else {
             return Ok((0, 0, 0, 0));
         };
+        if is_global_game_exe(&game.exe) {
+            return Ok(get_global_overlay_origin());
+        }
         let hwnd = find_window_by_exe(&game.exe)
             .ok_or_else(|| format!("Game window not found for '{}'", game.exe))?;
         let scale = get_window_scale_factor(hwnd);
@@ -377,8 +442,11 @@ fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), St
 fn get_active_game_viewport(handle: &tauri::AppHandle) -> Result<WindowClientBounds, String> {
     let state = handle.state::<AppState>();
     let db = config::load_db(&state.db_path)?;
-    let game = db.games.iter().find(|g| g.active_profile.is_some())
+    let game = active_game(&db)
         .ok_or_else(|| "No active game".to_string())?;
+    if is_global_game_exe(&game.exe) {
+        return Ok(get_global_viewport());
+    }
     let bounds = get_game_client_bounds(&game.exe)?;
     debug_log_once(
         "active_viewport",
@@ -513,6 +581,12 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
     let mut db = config::load_db(&state.db_path)?;
     let ahk_exe = db.settings.ahk_exe.clone();
 
+    for game in &mut db.games {
+        if game.id != game_id {
+            game.active_profile = None;
+        }
+    }
+
     let script = {
         let game = db.games.iter_mut().find(|g| g.id == game_id)
             .ok_or_else(|| "Game not found".to_string())?;
@@ -521,6 +595,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
             .ok_or_else(|| "Profile not found".to_string())?;
         ahk::generate_script(
             &game.exe,
+            !game.overlay_disabled,
             game.toggle_hotkeys_key.as_deref(),
             game.toggle_overlay_key.as_deref(),
             &game.profiles,
@@ -535,7 +610,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
-        send_overlay(&app, &game.profiles, profile);
+        send_overlay(&app, &game.profiles, profile, !game.overlay_disabled);
         emit_overlay_event(&app, "profile_activated", None, None);
     }
 
@@ -546,8 +621,10 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
 fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String) -> Result<Database, String> {
     state.ahk_manager.lock().unwrap().kill();
     let mut db = config::load_db(&state.db_path)?;
-    if let Some(game) = db.games.iter_mut().find(|g| g.id == game_id) {
-        game.active_profile = None;
+    for game in &mut db.games {
+        if game.id == game_id || game.active_profile.is_some() {
+            game.active_profile = None;
+        }
     }
     config::save_db(&state.db_path, &db)?;
     emit_overlay_event(&app, "profile_deactivated", None, None);
@@ -908,7 +985,9 @@ fn make_borderless_fullscreen(state: State<AppState>, exe: String) -> Result<boo
 #[tauri::command]
 async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(f64, f64), String> {
     #[cfg(target_os = "windows")]
-    focus_game_window(&exe);
+    if !is_global_game_exe(&exe) {
+        focus_game_window(&exe);
+    }
 
     window.minimize().map_err(|e| e.to_string())?;
 
@@ -937,7 +1016,11 @@ async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(f
                 if (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
                     let mut pt = POINT { x: 0, y: 0 };
                     GetCursorPos(&mut pt);
-                    let bounds = get_game_client_bounds(&exe_for_pick)?;
+                    let bounds = if is_global_game_exe(&exe_for_pick) {
+                        get_global_viewport()
+                    } else {
+                        get_game_client_bounds(&exe_for_pick)?
+                    };
                     while (GetAsyncKeyState(0x01) as u16) & 0x8000 != 0 {
                         std::thread::sleep(Duration::from_millis(15));
                     }
@@ -1028,6 +1111,9 @@ fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database,
 }
 
 fn is_process_running(exe: &str) -> bool {
+    if is_global_game_exe(exe) {
+        return true;
+    }
     #[cfg(target_os = "windows")]
     {
         use winapi::shared::minwindef::FALSE;
@@ -1070,7 +1156,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                 Err(_) => continue,
             };
 
-            let active = db.games.iter().find(|g| g.active_profile.is_some());
+            let active = active_game(&db);
             let mut mgr = state.ahk_manager.lock().unwrap();
 
             match active {
@@ -1084,6 +1170,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                         if let Some(profile) = game.profiles.iter().find(|p| p.id == *profile_id) {
                             let script      = ahk::generate_script(
                                 &game.exe,
+                                !game.overlay_disabled,
                                 game.toggle_hotkeys_key.as_deref(),
                                 game.toggle_overlay_key.as_deref(),
                                 &game.profiles,
@@ -1093,7 +1180,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                             if std::fs::write(&script_path, &script).is_ok() {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
                             }
-                            send_overlay(&handle, &game.profiles, profile);
+                            send_overlay(&handle, &game.profiles, profile, !game.overlay_disabled);
                             emit_overlay_event(&handle, "profile_activated", None, None);
                         }
                     } else if !game_open && script_live {
@@ -1216,7 +1303,7 @@ pub fn run() {
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
                 if let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) {
                     if let Some(profile) = game.profiles.iter().find(|p| Some(&p.id) == game.active_profile.as_ref()) {
-                        send_overlay(app.handle(), &game.profiles, profile);
+                        send_overlay(app.handle(), &game.profiles, profile, !game.overlay_disabled);
                     }
                 }
             }

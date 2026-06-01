@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Database, Game, Profile, Settings } from "./types";
+import type { Database, Scope, Profile, Settings } from "./types";
 
 export const api = {
   getDatabase: () =>
@@ -25,7 +25,7 @@ export const api = {
   makeBorderlessFullscreen: (exe: string) =>
     invoke<boolean>("make_borderless_fullscreen", { exe }),
 
-  upsertGame: (game: Game) =>
+  upsertGame: (game: Scope) =>
     invoke<Database>("upsert_game", { game }),
 
   deleteGame: (id: string) =>

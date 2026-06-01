@@ -4,6 +4,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
+    #[serde(rename = "scopes", alias = "games")]
     pub games: Vec<Game>,
     pub settings: Settings,
 }
@@ -16,6 +17,8 @@ pub struct Game {
     pub image: Option<String>,
     pub active_profile: Option<String>,
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub overlay_disabled: bool,
     #[serde(default)]
     pub toggle_hotkeys_key: Option<String>,
     #[serde(default)]
