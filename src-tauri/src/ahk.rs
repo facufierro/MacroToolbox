@@ -156,10 +156,12 @@ UriEncode(str) {{
     return result
 }}
 
-SendAppEvent(eventType, hotkeyTrigger := "") {{
+SendAppEvent(eventType, hotkeyTrigger := "", stateId := "") {{
     path := "event?type=" UriEncode(eventType)
     if (hotkeyTrigger != "")
         path .= "&hotkey_trigger=" UriEncode(hotkeyTrigger)
+    if (stateId != "")
+        path .= "&state_id=" UriEncode(stateId)
     SendOverlayCommand(path)
 }}
 
@@ -263,6 +265,8 @@ const BEHAVIOR_ENGINE: &str = r#"ExecuteBehavior(str) {
                 Sleep 30
             } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
                 DoPress(Trim(m[1]))
+            } else if RegExMatch(token, "i)^state\((.+)\)$", &m) {
+                SendAppEvent("state_triggered", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
                 Sleep Integer(m[1])
             } else if RegExMatch(token, "i)^send\((.+)\)$", &m) {

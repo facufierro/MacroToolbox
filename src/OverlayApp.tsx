@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { OverlayConfig, OverlayItem, OverlayTrigger } from "./types";
+import type { OverlayConfig, OverlayItem, ProfileState } from "./types";
 import "./overlay.css";
 
 type OverlayRuntimeEvent = {
   event: string;
   hotkey_trigger?: string | null;
+  state_id?: string | null;
 };
 
 type OverlayRuntimeState = {
@@ -30,35 +31,48 @@ function pruneRuntime(state: OverlayRuntimeState, now: number): OverlayRuntimeSt
   return { flags: { ...state.flags }, timers };
 }
 
-function triggerMatches(trigger: OverlayTrigger, event: OverlayRuntimeEvent) {
-  if (trigger.event !== event.event) return false;
-  if (trigger.event !== "hotkey_triggered") return true;
-  return (trigger.hotkey_trigger ?? "").trim().toLowerCase() === (event.hotkey_trigger ?? "").trim().toLowerCase();
+function normalizeHotkey(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
 }
 
-function applyTrigger(state: OverlayRuntimeState, trigger: OverlayTrigger, now: number): OverlayRuntimeState {
-  const next = pruneRuntime(state, now);
-  const key = trigger.state_key.trim();
-  if (!key) return next;
+function getState(config: OverlayConfig, stateId: string | null | undefined): ProfileState | null {
+  if (!stateId) return null;
+  return config.states.find(state => state.id === stateId) ?? null;
+}
 
-  switch (trigger.action) {
-    case "set_flag":
-      next.flags[key] = true;
-      break;
-    case "clear_flag":
-      next.flags[key] = false;
-      break;
-    case "toggle_flag":
-      next.flags[key] = !next.flags[key];
-      break;
-    case "start_timer":
-      next.timers[key] = now + Math.max(0, trigger.duration_ms ?? 0);
-      break;
-    case "stop_timer":
-      delete next.timers[key];
-      break;
+function applyHotkeyStateEvent(config: OverlayConfig, state: OverlayRuntimeState, event: OverlayRuntimeEvent, now: number) {
+  if (event.event !== "hotkey_triggered") {
+    return state;
   }
 
+  const next = pruneRuntime(state, now);
+  const trigger = normalizeHotkey(event.hotkey_trigger);
+  for (const binding of config.hotkeys) {
+    if (!binding.state_id || normalizeHotkey(binding.trigger) !== trigger) continue;
+    const profileState = getState(config, binding.state_id);
+    if (!profileState) continue;
+
+    if ((profileState.duration_ms ?? 0) > 0) {
+      next.timers[profileState.id] = now + (profileState.duration_ms ?? 0);
+      delete next.flags[profileState.id];
+      continue;
+    }
+
+    next.flags[profileState.id] = !next.flags[profileState.id];
+  }
+
+  return next;
+}
+
+function applyStateToggle(state: OverlayRuntimeState, profileState: ProfileState, now: number) {
+  const next = pruneRuntime(state, now);
+  if ((profileState.duration_ms ?? 0) > 0) {
+    next.timers[profileState.id] = now + (profileState.duration_ms ?? 0);
+    delete next.flags[profileState.id];
+    return next;
+  }
+
+  next.flags[profileState.id] = !next.flags[profileState.id];
   return next;
 }
 
@@ -67,33 +81,38 @@ function applyRuntimeEvent(config: OverlayConfig, state: OverlayRuntimeState, ev
     ? { ...EMPTY_RUNTIME, flags: {}, timers: {} }
     : pruneRuntime(state, now);
 
-  for (const trigger of config.triggers) {
-    if (triggerMatches(trigger, event)) {
-      next = applyTrigger(next, trigger, now);
+  if (event.event === "state_triggered" && event.state_id) {
+    const profileState = getState(config, event.state_id);
+    if (profileState) {
+      next = applyStateToggle(next, profileState, now);
     }
   }
 
+  next = applyHotkeyStateEvent(config, next, event, now);
   return pruneRuntime(next, now);
 }
 
-function isStateKeyActive(state: OverlayRuntimeState, key: string, now: number) {
-  return state.flags[key] === true || (state.timers[key] ?? 0) > now;
+function isStateActive(state: OverlayRuntimeState, stateId: string | null | undefined, now: number) {
+  if (!stateId) return true;
+  return state.flags[stateId] === true || (state.timers[stateId] ?? 0) > now;
 }
 
 function isItemVisible(item: OverlayItem, state: OverlayRuntimeState, now: number) {
-  const visibilityKey = item.visible_when ?? (item.type === "timer" ? item.timer_key : null);
-  if (!visibilityKey) return true;
-  return isStateKeyActive(state, visibilityKey, now);
+  return isStateActive(state, item.state_id, now);
 }
 
-function getTimerRemaining(item: OverlayItem & { type: "timer" }, state: OverlayRuntimeState, now: number) {
-  if (!item.timer_key) return item.duration_ms;
-  const expiresAt = state.timers[item.timer_key] ?? 0;
-  return Math.max(0, expiresAt - now);
+function getTimerRemaining(config: OverlayConfig, item: OverlayItem & { type: "timer" }, state: OverlayRuntimeState, now: number) {
+  const linkedState = getState(config, item.timer_state_id);
+  if (linkedState && item.timer_state_id) {
+    const expiresAt = state.timers[item.timer_state_id] ?? 0;
+    const fallback = linkedState.duration_ms ?? item.duration_ms;
+    return expiresAt > 0 ? Math.max(0, expiresAt - now) : fallback;
+  }
+  return item.duration_ms;
 }
 
 export default function OverlayApp() {
-  const [config, setConfig] = useState<OverlayConfig>({ items: [], triggers: [] });
+  const [config, setConfig] = useState<OverlayConfig>({ items: [], states: [], hotkeys: [] });
   const [origin, setOrigin] = useState<[number, number, number, number]>([0, 0, 0, 0]);
   const [runtime, setRuntime] = useState<OverlayRuntimeState>(EMPTY_RUNTIME);
   const [now, setNow] = useState(() => Date.now());
@@ -118,7 +137,7 @@ export default function OverlayApp() {
       .then(payload => {
         console.log("[overlay] get_overlay_config:", payload);
         setConfig(payload);
-        if (payload.items.length > 0 || payload.triggers.length > 0) {
+        if (payload.items.length > 0 || payload.states.length > 0 || payload.hotkeys.length > 0) {
           const eventTime = Date.now();
           setNow(eventTime);
           setRuntime(applyRuntimeEvent(payload, EMPTY_RUNTIME, { event: "profile_activated" }, eventTime));
@@ -166,7 +185,8 @@ export default function OverlayApp() {
       logicalOrigin,
       itemCount: config.items.length,
       visibleCount: visibleItems.length,
-      triggerCount: config.triggers.length,
+      stateCount: config.states.length,
+      hotkeyStateCount: config.hotkeys.filter(binding => binding.state_id).length,
       runtime,
       firstItem: first
         ? { id: first.id, type: first.type, x: first.x, y: first.y, left: firstLeft, top: firstTop }
@@ -187,7 +207,7 @@ export default function OverlayApp() {
   return (
     <div className="overlay-root">
       {visibleItems.map(item => (
-        <OverlayItemView key={item.id} item={item} origin={logicalOrigin} remainingMs={item.type === "timer" ? getTimerRemaining(item, runtime, now) : null} />
+        <OverlayItemView key={item.id} item={item} origin={logicalOrigin} remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} />
       ))}
     </div>
   );

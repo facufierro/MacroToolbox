@@ -38,6 +38,7 @@ pub struct AppState {
 struct OverlayEventPayload {
     event: String,
     hotkey_trigger: Option<String>,
+    state_id: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -147,7 +148,11 @@ fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -
 fn build_overlay_config(profile: &Profile) -> config::OverlayConfig {
     config::OverlayConfig {
         items: profile.overlay_items.clone(),
-        triggers: profile.overlay_triggers.clone(),
+        states: profile.states.clone(),
+        hotkeys: profile.hotkeys.iter().map(|hotkey| config::OverlayHotkeyStateBinding {
+            trigger: hotkey.trigger.clone(),
+            state_id: hotkey.state_id.clone(),
+        }).collect(),
     }
 }
 
@@ -167,13 +172,14 @@ fn clear_overlay(app: &tauri::AppHandle) {
     }
 }
 
-fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>) {
+fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.emit(
             "overlay-event",
             OverlayEventPayload {
                 event: event.to_string(),
                 hotkey_trigger,
+                state_id,
             },
         );
     }
@@ -316,7 +322,9 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             .unwrap_or_else(|| "hotkey_triggered".to_string());
                         let hotkey_trigger = get_query_param(action, "hotkey_trigger")
                             .filter(|value| !value.is_empty());
-                        emit_overlay_event(&handle, &event, hotkey_trigger);
+                        let state_id = get_query_param(action, "state_id")
+                            .filter(|value| !value.is_empty());
+                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id);
                         ("200 OK", Vec::new())
                     } else {
                         match route {
@@ -397,7 +405,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
         send_overlay(&app, profile);
-        emit_overlay_event(&app, "profile_activated", None);
+        emit_overlay_event(&app, "profile_activated", None, None);
     }
 
     Ok(db)
@@ -411,7 +419,7 @@ fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String
         game.active_profile = None;
     }
     config::save_db(&state.db_path, &db)?;
-    emit_overlay_event(&app, "profile_deactivated", None);
+    emit_overlay_event(&app, "profile_deactivated", None, None);
     clear_overlay(&app);
     set_overlay_visible(&app, false);
     Ok(db)
@@ -955,11 +963,11 @@ fn start_watcher(handle: tauri::AppHandle) {
                                 let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
                             }
                             send_overlay(&handle, profile);
-                            emit_overlay_event(&handle, "profile_activated", None);
+                            emit_overlay_event(&handle, "profile_activated", None, None);
                         }
                     } else if !game_open && script_live {
                         mgr.kill();
-                        emit_overlay_event(&handle, "profile_deactivated", None);
+                        emit_overlay_event(&handle, "profile_deactivated", None, None);
                         clear_overlay(&handle);
                         set_overlay_visible(&handle, false);
                     }

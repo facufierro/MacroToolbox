@@ -29,6 +29,8 @@ pub struct Profile {
     pub parent_id: Option<String>,
     pub hotkeys: Vec<Hotkey>,
     #[serde(default)]
+    pub states: Vec<ProfileState>,
+    #[serde(default)]
     pub overlay_items: Vec<OverlayItem>,
     #[serde(default)]
     pub overlay_triggers: Vec<OverlayTrigger>,
@@ -39,7 +41,28 @@ pub struct OverlayConfig {
     #[serde(default)]
     pub items: Vec<OverlayItem>,
     #[serde(default)]
-    pub triggers: Vec<OverlayTrigger>,
+    pub states: Vec<ProfileState>,
+    #[serde(default)]
+    pub hotkeys: Vec<OverlayHotkeyStateBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileState {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayHotkeyStateBinding {
+    pub trigger: String,
+    #[serde(default)]
+    pub state_id: Option<String>,
+}
+
+fn default_overlay_display_mode() -> String {
+    "always".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +75,17 @@ pub enum OverlayItem {
         duration_ms: u64,
         label: String,
         #[serde(default)]
+        state_id: Option<String>,
+        #[serde(default)]
+        timer_state_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
+        #[serde(default = "default_overlay_display_mode")]
+        display_mode: String,
+        #[serde(default)]
+        hotkey_trigger: Option<String>,
+        #[serde(default)]
+        show_duration_ms: Option<u64>,
         #[serde(default)]
         timer_key: Option<String>,
     },
@@ -64,7 +97,15 @@ pub enum OverlayItem {
         h: u32,
         src: Option<String>,
         #[serde(default)]
+        state_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
+        #[serde(default = "default_overlay_display_mode")]
+        display_mode: String,
+        #[serde(default)]
+        hotkey_trigger: Option<String>,
+        #[serde(default)]
+        show_duration_ms: Option<u64>,
     },
     Bar   {
         id: String,
@@ -75,7 +116,15 @@ pub enum OverlayItem {
         color: String,
         max_value: f64,
         #[serde(default)]
+        state_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
+        #[serde(default = "default_overlay_display_mode")]
+        display_mode: String,
+        #[serde(default)]
+        hotkey_trigger: Option<String>,
+        #[serde(default)]
+        show_duration_ms: Option<u64>,
     },
     Text  {
         id: String,
@@ -85,7 +134,15 @@ pub enum OverlayItem {
         color: String,
         content: String,
         #[serde(default)]
+        state_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
+        #[serde(default = "default_overlay_display_mode")]
+        display_mode: String,
+        #[serde(default)]
+        hotkey_trigger: Option<String>,
+        #[serde(default)]
+        show_duration_ms: Option<u64>,
     },
 }
 
@@ -105,6 +162,8 @@ pub struct OverlayTrigger {
 pub struct Hotkey {
     pub trigger: String,
     pub behavior: String,
+    #[serde(default)]
+    pub state_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

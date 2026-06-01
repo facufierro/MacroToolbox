@@ -1,6 +1,18 @@
 export interface Hotkey {
   trigger: string;
   behavior: string;
+  state_id: string | null;
+}
+
+export interface ProfileState {
+  id: string;
+  name: string;
+  duration_ms: number | null;
+}
+
+export interface OverlayHotkeyStateBinding {
+  trigger: string;
+  state_id: string | null;
 }
 
 export type OverlayTriggerEvent = "profile_activated" | "profile_deactivated" | "hotkey_triggered";
@@ -18,18 +30,25 @@ export interface OverlayTrigger {
 
 export interface OverlayConfig {
   items: OverlayItem[];
-  triggers: OverlayTrigger[];
+  states: ProfileState[];
+  hotkeys: OverlayHotkeyStateBinding[];
 }
+
+export type OverlayDisplayMode = "always" | "timed_hotkey" | "toggle_hotkey";
 
 interface OverlayItemBase {
   id: string;
   x: number;
   y: number;
-  visible_when: string | null;
+  state_id: string | null;
+  visible_when?: string | null;
+  display_mode?: OverlayDisplayMode;
+  hotkey_trigger?: string | null;
+  show_duration_ms?: number | null;
 }
 
 export type OverlayItem =
-  | (OverlayItemBase & { type: "timer"; duration_ms: number; label: string; timer_key: string | null })
+  | (OverlayItemBase & { type: "timer"; duration_ms: number; label: string; timer_state_id: string | null; timer_key?: string | null })
   | (OverlayItemBase & { type: "icon"; w: number; h: number; src: string | null })
   | (OverlayItemBase & { type: "bar"; w: number; h: number; color: string; max_value: number })
   | (OverlayItemBase & { type: "text"; font_size: number; color: string; content: string });
@@ -39,6 +58,7 @@ export interface Profile {
   name: string;
   parent_id: string | null;
   hotkeys: Hotkey[];
+  states: ProfileState[];
   overlay_items: OverlayItem[];
   overlay_triggers: OverlayTrigger[];
 }
