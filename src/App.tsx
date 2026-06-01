@@ -19,9 +19,12 @@ type Modal =
   | { type: "addProfile"; gameId: string }
   | { type: "editProfile"; gameId: string; profile: Profile }
   | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string; states: ProfileState[] }
+  | { type: "copyHotkey"; sourceGameId: string; sourceProfileId: string; hotkey: Hotkey }
   | { type: "setParent"; gameId: string; profile: Profile }
   | { type: "copyProfile"; sourceGameId: string; profile: Profile }
   | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string; states: ProfileState[] }
+  | { type: "copyOverlayItem"; sourceGameId: string; sourceProfileId: string; item: OverlayItem }
+  | { type: "copyState"; sourceGameId: string; sourceProfileId: string; state: ProfileState }
   | { type: "profileState"; gameId: string; profileId: string; index: number | null; state: ProfileState };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -588,6 +591,61 @@ function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
   );
 }
 
+function CopyToProfileModal({
+  games,
+  title,
+  sourceGameId,
+  sourceProfileId,
+  onSave,
+  onClose,
+}: {
+  games: Game[];
+  title: string;
+  sourceGameId: string;
+  sourceProfileId: string;
+  onSave: (targetGameId: string, targetProfileId: string) => void;
+  onClose: () => void;
+}) {
+  const [targetGameId, setTargetGameId] = useState(sourceGameId);
+  const targetProfiles = [...(games.find(game => game.id === targetGameId)?.profiles ?? [])]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const [targetProfileId, setTargetProfileId] = useState(sourceProfileId);
+
+  useEffect(() => {
+    if (targetProfiles.some(profile => profile.id === targetProfileId)) return;
+    setTargetProfileId(targetProfiles[0]?.id ?? "");
+  }, [targetProfileId, targetProfiles]);
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>{title}</h2>
+        <label>Target Game
+          <select value={targetGameId} onChange={e => setTargetGameId(e.target.value)}>
+            {[...games].sort((a, b) => a.name.localeCompare(b.name)).map(game => (
+              <option key={game.id} value={game.id}>{game.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>Target Profile
+          <select value={targetProfileId} onChange={e => setTargetProfileId(e.target.value)} disabled={targetProfiles.length === 0}>
+            {targetProfiles.map(profile => (
+              <option key={profile.id} value={profile.id}>{profile.name}</option>
+            ))}
+            {targetProfiles.length === 0 && <option value="">No profiles</option>}
+          </select>
+        </label>
+        <div className="modal__actions">
+          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn--primary" onClick={() => targetGameId && targetProfileId && onSave(targetGameId, targetProfileId)} disabled={!targetProfileId}>
+            Copy
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Overlay components ────────────────────────────────────────────────────────
 
 function overlayItemDesc(item: OverlayItem, states: ProfileState[]): string {
@@ -613,6 +671,11 @@ function stateDesc(state: ProfileState): string {
   return state.duration_ms ? `${state.name}, ${formatDuration(state.duration_ms)}` : `${state.name}, toggle`;
 }
 
+function copyName(name: string, fallback: string) {
+  const base = name.trim() || fallback;
+  return `${base} (copy)`;
+}
+
 function hotkeyDesc(hotkey: Hotkey, states: ProfileState[]): string {
   const behavior = hotkey.behavior.replace(/state\(([^)]+)\)/g, (_, stateId: string) => {
     return `state(${stateNameById(states, stateId) ?? stateId})`;
@@ -620,11 +683,12 @@ function hotkeyDesc(hotkey: Hotkey, states: ProfileState[]): string {
   return `${hotkey.name.trim() ? `${hotkey.name}, ` : ""}${behavior || "No behavior"}`;
 }
 
-function HotkeyRow({ hotkey, states, inherited, onEdit, onDelete, onOverride }: {
+function HotkeyRow({ hotkey, states, inherited, onEdit, onCopy, onDelete, onOverride }: {
   hotkey: Hotkey;
   states: ProfileState[];
   inherited: boolean;
   onEdit?: () => void;
+  onCopy?: () => void;
   onDelete?: () => void;
   onOverride?: () => void;
 }) {
@@ -635,10 +699,14 @@ function HotkeyRow({ hotkey, states, inherited, onEdit, onDelete, onOverride }: 
       <span className="overlay-item-desc">{hotkeyDesc(hotkey, states)}</span>
       <div className="step-row__btns">
         {inherited ? (
-          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          <>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
+            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          </>
         ) : (
           <>
             <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
             <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
           </>
         )}
@@ -647,11 +715,12 @@ function HotkeyRow({ hotkey, states, inherited, onEdit, onDelete, onOverride }: 
   );
 }
 
-function OverlayItemRow({ item, states, inherited, onEdit, onDelete, onOverride }: {
+function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onOverride }: {
   item: OverlayItem;
   states: ProfileState[];
   inherited: boolean;
   onEdit?: () => void;
+  onCopy?: () => void;
   onDelete?: () => void;
   onOverride?: () => void;
 }) {
@@ -661,10 +730,14 @@ function OverlayItemRow({ item, states, inherited, onEdit, onDelete, onOverride 
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
         {inherited ? (
-          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          <>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
+            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          </>
         ) : (
           <>
             <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
             <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
           </>
         )}
@@ -673,10 +746,11 @@ function OverlayItemRow({ item, states, inherited, onEdit, onDelete, onOverride 
   );
 }
 
-function StateRow({ state, inherited, onEdit, onDelete, onOverride }: {
+function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
   state: ProfileState;
   inherited: boolean;
   onEdit?: () => void;
+  onCopy?: () => void;
   onDelete?: () => void;
   onOverride?: () => void;
 }) {
@@ -686,10 +760,14 @@ function StateRow({ state, inherited, onEdit, onDelete, onOverride }: {
       <span className="overlay-item-desc">{stateDesc(state)}</span>
       <div className="step-row__btns">
         {inherited ? (
-          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          <>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
+            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          </>
         ) : (
           <>
             <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
             <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
           </>
         )}
@@ -1074,6 +1152,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
                   states={stateOptions}
                   inherited={!own}
                   onEdit={() => onModal({ type: "editHotkey", gameId: game.id, profileId, index: ownIndex, hotkey: hk, gameExe: game.exe, states: stateOptions })}
+                  onCopy={() => onModal({ type: "copyHotkey", sourceGameId: game.id, sourceProfileId: profileId, hotkey: hk })}
                   onDelete={() => deleteHotkey(ownIndex)}
                   onOverride={async () => {
                     const db = await api.upsertProfile(game.id, { ...profile, hotkeys: [...profile.hotkeys, { ...hk }] });
@@ -1103,6 +1182,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
               return (
                 <StateRow key={state.id} state={state} inherited={!own}
                   onEdit={own ? () => onModal({ type: "profileState", gameId: game.id, profileId, index: ownIndex, state }) : undefined}
+                  onCopy={() => onModal({ type: "copyState", sourceGameId: game.id, sourceProfileId: profileId, state })}
                   onDelete={own ? async () => {
                     const remainingStates = profile.states.filter((_, idx) => idx !== ownIndex);
                     const updated = {
@@ -1147,6 +1227,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
               return (
                 <OverlayItemRow key={item.id} item={item} states={stateOptions} inherited={!own}
                   onEdit={own ? () => onModal({ type: "overlayItem", gameId: game.id, profileId, index: ownIndex, item, gameExe: game.exe, states: stateOptions }) : undefined}
+                  onCopy={() => onModal({ type: "copyOverlayItem", sourceGameId: game.id, sourceProfileId: profileId, item })}
                   onDelete={own ? async () => {
                     const updated = { ...profile, overlay_items: profile.overlay_items.filter((_, idx) => idx !== ownIndex) };
                     onDb(await api.upsertProfile(game.id, updated));
@@ -1349,6 +1430,52 @@ export default function App() {
     } catch (e) { alert(`Error copying profile: ${e}`); }
   }
 
+  async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
+    try {
+      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
+      const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
+      const copy = isSameProfile
+        ? { ...hotkey, name: copyName(hotkey.name, hotkey.trigger || "Behavior"), trigger: "" }
+        : { ...hotkey };
+      const updated = await api.upsertProfile(targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error copying hotkey: ${e}`); }
+  }
+
+  async function handleCopyOverlayItem(sourceGameId: string, sourceProfileId: string, item: OverlayItem, targetGameId: string, targetProfileId: string) {
+    try {
+      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
+      const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
+      const copy = {
+        ...item,
+        id: uid(),
+        name: isSameProfile ? copyName(item.name, item.type) : item.name,
+      };
+      const updated = await api.upsertProfile(targetGameId, { ...profile, overlay_items: [...profile.overlay_items, copy] });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error copying overlay item: ${e}`); }
+  }
+
+  async function handleCopyState(sourceGameId: string, sourceProfileId: string, state: ProfileState, targetGameId: string, targetProfileId: string) {
+    try {
+      const game = db!.games.find(candidate => candidate.id === targetGameId)!;
+      const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
+      const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
+      const copy = {
+        ...state,
+        id: isSameProfile ? uid() : state.id,
+        name: isSameProfile ? copyName(state.name, "State") : state.name,
+      };
+      const updated = await api.upsertProfile(targetGameId, { ...profile, states: [...profile.states, copy] });
+      handleDb(updated);
+      setModal(null);
+    } catch (e) { alert(`Error copying state: ${e}`); }
+  }
+
   async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
     try {
       const game = db!.games.find(g => g.id === gameId)!;
@@ -1447,6 +1574,12 @@ export default function App() {
           onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
           onClose={() => setModal(null)} />;
       })()}
+      {modal?.type === "copyHotkey" && (() => {
+        const { sourceGameId, sourceProfileId, hotkey } = modal;
+        return <CopyToProfileModal games={db.games} title="Copy Behavior To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+          onSave={(targetGameId, targetProfileId) => handleCopyHotkey(sourceGameId, sourceProfileId, hotkey, targetGameId, targetProfileId)}
+          onClose={() => setModal(null)} />;
+      })()}
       {modal?.type === "setParent" && (() => {
         const { gameId, profile } = modal;
         const game = db.games.find(g => g.id === gameId)!;
@@ -1466,10 +1599,22 @@ export default function App() {
           onSave={it => handleOverlayItemSave(gameId, profileId, index, it)}
           onClose={() => setModal(null)} />;
       })()}
+      {modal?.type === "copyOverlayItem" && (() => {
+        const { sourceGameId, sourceProfileId, item } = modal;
+        return <CopyToProfileModal games={db.games} title="Copy Widget To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+          onSave={(targetGameId, targetProfileId) => handleCopyOverlayItem(sourceGameId, sourceProfileId, item, targetGameId, targetProfileId)}
+          onClose={() => setModal(null)} />;
+      })()}
       {modal?.type === "profileState" && (() => {
         const { gameId, profileId, index, state } = modal;
         return <StateModal initial={state}
           onSave={nextState => handleStateSave(gameId, profileId, index, nextState)}
+          onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "copyState" && (() => {
+        const { sourceGameId, sourceProfileId, state } = modal;
+        return <CopyToProfileModal games={db.games} title="Copy State To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+          onSave={(targetGameId, targetProfileId) => handleCopyState(sourceGameId, sourceProfileId, state, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
     </div>

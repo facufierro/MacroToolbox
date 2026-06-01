@@ -1,4 +1,4 @@
-inheritance for all the objects
+
 copy behaviors widgets and states 
 key picker actually pick the key not the transformed key
 key poicker should pick mouse buttons
