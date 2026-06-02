@@ -99,7 +99,11 @@ function toAhkKey(e: KeyboardEvent): string {
   let key = e.key;
   if (key in keyMap) key = keyMap[key];
   else if (/^F\d+$/.test(key)) key = key.toLowerCase();
-  else if (key.length === 1) key = key.toLowerCase();
+  else if (key.length === 1) {
+    // Use e.code to get the physical key, ignoring shift transforms (e.g. Shift+5 → "5" not "%")
+    const codeMatch = e.code.match(/^(Key|Digit)(.+)$/);
+    key = codeMatch ? codeMatch[2].toLowerCase() : key.toLowerCase();
+  }
   return [...mods, key].join(" ");
 }
 

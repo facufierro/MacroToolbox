@@ -1,20 +1,16 @@
 {
-    "actionButtons": {
-        "commands": [
-            {
-                "name": "$(play) HKM Dev",
-                "color": "#7c6af7",
-                "useVsCodeApi": true,
-                "command": "workbench.action.tasks.runTask",
-                "args": ["HKM: Dev"]
-            },
-            {
-                "name": "$(package) HKM Build",
-                "color": "#4ade80",
-                "useVsCodeApi": true,
-                "command": "workbench.action.tasks.runTask",
-                "args": ["HKM: Build"]
-            }
-        ]
-    }
+    "quickCommandButtons.buttons": [
+        {
+            "name": "$(play) HKM Dev",
+            "color": "#7c6af7",
+            "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Projects\\Games\\HotkeyManager\\dev.ps1'",
+            "terminalName": "HKM Dev"
+        },
+        {
+            "name": "$(package) HKM Build",
+            "color": "#4ade80",
+            "command": "$env:PATH += ';C:\\Users\\fierr\\.cargo\\bin'; npm run tauri build",
+            "terminalName": "HKM Build"
+        }
+    ]
 }
