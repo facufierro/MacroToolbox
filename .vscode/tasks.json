@@ -43,7 +43,7 @@
         {
             "label": "HKM: Build",
             "type": "shell",
-            "command": "$env:PATH += ';C:\\Users\\fierr\\.cargo\\bin'; npm run tauri build",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1",
             "options": {
                 "cwd": "D:\\Projects\\Games\\HotkeyManager",
                 "shell": {

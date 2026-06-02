@@ -9,7 +9,7 @@
         {
             "name": "$(package) HKM Build",
             "color": "#4ade80",
-            "command": "$env:PATH += ';C:\\Users\\fierr\\.cargo\\bin'; npm run tauri build",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1",
             "terminalName": "HKM Build"
         }
     ]
