@@ -1111,6 +1111,16 @@ async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(f
 }
 
 #[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn read_image_as_data_url(path: String) -> Result<String, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -1373,6 +1383,8 @@ pub fn run() {
             pick_coordinate,
             kill_game,
             make_borderless_fullscreen,
+            write_text_file,
+            read_text_file,
             read_image_as_data_url,
             upsert_game,
             delete_game,

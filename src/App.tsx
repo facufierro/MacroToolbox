@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import type {
   Database,
@@ -63,6 +63,83 @@ function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), name: 
 function blankBar():     OverlayItem { return { type: "bar",   id: uid(), name: "", x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100, state_id: null }; }
 function blankText():    OverlayItem { return { type: "text",  id: uid(), name: "", x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
 function blankState(): ProfileState { return { id: uid(), name: "", duration_ms: null }; }
+
+// ── Export / Import helpers ───────────────────────────────────────────────────
+
+function remapProfileIds(profile: Profile): Profile {
+  const stateMap = new Map(profile.states.map(s => [s.id, uid()]));
+  const groupMap = new Map((profile.overlay_groups ?? []).map(g => [g.id, uid()]));
+  return {
+    ...profile,
+    id: uid(),
+    states: profile.states.map(s => ({ ...s, id: stateMap.get(s.id)! })),
+    overlay_groups: (profile.overlay_groups ?? []).map(g => ({ ...g, id: groupMap.get(g.id)! })),
+    hotkeys: profile.hotkeys.map(h => ({
+      ...h,
+      state_id: h.state_id ? (stateMap.get(h.state_id) ?? null) : null,
+    })),
+    overlay_items: profile.overlay_items.map(item => ({
+      ...item,
+      id: uid(),
+      state_id: item.state_id ? (stateMap.get(item.state_id) ?? null) : null,
+      group_id: item.group_id ? (groupMap.get(item.group_id) ?? null) : null,
+      ...(item.type === "timer" && item.timer_state_id
+        ? { timer_state_id: stateMap.get(item.timer_state_id) ?? null }
+        : {}),
+    })),
+  };
+}
+
+async function exportProfile(profile: Profile) {
+  const path = await saveDialog({
+    title: "Export Profile",
+    defaultPath: `${profile.name || "profile"}.hkm-profile`,
+    filters: [{ name: "HKM Profile", extensions: ["hkm-profile"] }],
+  });
+  if (!path) return;
+  await api.writeTextFile(path, JSON.stringify({ version: 1, type: "profile", data: profile }, null, 2));
+}
+
+async function exportScope(scope: Scope) {
+  const path = await saveDialog({
+    title: "Export Scope",
+    defaultPath: `${scope.name || "scope"}.hkm-scope`,
+    filters: [{ name: "HKM Scope", extensions: ["hkm-scope"] }],
+  });
+  if (!path) return;
+  const data = { ...scope, active_profile: null };
+  await api.writeTextFile(path, JSON.stringify({ version: 1, type: "scope", data }, null, 2));
+}
+
+async function importProfile(): Promise<Profile | null> {
+  const path = await openDialog({
+    title: "Import Profile",
+    filters: [{ name: "HKM Profile", extensions: ["hkm-profile", "json"] }],
+    multiple: false, directory: false,
+  });
+  if (!path) return null;
+  const raw = JSON.parse(await api.readTextFile(path as string));
+  if (raw.type !== "profile") throw new Error("File is not a profile export");
+  return remapProfileIds(raw.data as Profile);
+}
+
+async function importScope(): Promise<Scope | null> {
+  const path = await openDialog({
+    title: "Import Scope",
+    filters: [{ name: "HKM Scope", extensions: ["hkm-scope", "json"] }],
+    multiple: false, directory: false,
+  });
+  if (!path) return null;
+  const raw = JSON.parse(await api.readTextFile(path as string));
+  if (raw.type !== "scope") throw new Error("File is not a scope export");
+  const scope = raw.data as Scope;
+  return {
+    ...scope,
+    id: uid(),
+    active_profile: null,
+    profiles: scope.profiles.map(remapProfileIds),
+  };
+}
 
 function formatDuration(ms: number | null) {
   if (!ms || ms <= 0) return "0s";
@@ -1140,6 +1217,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           </label>
           <div className="game-view__actions">
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editGame", game })}>Edit</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => exportScope(game).catch(e => alert(String(e)))}>⬇ Export</button>
             {!globalGame && <button className="btn btn--ghost btn--sm" onClick={async () => {
               try { setIsBorderless(await api.makeBorderlessFullscreen(game.exe)); }
               catch (e) { alert(String(e)); }
@@ -1176,6 +1254,17 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         {profile && (
           <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "copyProfile", sourceGameId: game.id, profile })}>⧉ Copy</button>
         )}
+        {profile && (
+          <button className="btn btn--ghost btn--sm" onClick={() => exportProfile(profile).catch(e => alert(String(e)))}>⬇ Export</button>
+        )}
+        <button className="btn btn--ghost btn--sm" onClick={async () => {
+          try {
+            const imported = await importProfile();
+            if (!imported) return;
+            imported.name = imported.name || "Imported Profile";
+            onDb(await api.upsertProfile(game.id, imported));
+          } catch (e) { alert(String(e)); }
+        }}>⬆ Import</button>
         {profileId && (
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
@@ -1666,6 +1755,16 @@ export default function App() {
               <div className="game-card game-card--add" onClick={() => setModal({ type: "addGame" })}>
                 <span>＋</span>
                 <div className="game-card__name">Add Scope</div>
+              </div>
+              <div className="game-card game-card--add" onClick={async () => {
+                try {
+                  const scope = await importScope();
+                  if (!scope) return;
+                  handleDb(await api.upsertGame(scope));
+                } catch (e) { alert(String(e)); }
+              }}>
+                <span>⬆</span>
+                <div className="game-card__name">Import Scope</div>
               </div>
             </div>
           </div>

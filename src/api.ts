@@ -48,4 +48,10 @@ export const api = {
 
   saveSettings: (settings: Settings) =>
     invoke<Database>("save_settings", { settings }),
+
+  writeTextFile: (path: string, content: string) =>
+    invoke<void>("write_text_file", { path, content }),
+
+  readTextFile: (path: string) =>
+    invoke<string>("read_text_file", { path }),
 };
