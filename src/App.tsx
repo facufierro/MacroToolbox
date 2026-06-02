@@ -669,27 +669,30 @@ function CopyToProfileModal({
 
 // ── Overlay components ────────────────────────────────────────────────────────
 
+function overlayItemLabel(item: OverlayItem): string {
+  return item.name.trim() ? `${item.name} - ${item.type}` : item.type;
+}
+
 function overlayItemDesc(item: OverlayItem, states: ProfileState[]): string {
   const pos = `(${item.x}, ${item.y})`;
   const stateLabel = stateNameById(states, item.state_id);
   const stateText = stateLabel ? `, visible with ${stateLabel}` : "";
-  const nameText = item.name.trim() ? `${item.name}, ` : "";
   switch (item.type) {
     case "timer": {
       const m = Math.floor(item.duration_ms / 60000);
       const s = String(Math.floor((item.duration_ms % 60000) / 1000)).padStart(2, "0");
       const timerStateLabel = stateNameById(states, item.timer_state_id);
       const timerText = timerStateLabel ? `, reads ${timerStateLabel} timer` : "";
-      return `${nameText}${m}:${s}, ${item.font_size}px at ${pos}${stateText}${timerText}`;
+      return `${m}:${s}, ${item.font_size}px at ${pos}${stateText}${timerText}`;
     }
-    case "icon":  return `${nameText}${item.w}x${item.h} at ${pos}${stateText}`;
-    case "bar":   return `${nameText}${item.w}x${item.h} max ${item.max_value} at ${pos}${stateText}`;
-    case "text":  return `${nameText}"${item.content}" ${item.font_size}px at ${pos}${stateText}`;
+    case "icon":  return `${item.w}x${item.h} at ${pos}${stateText}`;
+    case "bar":   return `${item.w}x${item.h} max ${item.max_value} at ${pos}${stateText}`;
+    case "text":  return `"${item.content}" ${item.font_size}px at ${pos}${stateText}`;
   }
 }
 
 function stateDesc(state: ProfileState): string {
-  return state.duration_ms ? `${state.name}, ${formatDuration(state.duration_ms)}` : `${state.name}, toggle`;
+  return state.duration_ms ? `${formatDuration(state.duration_ms)}` : `toggle`;
 }
 
 function copyName(name: string, fallback: string) {
@@ -697,11 +700,15 @@ function copyName(name: string, fallback: string) {
   return `${base} (copy)`;
 }
 
+function hotkeyLabel(hotkey: Hotkey): string {
+  return hotkey.name.trim() ? `${hotkey.name} - hotkey` : "hotkey";
+}
+
 function hotkeyDesc(hotkey: Hotkey, states: ProfileState[]): string {
   const behavior = hotkey.behavior.replace(/state\(([^)]+)\)/g, (_, stateId: string) => {
     return `state(${stateNameById(states, stateId) ?? stateId})`;
   });
-  return `${hotkey.name.trim() ? `${hotkey.name}, ` : ""}${behavior || "No behavior"}`;
+  return behavior || "No behavior";
 }
 
 function HotkeyRow({ hotkey, states, inherited, onEdit, onCopy, onDelete, onOverride }: {
@@ -715,7 +722,7 @@ function HotkeyRow({ hotkey, states, inherited, onEdit, onCopy, onDelete, onOver
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className="overlay-type-badge overlay-type-badge--text">hotkey</span>
+      <span className="overlay-type-badge overlay-type-badge--text">{hotkeyLabel(hotkey)}</span>
       <span className="hotkey-row__trigger">{hotkey.trigger}</span>
       <span className="overlay-item-desc">{hotkeyDesc(hotkey, states)}</span>
       <div className="step-row__btns">
@@ -747,7 +754,7 @@ function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onO
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{item.type}</span>
+      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{overlayItemLabel(item)}</span>
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
         {inherited ? (
@@ -777,7 +784,7 @@ function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className="overlay-type-badge overlay-type-badge--text">state</span>
+      <span className="overlay-type-badge overlay-type-badge--text">{state.name} - state</span>
       <span className="overlay-item-desc">{stateDesc(state)}</span>
       <div className="step-row__btns">
         {inherited ? (
