@@ -19,10 +19,11 @@ jobs:
         shell: bash
         run: |
           test -d "releases/${{ github.ref_name }}"
+          test -f "changelog/${{ github.ref_name }}.md"
           find "releases/${{ github.ref_name }}" -maxdepth 1 -type f -name '*setup.exe' | grep .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: changelog/${{ github.ref_name }}.md
           files: releases/${{ github.ref_name }}/*setup.exe

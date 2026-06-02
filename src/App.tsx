@@ -157,18 +157,41 @@ function stateNameById(states: ProfileState[], stateId: string | null | undefine
   return states.find(state => state.id === stateId)?.name ?? null;
 }
 
-function bindingModifiers(e: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }) {
+function sideModifier(code: string): string | null {
+  const map: Record<string, string> = {
+    ControlLeft: "lctrl",
+    ControlRight: "rctrl",
+    ShiftLeft: "lshift",
+    ShiftRight: "rshift",
+    AltLeft: "lalt",
+    AltRight: "ralt",
+    MetaLeft: "lwin",
+    MetaRight: "rwin",
+  };
+  return map[code] ?? null;
+}
+
+function bindingModifiers(
+  e: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean },
+  activeSideModifiers: Set<string> = new Set(),
+) {
   const mods: string[] = [];
-  if (e.ctrlKey) mods.push("ctrl");
-  if (e.shiftKey) mods.push("shift");
-  if (e.altKey) mods.push("alt");
-  if (e.metaKey) mods.push("win");
+  const addSideOrGeneric = (left: string, right: string, generic: string, active: boolean) => {
+    const sides = [left, right].filter(mod => activeSideModifiers.has(mod));
+    if (sides.length) mods.push(...sides);
+    else if (active) mods.push(generic);
+  };
+  addSideOrGeneric("lctrl", "rctrl", "ctrl", e.ctrlKey);
+  addSideOrGeneric("lshift", "rshift", "shift", e.shiftKey);
+  addSideOrGeneric("lalt", "ralt", "alt", e.altKey);
+  addSideOrGeneric("lwin", "rwin", "win", e.metaKey);
   return mods;
 }
 
-function toAhkKey(e: KeyboardEvent): string {
-  if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return "";
-  const mods = bindingModifiers(e);
+function toAhkKey(e: KeyboardEvent, activeSideModifiers: Set<string>): string {
+  const sideMod = sideModifier(e.code);
+  if (sideMod) return sideMod;
+  const mods = bindingModifiers(e, activeSideModifiers);
   const keyMap: Record<string, string> = {
     " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
     PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
@@ -186,7 +209,7 @@ function toAhkKey(e: KeyboardEvent): string {
   return [...mods, key].join(" ");
 }
 
-function toAhkMouseButton(e: MouseEvent): string {
+function toAhkMouseButton(e: MouseEvent, activeSideModifiers: Set<string>): string {
   const buttonMap: Record<number, string> = {
     0: "LButton",
     1: "MButton",
@@ -196,11 +219,12 @@ function toAhkMouseButton(e: MouseEvent): string {
   };
   const button = buttonMap[e.button];
   if (!button) return "";
-  return [...bindingModifiers(e), button].join(" ");
+  return [...bindingModifiers(e, activeSideModifiers), button].join(" ");
 }
 
 function useBindingRecorder(recording: boolean, onCapture: (value: string) => void) {
   const onCaptureRef = useRef(onCapture);
+  const activeSideModifiersRef = useRef<Set<string>>(new Set());
   onCaptureRef.current = onCapture;
 
   useEffect(() => {
@@ -212,12 +236,18 @@ function useBindingRecorder(recording: boolean, onCapture: (value: string) => vo
     const keyHandler = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      capture(toAhkKey(e));
+      const sideMod = sideModifier(e.code);
+      if (sideMod) activeSideModifiersRef.current.add(sideMod);
+      capture(toAhkKey(e, activeSideModifiersRef.current));
+    };
+    const keyUpHandler = (e: KeyboardEvent) => {
+      const sideMod = sideModifier(e.code);
+      if (sideMod) activeSideModifiersRef.current.delete(sideMod);
     };
     const mouseHandler = (e: MouseEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      capture(toAhkMouseButton(e));
+      capture(toAhkMouseButton(e, activeSideModifiersRef.current));
     };
     const contextMenuHandler = (e: MouseEvent) => {
       e.preventDefault();
@@ -225,10 +255,13 @@ function useBindingRecorder(recording: boolean, onCapture: (value: string) => vo
     };
 
     window.addEventListener("keydown", keyHandler, true);
+    window.addEventListener("keyup", keyUpHandler, true);
     window.addEventListener("mousedown", mouseHandler, true);
     window.addEventListener("contextmenu", contextMenuHandler, true);
     return () => {
+      activeSideModifiersRef.current.clear();
       window.removeEventListener("keydown", keyHandler, true);
+      window.removeEventListener("keyup", keyUpHandler, true);
       window.removeEventListener("mousedown", mouseHandler, true);
       window.removeEventListener("contextmenu", contextMenuHandler, true);
     };

@@ -47,6 +47,7 @@ $cargoToml | Set-Content $cargoTomlPath
 
 $releaseDir = Join-Path $repoRoot "releases\$tagName"
 $bundleDir = Join-Path $repoRoot "src-tauri\target\release\bundle"
+$changelogPath = Join-Path $repoRoot "changelog\$tagName.md"
 $sourceAhkExe = $env:HKM_AHK_EXE
 if (-not $sourceAhkExe) {
     $sourceAhkExe = "D:\Apps\AutoHotkey\_App\v2\AutoHotkey64.exe"
@@ -56,6 +57,9 @@ $bundledAhkExe = Join-Path $bundledAhkDir "AutoHotkey64.exe"
 
 if (-not (Test-Path -LiteralPath $sourceAhkExe -PathType Leaf)) {
     throw "AutoHotkey v2 not found at '$sourceAhkExe'. Set HKM_AHK_EXE to the AutoHotkey64.exe path."
+}
+if (-not (Test-Path -LiteralPath $changelogPath -PathType Leaf)) {
+    throw "Changelog not found at changelog\$tagName.md"
 }
 New-Item -ItemType Directory -Path $bundledAhkDir -Force | Out-Null
 Copy-Item -LiteralPath $sourceAhkExe -Destination $bundledAhkExe -Force

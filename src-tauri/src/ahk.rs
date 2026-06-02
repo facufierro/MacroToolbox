@@ -227,18 +227,28 @@ fn trigger_to_key(trigger: &str) -> String {
     let trigger = trigger.trim().to_lowercase();
     let mut mods = String::new();
     let mut key = String::new();
+    let mut modifier_key = String::new();
 
     for part in trigger.split_whitespace() {
         match part {
-            "ctrl"  => mods.push('^'),
-            "shift" => mods.push('+'),
-            "alt"   => mods.push('!'),
+            "ctrl"  => { mods.push('^'); modifier_key = "Control".to_string(); }
+            "lctrl" => { mods.push_str("<^"); modifier_key = "LControl".to_string(); }
+            "rctrl" => { mods.push_str(">^"); modifier_key = "RControl".to_string(); }
+            "shift" => { mods.push('+'); modifier_key = "Shift".to_string(); }
+            "lshift" => { mods.push_str("<+"); modifier_key = "LShift".to_string(); }
+            "rshift" => { mods.push_str(">+"); modifier_key = "RShift".to_string(); }
+            "alt"   => { mods.push('!'); modifier_key = "Alt".to_string(); }
+            "lalt" => { mods.push_str("<!"); modifier_key = "LAlt".to_string(); }
+            "ralt" => { mods.push_str(">!"); modifier_key = "RAlt".to_string(); }
+            "win" => { mods.push('#'); modifier_key = "LWin".to_string(); }
+            "lwin" => { mods.push_str("<#"); modifier_key = "LWin".to_string(); }
+            "rwin" => { mods.push_str(">#"); modifier_key = "RWin".to_string(); }
             k       => key = k.to_string(),
         }
     }
 
     if key.is_empty() {
-        return String::new();
+        return modifier_key;
     }
 
     if let Some(rest) = key.strip_prefix('f') {
@@ -250,7 +260,7 @@ fn trigger_to_key(trigger: &str) -> String {
     format!("${mods}{key}")
 }
 
-const BEHAVIOR_ENGINE: &str = r#"ExecuteBehavior(str) {
+const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
     MouseGetPos &savedX, &savedY
     locked := false
     try {
@@ -370,10 +380,28 @@ DoPress(keyStr) {
     for part in StrSplit(Trim(StrLower(keyStr)), " ") {
         if (part = "ctrl")
             mods .= "^"
+        else if (part = "lctrl")
+            mods .= "<^"
+        else if (part = "rctrl")
+            mods .= ">^"
         else if (part = "shift")
             mods .= "+"
+        else if (part = "lshift")
+            mods .= "<+"
+        else if (part = "rshift")
+            mods .= ">+"
         else if (part = "alt")
             mods .= "!"
+        else if (part = "lalt")
+            mods .= "<!"
+        else if (part = "ralt")
+            mods .= ">!"
+        else if (part = "win")
+            mods .= "#"
+        else if (part = "lwin")
+            mods .= "<#"
+        else if (part = "rwin")
+            mods .= ">#"
         else
             key := part
     }
@@ -421,4 +449,4 @@ DoPress(keyStr) {
         SendInput("{Shift Up}")
     if InStr(mods, "^")
         SendInput("{Ctrl Up}")
-}"#;
+}"###;
