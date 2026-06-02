@@ -172,7 +172,15 @@ export default function OverlayApp() {
         const rect = el.getBoundingClientRect();
         console.log("[overlay] item", id, "rect=", rect.left, rect.top, rect.right, rect.bottom);
         if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
-          setHiddenIds(prev => new Set([...prev, id]));
+          // Hide the whole group if the item belongs to one, otherwise hide just this item
+          const hitItem = configRef.current.items.find(i => i.id === id);
+          const groupId = hitItem?.group_id;
+          if (groupId) {
+            const groupIds = new Set(configRef.current.items.filter(i => i.group_id === groupId).map(i => i.id));
+            setHiddenIds(prev => new Set([...prev, ...groupIds]));
+          } else {
+            setHiddenIds(prev => new Set([...prev, id]));
+          }
           break;
         }
       }

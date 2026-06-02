@@ -43,6 +43,7 @@ interface OverlayItemBase {
   x: number;
   y: number;
   state_id: string | null;
+  group_id?: string | null;
   visible_when?: string | null;
   display_mode?: OverlayDisplayMode;
   hotkey_trigger?: string | null;
@@ -55,6 +56,11 @@ export type OverlayItem =
   | (OverlayItemBase & { type: "bar"; w: number; h: number; color: string; max_value: number })
   | (OverlayItemBase & { type: "text"; font_size: number; color: string; content: string });
 
+export interface OverlayGroup {
+  id: string;
+  name: string;
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -63,6 +69,7 @@ export interface Profile {
   states: ProfileState[];
   overlay_items: OverlayItem[];
   overlay_triggers: OverlayTrigger[];
+  overlay_groups: OverlayGroup[];
 }
 
 export interface Scope {

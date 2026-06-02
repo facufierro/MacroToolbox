@@ -7,6 +7,7 @@ import type {
   Profile,
   Hotkey,
   OverlayItem,
+  OverlayGroup,
   ProfileState,
 } from "./types";
 import "./App.css";
@@ -22,7 +23,7 @@ type Modal =
   | { type: "copyHotkey"; sourceGameId: string; sourceProfileId: string; hotkey: Hotkey }
   | { type: "setParent"; gameId: string; profile: Profile }
   | { type: "copyProfile"; sourceGameId: string; profile: Profile }
-  | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string; states: ProfileState[] }
+  | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string; states: ProfileState[]; groups: OverlayGroup[] }
   | { type: "copyOverlayItem"; sourceGameId: string; sourceProfileId: string; item: OverlayItem }
   | { type: "copyState"; sourceGameId: string; sourceProfileId: string; state: ProfileState }
   | { type: "profileState"; gameId: string; profileId: string; index: number | null; state: ProfileState };
@@ -54,7 +55,7 @@ function blankGlobalGame(): Scope {
 
 function blankProfile(gameId: string): Profile {
   void gameId;
-  return { id: uid(), name: "", parent_id: null, hotkeys: [], states: [], overlay_items: [], overlay_triggers: [] };
+  return { id: uid(), name: "", parent_id: null, hotkeys: [], states: [], overlay_items: [], overlay_triggers: [], overlay_groups: [] };
 }
 
 function blankTimer():   OverlayItem { return { type: "timer", id: uid(), name: "", x: 0, y: 0, duration_ms: 60000, color: "#ffffff", font_size: 22, state_id: null, timer_state_id: null }; }
@@ -669,8 +670,10 @@ function CopyToProfileModal({
 
 // ── Overlay components ────────────────────────────────────────────────────────
 
-function overlayItemLabel(item: OverlayItem): string {
-  return item.name.trim() ? `${item.name} - ${item.type}` : item.type;
+function overlayItemLabel(item: OverlayItem, groups: OverlayGroup[]): string {
+  const base = item.name.trim() ? `${item.name} - ${item.type}` : item.type;
+  const group = item.group_id ? groups.find(g => g.id === item.group_id) : null;
+  return group ? `${base} [${group.name}]` : base;
 }
 
 function overlayItemDesc(item: OverlayItem, states: ProfileState[]): string {
@@ -743,9 +746,10 @@ function HotkeyRow({ hotkey, states, inherited, onEdit, onCopy, onDelete, onOver
   );
 }
 
-function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onOverride }: {
+function OverlayItemRow({ item, states, groups, inherited, onEdit, onCopy, onDelete, onOverride }: {
   item: OverlayItem;
   states: ProfileState[];
+  groups: OverlayGroup[];
   inherited: boolean;
   onEdit?: () => void;
   onCopy?: () => void;
@@ -754,7 +758,7 @@ function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onO
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{overlayItemLabel(item)}</span>
+      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{overlayItemLabel(item, groups)}</span>
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
         {inherited ? (
@@ -804,10 +808,11 @@ function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
   );
 }
 
-function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
+function OverlayItemModal({ initial, gameExe, states, groups, onSave, onClose }: {
   initial: OverlayItem;
   gameExe: string;
   states: ProfileState[];
+  groups: OverlayGroup[];
   onSave: (item: OverlayItem) => void;
   onClose: () => void;
 }) {
@@ -815,6 +820,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
   const [x, setX] = useState(String(initial.x));
   const [y, setY] = useState(String(initial.y));
   const [stateId, setStateId] = useState(initial.state_id ?? "");
+  const [groupId, setGroupId] = useState(initial.group_id ?? "");
 
   const [mins, setMins]         = useState(String(initial.type === "timer" ? Math.floor(initial.duration_ms / 60000) : 1));
   const [secs, setSecs]         = useState(String(initial.type === "timer" ? Math.floor((initial.duration_ms % 60000) / 1000) : 0));
@@ -848,6 +854,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
       x: parseFloat(x)||0,
       y: parseFloat(y)||0,
       state_id: stateId || null,
+      group_id: groupId || null,
     };
     const timerMs = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
     switch (initial.type) {
@@ -877,6 +884,17 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
             ))}
           </select>
         </label>
+
+        {groups.length > 0 && (
+          <label>Group
+            <select value={groupId} onChange={e => setGroupId(e.target.value)}>
+              <option value="">No group</option>
+              {groups.map(g => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <label>Position
           <GotoInput x={x} y={y} gameExe={gameExe} onChange={(nx, ny) => { setX(nx); setY(ny); }} />
@@ -1264,17 +1282,43 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         <div className="overlay-editor">
           <div className="step-add-btns">
             <span className="step-add-label">Add:</span>
-            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankTimer(), gameExe: game.exe, states: stateOptions })}>Timer</button>
-            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankIcon(),  gameExe: game.exe, states: stateOptions })}>Icon</button>
-            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankBar(),   gameExe: game.exe, states: stateOptions })}>Bar</button>
-            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankText(),  gameExe: game.exe, states: stateOptions })}>Text</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankTimer(), gameExe: game.exe, states: stateOptions, groups: profile.overlay_groups ?? [] })}>Timer</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankIcon(),  gameExe: game.exe, states: stateOptions, groups: profile.overlay_groups ?? [] })}>Icon</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankBar(),   gameExe: game.exe, states: stateOptions, groups: profile.overlay_groups ?? [] })}>Bar</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: game.id, profileId, index: null, item: blankText(),  gameExe: game.exe, states: stateOptions, groups: profile.overlay_groups ?? [] })}>Text</button>
+            <button className="btn btn--ghost btn--sm" onClick={async () => {
+              const name = prompt("Group name:");
+              if (!name?.trim()) return;
+              const group: OverlayGroup = { id: uid(), name: name.trim() };
+              onDb(await api.upsertProfile(game.id, { ...profile, overlay_groups: [...(profile.overlay_groups ?? []), group] }));
+            }}>+ Group</button>
           </div>
+          {(profile.overlay_groups ?? []).length > 0 && (
+            <div className="steps-list" style={{ marginTop: 8 }}>
+              {(profile.overlay_groups ?? []).map(group => (
+                <div key={group.id} className="step-row">
+                  <span className="overlay-type-badge overlay-type-badge--text">{group.name} - group</span>
+                  <span className="overlay-item-desc">{resolvedOverlayItems.filter(({ item }) => item.group_id === group.id).length} items</span>
+                  <div className="step-row__btns">
+                    <button className="icon-btn icon-btn--danger" title="Delete group" onClick={async () => {
+                      const updated = {
+                        ...profile,
+                        overlay_groups: (profile.overlay_groups ?? []).filter(g => g.id !== group.id),
+                        overlay_items: profile.overlay_items.map(item => item.group_id === group.id ? { ...item, group_id: null } : item),
+                      };
+                      onDb(await api.upsertProfile(game.id, updated));
+                    }}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="steps-list" style={{ marginTop: 8 }}>
             {resolvedOverlayItems.map(({ item, own }) => {
               const ownIndex = own ? profile.overlay_items.findIndex(candidate => candidate.id === item.id) : -1;
               return (
-                <OverlayItemRow key={item.id} item={item} states={stateOptions} inherited={!own}
-                  onEdit={own ? () => onModal({ type: "overlayItem", gameId: game.id, profileId, index: ownIndex, item, gameExe: game.exe, states: stateOptions }) : undefined}
+                <OverlayItemRow key={item.id} item={item} states={stateOptions} groups={profile.overlay_groups ?? []} inherited={!own}
+                  onEdit={own ? () => onModal({ type: "overlayItem", gameId: game.id, profileId, index: ownIndex, item, gameExe: game.exe, states: stateOptions, groups: profile.overlay_groups ?? [] }) : undefined}
                   onCopy={() => onModal({ type: "copyOverlayItem", sourceGameId: game.id, sourceProfileId: profileId, item })}
                   onDelete={own ? async () => {
                     const updated = { ...profile, overlay_items: profile.overlay_items.filter((_, idx) => idx !== ownIndex) };
@@ -1487,6 +1531,7 @@ export default function App() {
         states: [...profile.states],
         overlay_items: [...profile.overlay_items],
         overlay_triggers: [...profile.overlay_triggers],
+        overlay_groups: [...(profile.overlay_groups ?? [])],
       };
       const updated = await api.upsertProfile(targetGameId, copy);
       handleDb(updated);
@@ -1669,8 +1714,8 @@ export default function App() {
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "overlayItem" && (() => {
-        const { gameId, profileId, index, item, gameExe, states } = modal;
-        return <OverlayItemModal initial={item} gameExe={gameExe} states={states}
+        const { gameId, profileId, index, item, gameExe, states, groups } = modal;
+        return <OverlayItemModal initial={item} gameExe={gameExe} states={states} groups={groups}
           onSave={it => handleOverlayItemSave(gameId, profileId, index, it)}
           onClose={() => setModal(null)} />;
       })()}

@@ -38,6 +38,14 @@ pub struct Profile {
     pub overlay_items: Vec<OverlayItem>,
     #[serde(default)]
     pub overlay_triggers: Vec<OverlayTrigger>,
+    #[serde(default)]
+    pub overlay_groups: Vec<OverlayGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayGroup {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -94,6 +102,8 @@ pub enum OverlayItem {
         #[serde(default)]
         state_id: Option<String>,
         #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
         timer_state_id: Option<String>,
         #[serde(default)]
         visible_when: Option<String>,
@@ -118,6 +128,8 @@ pub enum OverlayItem {
         #[serde(default)]
         state_id: Option<String>,
         #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
         display_mode: String,
@@ -139,6 +151,8 @@ pub enum OverlayItem {
         #[serde(default)]
         state_id: Option<String>,
         #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
         display_mode: String,
@@ -158,6 +172,8 @@ pub enum OverlayItem {
         content: String,
         #[serde(default)]
         state_id: Option<String>,
+        #[serde(default)]
+        group_id: Option<String>,
         #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
