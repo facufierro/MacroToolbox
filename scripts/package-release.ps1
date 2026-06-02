@@ -14,9 +14,14 @@ if (Test-Path $cargoBin) {
 
 $tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
 $tauriConfig = Get-Content $tauriConfigPath -Raw | ConvertFrom-Json
-$gitTag = if ($Version) { $Version.Trim() } else { (& git describe --tags --abbrev=0 2>$null).Trim() }
+$gitTag = if ($Version) { $Version.Trim() } else { $env:HKM_RELEASE_VERSION }
 if (-not $gitTag) {
-    throw "No git tag found. Create a tag first, or run scripts\package-release.ps1 -Version v1.0.1."
+    $latestTag = (& git describe --tags --abbrev=0 2>$null).Trim()
+    if ($latestTag -match '^v?(\d+)\.(\d+)\.(\d+)$') {
+        $gitTag = "v$($matches[1]).$($matches[2]).$([int]$matches[3] + 1)"
+    } else {
+        $gitTag = "v1.0.0"
+    }
 }
 $tagName = if ($gitTag.StartsWith("v")) { $gitTag } else { "v$gitTag" }
 $version = $tagName.TrimStart("v")
@@ -84,4 +89,9 @@ Write-Host ""
 Write-Host "Release artifacts copied to releases\${tagName}:"
 $copied | ForEach-Object { Write-Host " - $_" }
 Write-Host ""
-Write-Host "Commit releases\$tagName, push it, then tag the same version ($tagName) to publish."
+Write-Host "Next:"
+Write-Host "  git add ."
+Write-Host "  git commit -m `"Release $tagName`""
+Write-Host "  git tag $tagName"
+Write-Host "  git push"
+Write-Host "  git push origin $tagName"
