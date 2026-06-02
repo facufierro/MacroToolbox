@@ -1162,6 +1162,11 @@ fn toggle_overlay(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn get_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+#[tauri::command]
 fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     db.settings = settings;
@@ -1394,6 +1399,7 @@ pub fn run() {
             deactivate_ahk,
             get_ahk_status,
             save_settings,
+            get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

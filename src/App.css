@@ -32,7 +32,16 @@ body {
 #root { height: 100vh; }
 
 /* ── Layout ────────────────────────────────────────────────────────────────── */
-.layout { display: flex; height: 100vh; }
+.layout { display: flex; flex-direction: column; height: 100vh; }
+.layout__body { display: flex; flex: 1 1 0; min-height: 0; }
+
+.update-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 16px;
+  background: #2a2040; border-bottom: 1px solid var(--accent);
+  font-size: 0.9rem; flex-shrink: 0;
+}
+.update-banner span { flex: 1; }
 
 .loading {
   display: flex;

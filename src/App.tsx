@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
 import type {
   Database,
@@ -1501,12 +1502,22 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
+function semverGt(a: string, b: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
+  const [aMaj, aMin, aPat] = parse(a);
+  const [bMaj, bMin, bPat] = parse(b);
+  if (aMaj !== bMaj) return aMaj > bMaj;
+  if (aMin !== bMin) return aMin > bMin;
+  return aPat > bPat;
+}
+
 export default function App() {
   const [db, setDb] = useState<Database | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [modal, setModal] = useState<Modal | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
 
   const loadDb = useCallback(async () => {
     const data = await api.getDatabase();
@@ -1518,6 +1529,21 @@ export default function App() {
     const id = setInterval(async () => {
       setRunning(await api.getAhkStatus());
     }, 2000);
+
+    api.getAppVersion().then(current => {
+      fetch("https://api.github.com/repos/facufierro/HotkeyManager/releases/latest")
+        .then(r => r.json())
+        .then(data => {
+          const latest: string = data.tag_name ?? "";
+          if (latest && semverGt(latest, current)) {
+            const asset = (data.assets as { name: string; browser_download_url: string }[])
+              ?.find(a => a.name.endsWith(".exe") || a.name.endsWith(".msi"));
+            setUpdateInfo({ version: latest, url: asset?.browser_download_url ?? data.html_url });
+          }
+        })
+        .catch(() => {});
+    }).catch(() => {});
+
     return () => clearInterval(id);
   }, [loadDb]);
 
@@ -1695,7 +1721,15 @@ export default function App() {
 
   return (
     <div className="layout">
-      {/* Sidebar */}
+      {updateInfo && (
+        <div className="update-banner">
+          <span>Update available: <strong>{updateInfo.version}</strong></span>
+          <button className="btn btn--primary btn--sm" onClick={() => openUrl(updateInfo.url).catch(() => {})}>Download</button>
+          <button className="btn btn--ghost btn--sm" onClick={() => setUpdateInfo(null)}>Dismiss</button>
+        </div>
+      )}
+      {/* Sidebar + main */}
+      <div className="layout__body">
       <aside className="sidebar">
         <div className="sidebar__logo">⌨ HKM</div>
         <nav className="sidebar__games">
@@ -1836,6 +1870,7 @@ export default function App() {
           onSave={(targetGameId, targetProfileId) => handleCopyState(sourceGameId, sourceProfileId, state, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
+      </div>{/* layout__body */}
     </div>
   );
 }

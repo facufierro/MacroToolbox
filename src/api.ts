@@ -54,4 +54,7 @@ export const api = {
 
   readTextFile: (path: string) =>
     invoke<string>("read_text_file", { path }),
+
+  getAppVersion: () =>
+    invoke<string>("get_app_version"),
 };
