@@ -18,6 +18,18 @@ if (-not $version) {
 $tagName = "v$version"
 $releaseDir = Join-Path $repoRoot "releases\$tagName"
 $bundleDir = Join-Path $repoRoot "src-tauri\target\release\bundle"
+$sourceAhkExe = $env:HKM_AHK_EXE
+if (-not $sourceAhkExe) {
+    $sourceAhkExe = "D:\Apps\AutoHotkey\_App\v2\AutoHotkey64.exe"
+}
+$bundledAhkDir = Join-Path $repoRoot "src-tauri\resources\autohotkey"
+$bundledAhkExe = Join-Path $bundledAhkDir "AutoHotkey64.exe"
+
+if (-not (Test-Path -LiteralPath $sourceAhkExe -PathType Leaf)) {
+    throw "AutoHotkey v2 not found at '$sourceAhkExe'. Set HKM_AHK_EXE to the AutoHotkey64.exe path."
+}
+New-Item -ItemType Directory -Path $bundledAhkDir -Force | Out-Null
+Copy-Item -LiteralPath $sourceAhkExe -Destination $bundledAhkExe -Force
 
 npm run tauri build
 

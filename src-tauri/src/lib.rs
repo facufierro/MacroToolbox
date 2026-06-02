@@ -1307,11 +1307,12 @@ pub fn run() {
             let startup_settings = config::load_db(&db_path)
                 .map(|db| db.settings)
                 .unwrap_or_default();
+            let resource_dir = app.path().resource_dir().ok();
 
             app.manage(AppState {
                 db_path: db_path.clone(),
                 scripts_path: scripts_dir,
-                ahk_manager: Mutex::new(ahk::AhkManager::new()),
+                ahk_manager: Mutex::new(ahk::AhkManager::new(resource_dir)),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),

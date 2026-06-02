@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use crate::config::{self, Profile};
@@ -7,11 +7,17 @@ const GLOBAL_GAME_EXE: &str = "*";
 
 pub struct AhkManager {
     process: Option<Child>,
+    bundled_ahk_exe: Option<PathBuf>,
 }
 
 impl AhkManager {
-    pub fn new() -> Self {
-        Self { process: None }
+    pub fn new(resource_dir: Option<PathBuf>) -> Self {
+        Self {
+            process: None,
+            bundled_ahk_exe: resource_dir
+                .map(|dir| dir.join("resources").join("autohotkey").join("AutoHotkey64.exe"))
+                .filter(|path| path.exists()),
+        }
     }
 
     pub fn launch(&mut self, ahk_exe: &str, script_path: &Path) -> Result<(), String> {
@@ -26,12 +32,12 @@ impl AhkManager {
 
         // AutoHotkeyUX.exe is a launcher that spawns a child and exits — use the v2
         // interpreter directly so we can track the process.
-        let exe = resolve_ahk_exe(ahk_exe);
+        let exe = resolve_ahk_exe(ahk_exe, self.bundled_ahk_exe.as_deref());
 
         let child = Command::new(&exe)
             .arg(script_path)
             .spawn()
-            .map_err(|e| format!("Failed to launch '{exe}': {e}. Check the AutoHotkey path in Settings."))?;
+            .map_err(|e| format!("Failed to launch '{exe}': {e}. Check the bundled AutoHotkey file or the path in Settings."))?;
         self.process = Some(child);
         Ok(())
     }
@@ -52,8 +58,11 @@ impl AhkManager {
     }
 }
 
-fn resolve_ahk_exe(configured: &str) -> String {
+fn resolve_ahk_exe(configured: &str, bundled: Option<&Path>) -> String {
     if configured.is_empty() {
+        if let Some(path) = bundled {
+            return path.to_string_lossy().into_owned();
+        }
         return "AutoHotkey.exe".to_string();
     }
     // If user pointed to AutoHotkeyUX.exe, find the real v2 interpreter next to it
