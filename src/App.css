@@ -218,6 +218,67 @@ body {
 .game-view__meta { flex: 1; }
 .game-view__meta h1 { font-size: 1.4rem; margin-bottom: 4px; }
 .exe-label { color: var(--text2); font-size: 0.85rem; margin-bottom: 12px; font-family: monospace; }
+.scope-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: var(--text);
+  font-size: 0.9rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scope-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scope-toggle__track {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg3) 78%, #000 22%);
+  border: 1px solid var(--border);
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.scope-toggle__track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f4f7fb;
+  transition: transform 0.16s ease;
+}
+
+.scope-toggle input:checked + .scope-toggle__track {
+  background: color-mix(in srgb, var(--accent) 72%, #09131a 28%);
+  border-color: var(--accent);
+}
+
+.scope-toggle input:checked + .scope-toggle__track::after {
+  transform: translateX(20px);
+}
+
+.scope-toggle input:focus-visible + .scope-toggle__track {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, #fff 45%);
+  outline-offset: 2px;
+}
+
+.scope-toggle__status {
+  min-width: 22px;
+  color: var(--text2);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .game-view__actions { display: flex; gap: 8px; }
 
 /* ── Profile bar ───────────────────────────────────────────────────────────── */

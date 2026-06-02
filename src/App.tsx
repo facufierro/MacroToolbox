@@ -1099,11 +1099,18 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         <div className="game-view__meta">
           <h1>{game.name}</h1>
           <p className="exe-label">{globalGame ? "Global profile for every app" : game.exe}</p>
+          <label className="scope-toggle" title="Disable the overlay for this scope">
+            <span>Overlay</span>
+            <input
+              type="checkbox"
+              checked={!game.overlay_disabled}
+              onChange={toggleOverlayDisabled}
+            />
+            <span className="scope-toggle__track" aria-hidden="true" />
+            <span className="scope-toggle__status">{game.overlay_disabled ? "Off" : "On"}</span>
+          </label>
           <div className="game-view__actions">
             <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "editGame", game })}>Edit</button>
-            <button className="btn btn--ghost btn--sm" onClick={toggleOverlayDisabled}>
-              {game.overlay_disabled ? "Enable Overlay" : "Disable Overlay"}
-            </button>
             {!globalGame && <button className="btn btn--ghost btn--sm" onClick={async () => {
               try { setIsBorderless(await api.makeBorderlessFullscreen(game.exe)); }
               catch (e) { alert(String(e)); }
