@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::{collections::HashMap, sync::{Mutex, OnceLock}};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod ahk;
@@ -292,7 +292,23 @@ fn main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     })
 }
 
+fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "main",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Hotkey Manager")
+    .inner_size(1100.0, 700.0)
+    .min_inner_size(800.0, 500.0)
+    .visible(true)
+    .build()
+}
+
 fn restore_main_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.show();
+
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
@@ -305,25 +321,13 @@ fn restore_main_window(window: &tauri::WebviewWindow) {
         }
     }
 
-    let _ = window.set_skip_taskbar(false);
     let _ = window.unminimize();
-    let _ = window.show();
     let _ = window.set_focus();
 }
 
 fn hide_window_for_tray(window: &tauri::WebviewWindow) {
     let _ = window.set_skip_taskbar(true);
-    let _ = window.minimize();
-
-    #[cfg(target_os = "windows")]
-    if let Ok(hwnd) = window.hwnd() {
-        unsafe {
-            use winapi::um::winuser::{ShowWindow, SW_MINIMIZE};
-
-            let hwnd = hwnd.0 as winapi::shared::windef::HWND;
-            ShowWindow(hwnd, SW_MINIMIZE);
-        }
-    }
+    let _ = window.hide();
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -337,6 +341,8 @@ fn show_main_window(app: &tauri::AppHandle) {
     let main_thread_app = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(window) = main_window(&main_thread_app) {
+            restore_main_window(&window);
+        } else if let Ok(window) = create_main_window(&main_thread_app) {
             restore_main_window(&window);
         } else {
             let labels = main_thread_app.webview_windows().keys().cloned().collect::<Vec<_>>();
@@ -378,18 +384,15 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
+            match event {
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
                     ..
                 } | TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
                     ..
-                }
-            ) {
-                show_main_window(tray.app_handle());
+                } => show_main_window(tray.app_handle()),
+                _ => {}
             }
         });
 
