@@ -189,8 +189,6 @@ function bindingModifiers(
 }
 
 function toAhkKey(e: KeyboardEvent, activeSideModifiers: Set<string>): string {
-  const sideMod = sideModifier(e.code);
-  if (sideMod) return sideMod;
   const mods = bindingModifiers(e, activeSideModifiers);
   const keyMap: Record<string, string> = {
     " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
@@ -237,7 +235,10 @@ function useBindingRecorder(recording: boolean, onCapture: (value: string) => vo
       e.preventDefault();
       e.stopImmediatePropagation();
       const sideMod = sideModifier(e.code);
-      if (sideMod) activeSideModifiersRef.current.add(sideMod);
+      if (sideMod) {
+        activeSideModifiersRef.current.add(sideMod);
+        return;
+      }
       capture(toAhkKey(e, activeSideModifiersRef.current));
     };
     const keyUpHandler = (e: KeyboardEvent) => {
