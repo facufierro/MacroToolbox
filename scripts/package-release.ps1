@@ -60,12 +60,16 @@ if (-not (Test-Path -LiteralPath $sourceAhkExe -PathType Leaf)) {
 New-Item -ItemType Directory -Path $bundledAhkDir -Force | Out-Null
 Copy-Item -LiteralPath $sourceAhkExe -Destination $bundledAhkExe -Force
 
-npm run tauri build
-
 if (Test-Path $releaseDir) {
     Remove-Item -LiteralPath $releaseDir -Recurse -Force
 }
 New-Item -ItemType Directory -Path $releaseDir | Out-Null
+
+if (Test-Path $bundleDir) {
+    Remove-Item -LiteralPath $bundleDir -Recurse -Force
+}
+
+npm run tauri build
 
 $artifactPatterns = @(
     "nsis\*.exe",
@@ -76,13 +80,16 @@ $copied = @()
 foreach ($pattern in $artifactPatterns) {
     $matches = Get-ChildItem -Path (Join-Path $bundleDir $pattern) -File -ErrorAction SilentlyContinue
     foreach ($artifact in $matches) {
+        if (-not $artifact.Name.Contains($version)) {
+            continue
+        }
         Copy-Item -LiteralPath $artifact.FullName -Destination $releaseDir
         $copied += $artifact.Name
     }
 }
 
 if ($copied.Count -eq 0) {
-    throw "Build finished, but no release artifacts were found in src-tauri\target\release\bundle"
+    throw "Build finished, but no release artifacts matching version $version were found in src-tauri\target\release\bundle"
 }
 
 Write-Host ""
