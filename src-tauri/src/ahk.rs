@@ -15,7 +15,14 @@ impl AhkManager {
     }
 
     pub fn launch(&mut self, ahk_exe: &str, script_path: &Path) -> Result<(), String> {
-        self.kill();
+        // Kill old process in the background so we don't block waiting for it to exit.
+        // AHK's #SingleInstance Force also causes the old instance to exit on its own.
+        if let Some(mut old) = self.process.take() {
+            std::thread::spawn(move || {
+                let _ = old.kill();
+                let _ = old.wait();
+            });
+        }
 
         // AutoHotkeyUX.exe is a launcher that spawns a child and exits — use the v2
         // interpreter directly so we can track the process.
