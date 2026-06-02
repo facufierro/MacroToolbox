@@ -116,6 +116,8 @@ export default function OverlayApp() {
   const [origin, setOrigin] = useState<[number, number, number, number]>([0, 0, 0, 0]);
   const [runtime, setRuntime] = useState<OverlayRuntimeState>(EMPTY_RUNTIME);
   const [now, setNow] = useState(() => Date.now());
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+  const itemEls = useRef<Map<string, HTMLElement>>(new Map());
   const lastDebug = useRef("");
   const configRef = useRef(config);
   const scale = window.devicePixelRatio || 1;
@@ -125,7 +127,7 @@ export default function OverlayApp() {
     origin[2] / scale,
     origin[3] / scale,
   ];
-  const visibleItems = config.items.filter(item => isItemVisible(item, runtime, now));
+  const visibleItems = config.items.filter(item => isItemVisible(item, runtime, now) && !hiddenIds.has(item.id));
 
   useEffect(() => {
     configRef.current = config;
@@ -158,6 +160,23 @@ export default function OverlayApp() {
 
     let unlistenConfig: (() => void) | undefined;
     let unlistenEvent: (() => void) | undefined;
+    let unlistenRightClick: (() => void) | undefined;
+    listen<[number, number]>("overlay-right-click", e => {
+      const [sx, sy] = e.payload;
+      const scale = window.devicePixelRatio || 1;
+      // Convert physical screen pixels → CSS viewport pixels
+      const cx = sx / scale - window.screenX;
+      const cy = sy / scale - window.screenY;
+      console.log("[overlay] right-click screen=", sx, sy, "viewport=", cx, cy, "items=", itemEls.current.size);
+      for (const [id, el] of itemEls.current) {
+        const rect = el.getBoundingClientRect();
+        console.log("[overlay] item", id, "rect=", rect.left, rect.top, rect.right, rect.bottom);
+        if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
+          setHiddenIds(prev => new Set([...prev, id]));
+          break;
+        }
+      }
+    }).then(fn => { unlistenRightClick = fn; });
     listen<OverlayConfig>("overlay-config", e => {
       console.log("[overlay] overlay-config event:", e.payload);
       setConfig(e.payload);
@@ -173,6 +192,7 @@ export default function OverlayApp() {
       window.clearInterval(clock);
       unlistenConfig?.();
       unlistenEvent?.();
+      unlistenRightClick?.();
     };
   }, []);
 
@@ -207,23 +227,27 @@ export default function OverlayApp() {
   return (
     <div className="overlay-root">
       {visibleItems.map(item => (
-        <OverlayItemView key={item.id} item={item} origin={logicalOrigin} remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} />
+        <OverlayItemView key={item.id} item={item} origin={logicalOrigin}
+          remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null}
+          onMount={el => { if (el) itemEls.current.set(item.id, el); else itemEls.current.delete(item.id); }} />
       ))}
     </div>
   );
 }
 
-function OverlayItemView({ item, origin, remainingMs }: { item: OverlayItem; origin: [number, number, number, number]; remainingMs: number | null }) {
-  const base: React.CSSProperties = {
+function OverlayItemView({ item, origin, remainingMs, onMount }: { item: OverlayItem; origin: [number, number, number, number]; remainingMs: number | null; onMount: (el: HTMLElement | null) => void }) {
+  // Put position on the wrapper so getBoundingClientRect() returns real bounds for hit-testing.
+  // Inner components get an empty style so they don't double-apply the offset.
+  const pos: React.CSSProperties = {
     position: "absolute",
     left: origin[0] + resolveCoord(item.x, origin[2]),
     top: origin[1] + resolveCoord(item.y, origin[3]),
   };
   switch (item.type) {
-    case "timer": return <TimerView item={item} style={base} remainingMs={remainingMs ?? item.duration_ms} />;
-    case "icon":  return <IconView  item={item} style={base} />;
-    case "bar":   return <BarView   item={item} style={base} />;
-    case "text":  return <TextView  item={item} style={base} />;
+    case "timer": return <div ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;
+    case "icon":  return <div ref={onMount} style={pos}><IconView  item={item} style={{}} /></div>;
+    case "bar":   return <div ref={onMount} style={pos}><BarView   item={item} style={{}} /></div>;
+    case "text":  return <div ref={onMount} style={pos}><TextView  item={item} style={{}} /></div>;
   }
 }
 

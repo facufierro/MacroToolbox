@@ -51,6 +51,48 @@ struct OverlayEventPayload {
 static DEBUG_LOG_STATE: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
+static MOUSE_HOOK_HANDLE: OnceLock<Mutex<tauri::AppHandle>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn mouse_hook_proc(
+    code: i32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    use winapi::um::winuser::{CallNextHookEx, WM_RBUTTONDOWN, MSLLHOOKSTRUCT};
+    if code >= 0 && wparam as u32 == WM_RBUTTONDOWN {
+        let ms = &*(lparam as *const MSLLHOOKSTRUCT);
+        let x = ms.pt.x;
+        let y = ms.pt.y;
+        if let Some(handle_lock) = MOUSE_HOOK_HANDLE.get() {
+            if let Ok(handle) = handle_lock.lock() {
+                if let Some(overlay) = handle.get_webview_window("overlay") {
+                    if overlay.is_visible().unwrap_or(false) {
+                        let _ = overlay.emit("overlay-right-click", (x, y));
+                    }
+                }
+            }
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+#[cfg(target_os = "windows")]
+fn start_mouse_hook(handle: tauri::AppHandle) {
+    use winapi::um::winuser::{SetWindowsHookExW, WH_MOUSE_LL};
+    let _ = MOUSE_HOOK_HANDLE.set(Mutex::new(handle));
+    std::thread::spawn(|| unsafe {
+        use winapi::um::winuser::{GetMessageW, TranslateMessage, DispatchMessageW, MSG};
+        SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), std::ptr::null_mut(), 0);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
 fn debug_log_once(key: &'static str, message: String) {
     let state = DEBUG_LOG_STATE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut state = state.lock().unwrap();
@@ -1089,6 +1131,13 @@ fn read_image_as_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn set_overlay_passthrough(app: tauri::AppHandle, passthrough: bool) {
+    if let Some(w) = app.get_webview_window("overlay") {
+        let _ = w.set_ignore_cursor_events(passthrough);
+    }
+}
+
+#[tauri::command]
 fn toggle_overlay(app: tauri::AppHandle) {
     eprintln!("[overlay] toggle_overlay command called");
     match app.get_webview_window("overlay") {
@@ -1310,6 +1359,8 @@ pub fn run() {
 
             start_overlay_listener(app.handle().clone());
             start_watcher(app.handle().clone());
+            #[cfg(target_os = "windows")]
+            start_mouse_hook(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1318,6 +1369,7 @@ pub fn run() {
             get_overlay_config,
             get_overlay_origin,
             toggle_overlay,
+            set_overlay_passthrough,
             pick_coordinate,
             kill_game,
             make_borderless_fullscreen,

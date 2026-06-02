@@ -1,5 +1,3 @@
 add trigger conditionals.
-
-
 change change the name format to be name - tag
-fix minimize to tray
+the reload script takes too long. it should be instant
