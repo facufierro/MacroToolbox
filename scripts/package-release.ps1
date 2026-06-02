@@ -1,3 +1,7 @@
+param(
+    [string]$Version
+)
+
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -10,12 +14,32 @@ if (Test-Path $cargoBin) {
 
 $tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
 $tauriConfig = Get-Content $tauriConfigPath -Raw | ConvertFrom-Json
-$version = $tauriConfig.version
+$gitTag = if ($Version) { $Version.Trim() } else { (& git describe --tags --abbrev=0 2>$null).Trim() }
+if (-not $gitTag) {
+    throw "No git tag found. Create a tag first, or run scripts\package-release.ps1 -Version v1.0.1."
+}
+$tagName = if ($gitTag.StartsWith("v")) { $gitTag } else { "v$gitTag" }
+$version = $tagName.TrimStart("v")
 if (-not $version) {
-    throw "Could not read version from src-tauri\tauri.conf.json"
+    throw "Could not determine release version from git tag '$gitTag'."
 }
 
-$tagName = "v$version"
+$tauriConfig.version = $version
+$tauriConfig | ConvertTo-Json -Depth 20 | Set-Content $tauriConfigPath
+
+$cargoTomlPath = Join-Path $repoRoot "src-tauri\Cargo.toml"
+$cargoToml = Get-Content $cargoTomlPath
+$updatedCargoVersion = $false
+$cargoToml = $cargoToml | ForEach-Object {
+    if (-not $updatedCargoVersion -and $_ -match '^version\s*=\s*"') {
+        $updatedCargoVersion = $true
+        "version = `"$version`""
+    } else {
+        $_
+    }
+}
+$cargoToml | Set-Content $cargoTomlPath
+
 $releaseDir = Join-Path $repoRoot "releases\$tagName"
 $bundleDir = Join-Path $repoRoot "src-tauri\target\release\bundle"
 $sourceAhkExe = $env:HKM_AHK_EXE
