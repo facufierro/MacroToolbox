@@ -1,6 +1,6 @@
 [package]
 name = "hotkey-manager"
-version = "1.0.4"
+version = "1.0.5"
 description = "Hotkey Manager"
 authors = ["Facundo Fierro"]
 edition = "2021"
