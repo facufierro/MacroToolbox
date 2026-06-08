@@ -480,23 +480,23 @@ DoPress(keyStr) {
     if (key = "m1" || key = "m2") {
         phys    := (key = "m1") ? "LButton" : "RButton"
         wasHeld := GetKeyState(phys, "P")
-        if (ctrlKey  != "") SendInput("{" ctrlKey  " Down}")
-        if (shiftKey != "") SendInput("{" shiftKey " Down}")
-        if (altKey   != "") SendInput("{" altKey   " Down}")
+        SendModState(ctrlKey,  "Down")
+        SendModState(shiftKey, "Down")
+        SendModState(altKey,   "Down")
         if wasHeld
             SendInput("{" phys " Up}")
         Sleep 30
         SendInput("{" phys " Down}")
         Sleep 30
         SendInput("{" phys " Up}")
-        if (altKey   != "") SendInput("{" altKey   " Up}")
-        if (shiftKey != "") SendInput("{" shiftKey " Up}")
-        if (ctrlKey  != "") SendInput("{" ctrlKey  " Up}")
+        SendModState(altKey,   "Up")
+        SendModState(shiftKey, "Up")
+        SendModState(ctrlKey,  "Up")
         return
     }
-    if (ctrlKey  != "") SendInput("{" ctrlKey  " Down}")
-    if (shiftKey != "") SendInput("{" shiftKey " Down}")
-    if (altKey   != "") SendInput("{" altKey   " Down}")
+    SendModState(ctrlKey,  "Down")
+    SendModState(shiftKey, "Down")
+    SendModState(altKey,   "Down")
     if (mods != "")
         Sleep 20
     SendInput("{" key " Down}")
@@ -504,13 +504,20 @@ DoPress(keyStr) {
     SendInput("{" key " Up}")
     if (mods != "")
         Sleep 20
-    if (altKey   != "") SendInput("{" altKey   " Up}")
-    if (shiftKey != "") SendInput("{" shiftKey " Up}")
-    if (ctrlKey  != "") SendInput("{" ctrlKey  " Up}")
+    SendModState(altKey,   "Up")
+    SendModState(shiftKey, "Up")
+    SendModState(ctrlKey,  "Up")
 }
 
 DoPressKey(keyName) {
     SendInput("{" keyName " Down}")
     Sleep 30
     SendInput("{" keyName " Up}")
+}
+
+; Press or release a modifier only if one is set. The SendInput is kept on its own
+; line: AHK v2 misparses a "{" string literal in a one-line "if" body as a block.
+SendModState(modKey, dir) {
+    if (modKey != "")
+        SendInput("{" modKey " " dir "}")
 }"###;

@@ -11,6 +11,12 @@
             "color": "#4ade80",
             "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1",
             "terminalName": "HKM Build"
+        },
+        {
+            "name": "$(rocket) HKM Release",
+            "color": "#38bdf8",
+            "command": "Start-Process 'https://github.com/facufierro/HotkeyManager/releases/latest'",
+            "terminalName": "HKM Release"
         }
     ]
 }
