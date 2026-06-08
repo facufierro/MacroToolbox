@@ -163,6 +163,7 @@ SendOverlayCommand(path) {{
         xhr := ComObject("WinHttp.WinHttpRequest.5.1")
         xhr.Open("GET", "http://127.0.0.1:17823/" path, false)
         xhr.Send()
+    }} catch Error {{
     }}
 }}
 
@@ -370,8 +371,9 @@ TryGetViewportFromApp(&x, &y, &w, &h) {
         w := Integer(parts[3])
         h := Integer(parts[4])
         return (w > 0 && h > 0)
+    } catch Error {
+        return false
     }
-    return false
 }
 
 DoPress(keyStr) {
@@ -407,35 +409,75 @@ DoPress(keyStr) {
     }
     if RegExMatch(key, "i)^f(\d+)$", &m)
         key := "F" m[1]
+    ; If no key was given, the modifier itself is the key to press
+    if (key = "") {
+        if (mods = "<^")
+            DoPressKey("LCtrl")
+        else if (mods = ">^")
+            DoPressKey("RCtrl")
+        else if (mods = "^")
+            DoPressKey("Ctrl")
+        else if (mods = "<+")
+            DoPressKey("LShift")
+        else if (mods = ">+")
+            DoPressKey("RShift")
+        else if (mods = "+")
+            DoPressKey("Shift")
+        else if (mods = "<!")
+            DoPressKey("LAlt")
+        else if (mods = ">!")
+            DoPressKey("RAlt")
+        else if (mods = "!")
+            DoPressKey("Alt")
+        else if (mods = "<#")
+            DoPressKey("LWin")
+        else if (mods = ">#")
+            DoPressKey("RWin")
+        else if (mods = "#")
+            DoPressKey("LWin")
+        return
+    }
+    ctrlKey := ""
+    if InStr(mods, "<^")
+        ctrlKey := "LCtrl"
+    else if InStr(mods, ">^")
+        ctrlKey := "RCtrl"
+    else if InStr(mods, "^")
+        ctrlKey := "Ctrl"
+    shiftKey := ""
+    if InStr(mods, "<+")
+        shiftKey := "LShift"
+    else if InStr(mods, ">+")
+        shiftKey := "RShift"
+    else if InStr(mods, "+")
+        shiftKey := "Shift"
+    altKey := ""
+    if InStr(mods, "<!")
+        altKey := "LAlt"
+    else if InStr(mods, ">!")
+        altKey := "RAlt"
+    else if InStr(mods, "!")
+        altKey := "Alt"
     if (key = "m1" || key = "m2") {
         phys    := (key = "m1") ? "LButton" : "RButton"
         wasHeld := GetKeyState(phys, "P")
-        if InStr(mods, "^")
-            SendInput("{Ctrl Down}")
-        if InStr(mods, "+")
-            SendInput("{Shift Down}")
-        if InStr(mods, "!")
-            SendInput("{Alt Down}")
+        if (ctrlKey  != "") SendInput("{" ctrlKey  " Down}")
+        if (shiftKey != "") SendInput("{" shiftKey " Down}")
+        if (altKey   != "") SendInput("{" altKey   " Down}")
         if wasHeld
             SendInput("{" phys " Up}")
         Sleep 30
         SendInput("{" phys " Down}")
         Sleep 30
         SendInput("{" phys " Up}")
-        if InStr(mods, "!")
-            SendInput("{Alt Up}")
-        if InStr(mods, "+")
-            SendInput("{Shift Up}")
-        if InStr(mods, "^")
-            SendInput("{Ctrl Up}")
+        if (altKey   != "") SendInput("{" altKey   " Up}")
+        if (shiftKey != "") SendInput("{" shiftKey " Up}")
+        if (ctrlKey  != "") SendInput("{" ctrlKey  " Up}")
         return
     }
-    if InStr(mods, "^")
-        SendInput("{Ctrl Down}")
-    if InStr(mods, "+")
-        SendInput("{Shift Down}")
-    if InStr(mods, "!")
-        SendInput("{Alt Down}")
+    if (ctrlKey  != "") SendInput("{" ctrlKey  " Down}")
+    if (shiftKey != "") SendInput("{" shiftKey " Down}")
+    if (altKey   != "") SendInput("{" altKey   " Down}")
     if (mods != "")
         Sleep 20
     SendInput("{" key " Down}")
@@ -443,10 +485,13 @@ DoPress(keyStr) {
     SendInput("{" key " Up}")
     if (mods != "")
         Sleep 20
-    if InStr(mods, "!")
-        SendInput("{Alt Up}")
-    if InStr(mods, "+")
-        SendInput("{Shift Up}")
-    if InStr(mods, "^")
-        SendInput("{Ctrl Up}")
+    if (altKey   != "") SendInput("{" altKey   " Up}")
+    if (shiftKey != "") SendInput("{" shiftKey " Up}")
+    if (ctrlKey  != "") SendInput("{" ctrlKey  " Up}")
+}
+
+DoPressKey(keyName) {
+    SendInput("{" keyName " Down}")
+    Sleep 30
+    SendInput("{" keyName " Up}")
 }"###;
