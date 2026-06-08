@@ -8,21 +8,41 @@ Releases are cut by `scripts/package-release.ps1` and `.github/workflows/release
 changelog blocks the entire release.
 
 Therefore, whenever you make a user-facing code change in this repo, record it in the changelog
-for the next release **in the same change**:
+for the **next, UNRELEASED** version **in the same change**.
 
-- **File:** `changelog/v<next>.md`, where `<next>` is the latest git tag with its **patch number
-  incremented** (e.g. latest tag `v1.0.3` → `changelog/v1.0.4.md`). This mirrors how
-  `package-release.ps1` derives the version from `git describe --tags --abbrev=0`.
-- **If the file does not exist,** create it with this format:
+### A released version's changelog is FROZEN — never touch it
+
+A version is **released** if it has a git tag `vX.Y.Z` **or** a `releases/vX.Y.Z/` directory.
+Its changelog describes exactly what shipped in that binary. **Never add, edit, or remove
+entries in the changelog of a released version** — if you do, the notes will claim fixes that
+the shipped binary does not contain. If you are about to edit such a file, stop: your change
+belongs in the next version instead.
+
+### Determine the target version every time (do not assume)
+
+1. Find the **highest released version** = the greatest `vX.Y.Z` that has a git tag
+   (`git tag --sort=-v:refname`) or a `releases/vX.Y.Z/` directory.
+2. The target is `changelog/v<highest-released-with-patch+1>.md`
+   (e.g. highest released `v1.0.4` → `changelog/v1.0.5.md`).
+3. Sanity check: the target version must **not** already have a tag or a `releases/` directory.
+   If it does, increment again.
+
+> Note: `src-tauri/tauri.conf.json`'s `version` is **not** a reliable "released" signal —
+> `package-release.ps1` bumps it during a build, before the tag exists. Trust tags and
+> `releases/` directories.
+
+### Writing the entry
+
+- **If `changelog/v<target>.md` does not exist,** create it:
 
   ```
-  # Hotkey Manager v<next>
+  # Hotkey Manager v<target>
 
   ## Changes
 
   - <one bullet per change, user-facing, past tense>
   ```
 
-- **If it already exists,** append a bullet under `## Changes` instead of making a new file.
+- **If it exists (and is unreleased),** append a bullet under `## Changes`.
 - Bullets describe the **effect for the user**, not the code. Skip pure internal churn
-  (formatting, comments, renames) unless it changes behavior.
+  (formatting, comments, renames, editor/tooling config) unless it changes app behavior.

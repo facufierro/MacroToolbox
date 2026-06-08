@@ -311,7 +311,7 @@ const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
                     DoPress(Trim(k))
                 Sleep 30
             } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
-                DoPress(Trim(m[1]))
+                HoldKey(Trim(m[1]))
             } else if RegExMatch(token, "i)^state\((.+)\)$", &m) {
                 SendAppEvent("state_triggered", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
@@ -520,4 +520,77 @@ DoPressKey(keyName) {
 SendModState(modKey, dir) {
     if (modKey != "")
         SendInput("{" modKey " " dir "}")
+}
+
+; Hold the key(s) down for as long as the triggering hotkey is physically held, then
+; release them. This lets a hotkey act as a held modifier/remap (e.g. a forced
+; Copilot key behaving as Ctrl) instead of a one-shot tap like press().
+HoldKey(keyStr) {
+    held := []
+    key := ""
+    for part in StrSplit(Trim(StrLower(keyStr)), " ") {
+        if (part = "ctrl")
+            held.Push("Ctrl")
+        else if (part = "lctrl")
+            held.Push("LCtrl")
+        else if (part = "rctrl")
+            held.Push("RCtrl")
+        else if (part = "shift")
+            held.Push("Shift")
+        else if (part = "lshift")
+            held.Push("LShift")
+        else if (part = "rshift")
+            held.Push("RShift")
+        else if (part = "alt")
+            held.Push("Alt")
+        else if (part = "lalt")
+            held.Push("LAlt")
+        else if (part = "ralt")
+            held.Push("RAlt")
+        else if (part = "win")
+            held.Push("LWin")
+        else if (part = "lwin")
+            held.Push("LWin")
+        else if (part = "rwin")
+            held.Push("RWin")
+        else
+            key := part
+    }
+    if RegExMatch(key, "i)^f(\d+)$", &m)
+        key := "F" m[1]
+    if (key != "")
+        held.Push(key)
+    if (held.Length = 0)
+        return
+    for k in held
+        SendInput("{" k " Down}")
+    WaitForTriggerRelease()
+    i := held.Length
+    while (i >= 1) {
+        SendInput("{" held[i] " Up}")
+        i--
+    }
+}
+
+; Block until the key that fired the current hotkey is physically released. The
+; hotkey suppresses the key, so its logical state is unreliable; the keyboard hook
+; still tracks the physical state. Capped so a missed key-up can never stick forever.
+WaitForTriggerRelease() {
+    triggerKey := TriggerMainKey()
+    if (triggerKey = "")
+        return
+    start := A_TickCount
+    while (GetKeyState(triggerKey, "P") && A_TickCount - start < 60000)
+        Sleep 10
+}
+
+; The bare key name of the current hotkey, with $/*/~ prefixes, side specifiers and
+; +^!# modifier symbols stripped (e.g. "$+#F23" -> "F23").
+TriggerMainKey() {
+    hk := A_ThisHotkey
+    hk := RegExReplace(hk, "i) Up$", "")
+    hk := RegExReplace(hk, "^[$*~]+", "")
+    hk := RegExReplace(hk, "[<>]", "")
+    hk := RegExReplace(hk, "^[+^!#]+", "")
+    return hk
 }"###;
