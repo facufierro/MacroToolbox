@@ -107,8 +107,21 @@ pub fn generate_script(
     for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() { continue; }
-        let behavior = escape_ahk_string(&hk.behavior);
         let trigger = escape_ahk_string(&hk.trigger);
+
+        // A behavior that is exactly one hold(...) becomes a true held remap: the key
+        // stays down while the hotkey is held. That needs a release signal, so emit a
+        // wildcard key-up hotkey (fires on the trigger's main key going up regardless
+        // of modifier order) next to the press hotkey.
+        if let (Some(hold_arg), Some(up_key)) = (parse_pure_hold(&hk.behavior), up_hotkey(&hk.trigger)) {
+            let keys = escape_ahk_string(&hold_arg);
+            hotkey_lines.push_str(&format!(
+                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    HoldKeyDown(\"{keys}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
+            ));
+            continue;
+        }
+
+        let behavior = escape_ahk_string(&hk.behavior);
         hotkey_lines.push_str(&format!(
             "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
         ));
@@ -243,6 +256,63 @@ fn escape_ahk_string(s: &str) -> String {
     out
 }
 
+/// If `behavior` is exactly a single `hold(...)` action, return its inner key string.
+/// A multi-step behavior (containing `;`) is not treated as a remap.
+fn parse_pure_hold(behavior: &str) -> Option<String> {
+    let b = behavior.trim();
+    let lower = b.to_lowercase();
+    if !lower.starts_with("hold(") || !b.ends_with(')') {
+        return None;
+    }
+    let inner = b[5..b.len() - 1].trim();
+    if inner.is_empty() || inner.contains(';') {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+/// The wildcard key-up hotkey that releases a held remap, e.g. trigger "shift win f23"
+/// -> "*F23 up". `*` makes it fire on the key release regardless of modifier state.
+/// Returns None when the trigger resolves to no key.
+fn up_hotkey(trigger: &str) -> Option<String> {
+    let key = trigger_bare_key(trigger);
+    if key.is_empty() { None } else { Some(format!("*{key} up")) }
+}
+
+/// The bare key of a trigger with modifiers stripped, AHK-cased: "shift win f23" ->
+/// "F23"; a modifier-only trigger like "win" -> "LWin".
+fn trigger_bare_key(trigger: &str) -> String {
+    let trigger = trigger.trim().to_lowercase();
+    let mut key = String::new();
+    let mut modifier_key = String::new();
+    for part in trigger.split_whitespace() {
+        match part {
+            "ctrl"   => modifier_key = "Control".to_string(),
+            "lctrl"  => modifier_key = "LControl".to_string(),
+            "rctrl"  => modifier_key = "RControl".to_string(),
+            "shift"  => modifier_key = "Shift".to_string(),
+            "lshift" => modifier_key = "LShift".to_string(),
+            "rshift" => modifier_key = "RShift".to_string(),
+            "alt"    => modifier_key = "Alt".to_string(),
+            "lalt"   => modifier_key = "LAlt".to_string(),
+            "ralt"   => modifier_key = "RAlt".to_string(),
+            "win"    => modifier_key = "LWin".to_string(),
+            "lwin"   => modifier_key = "LWin".to_string(),
+            "rwin"   => modifier_key = "RWin".to_string(),
+            k        => key = k.to_string(),
+        }
+    }
+    if key.is_empty() {
+        return modifier_key;
+    }
+    if let Some(rest) = key.strip_prefix('f') {
+        if rest.parse::<u32>().is_ok() {
+            key = format!("F{rest}");
+        }
+    }
+    key
+}
+
 fn trigger_to_key(trigger: &str) -> String {
     let trigger = trigger.trim().to_lowercase();
     let mut mods = String::new();
@@ -311,7 +381,7 @@ const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
                     DoPress(Trim(k))
                 Sleep 30
             } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
-                HoldKey(Trim(m[1]))
+                DoPress(Trim(m[1]))
             } else if RegExMatch(token, "i)^state\((.+)\)$", &m) {
                 SendAppEvent("state_triggered", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
@@ -522,10 +592,29 @@ SendModState(modKey, dir) {
         SendInput("{" modKey " " dir "}")
 }
 
-; Hold the key(s) down for as long as the triggering hotkey is physically held, then
-; release them. This lets a hotkey act as a held modifier/remap (e.g. a forced
-; Copilot key behaving as Ctrl) instead of a one-shot tap like press().
-HoldKey(keyStr) {
+; A held remap. The press hotkey calls HoldKeyDown and a paired wildcard key-up
+; hotkey calls HoldKeyUp, so the key stays down for exactly as long as the trigger is
+; held (e.g. a forced Copilot key behaving as Ctrl). This mirrors how AutoHotkey
+; implements native key remapping:
+;   - {Blind} leaves the trigger's own modifiers untouched while sending.
+;   - DownR re-presses the key on the hardware's auto-repeat so it stays down.
+; A key-up hotkey is the only reliable release signal: the press hotkey suppresses
+; the trigger, so its logical/physical state can't be polled for release.
+HoldKeyDown(keyStr) {
+    for k in HoldKeyList(keyStr)
+        SendInput("{Blind}{" k " DownR}")
+}
+
+HoldKeyUp(keyStr) {
+    keys := HoldKeyList(keyStr)
+    i := keys.Length
+    while (i >= 1) {
+        SendInput("{Blind}{" keys[i] " Up}")
+        i--
+    }
+}
+
+HoldKeyList(keyStr) {
     held := []
     key := ""
     for part in StrSplit(Trim(StrLower(keyStr)), " ") {
@@ -560,37 +649,5 @@ HoldKey(keyStr) {
         key := "F" m[1]
     if (key != "")
         held.Push(key)
-    if (held.Length = 0)
-        return
-    for k in held
-        SendInput("{" k " Down}")
-    WaitForTriggerRelease()
-    i := held.Length
-    while (i >= 1) {
-        SendInput("{" held[i] " Up}")
-        i--
-    }
-}
-
-; Block until the key that fired the current hotkey is physically released. The
-; hotkey suppresses the key, so its logical state is unreliable; the keyboard hook
-; still tracks the physical state. Capped so a missed key-up can never stick forever.
-WaitForTriggerRelease() {
-    triggerKey := TriggerMainKey()
-    if (triggerKey = "")
-        return
-    start := A_TickCount
-    while (GetKeyState(triggerKey, "P") && A_TickCount - start < 60000)
-        Sleep 10
-}
-
-; The bare key name of the current hotkey, with $/*/~ prefixes, side specifiers and
-; +^!# modifier symbols stripped (e.g. "$+#F23" -> "F23").
-TriggerMainKey() {
-    hk := A_ThisHotkey
-    hk := RegExReplace(hk, "i) Up$", "")
-    hk := RegExReplace(hk, "^[$*~]+", "")
-    hk := RegExReplace(hk, "[<>]", "")
-    hk := RegExReplace(hk, "^[+^!#]+", "")
-    return hk
+    return held
 }"###;
