@@ -107,8 +107,8 @@ pub fn generate_script(
     for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() { continue; }
-        let behavior = hk.behavior.replace('"', "\"\"");
-        let trigger = hk.trigger.replace('"', "\"\"");
+        let behavior = escape_ahk_string(&hk.behavior);
+        let trigger = escape_ahk_string(&hk.trigger);
         hotkey_lines.push_str(&format!(
             "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
         ));
@@ -128,7 +128,7 @@ pub fn generate_script(
     let game_group = if global_game {
         String::new()
     } else {
-        format!("GroupAdd \"GAME\", \"ahk_exe {exe}\"\n")
+        format!("GroupAdd \"GAME\", \"ahk_exe {}\"\n", escape_ahk_string(exe))
     };
     let overlay_visibility_condition = if global_game {
         if overlay_enabled { "enabled".to_string() } else { "false".to_string() }
@@ -222,6 +222,25 @@ SyncOverlay()
     );
 
     header + BEHAVIOR_ENGINE
+}
+
+/// Escape a string for safe embedding inside an AHK v2 double-quoted string literal.
+/// The backtick is AHK's escape character, so it must be handled first; an unescaped
+/// backtick (or quote / newline) in user text would otherwise terminate the string
+/// early and shift every following brace, producing an unparseable script.
+fn escape_ahk_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '`'  => out.push_str("``"),
+            '"'  => out.push_str("`\""),
+            '\n' => out.push_str("`n"),
+            '\r' => out.push_str("`r"),
+            '\t' => out.push_str("`t"),
+            _    => out.push(ch),
+        }
+    }
+    out
 }
 
 fn trigger_to_key(trigger: &str) -> String {
