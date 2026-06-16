@@ -1,7 +1,7 @@
 {
     "quickCommandButtons.buttons": [
         {
-            "name": "$(play) Dev",
+            "name": "$(play) Run Dev",
             "color": "#7c6af7",
             "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Projects\\Games\\HotkeyManager\\dev.ps1'",
             "terminalName": "Dev"
