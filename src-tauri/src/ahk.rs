@@ -114,9 +114,20 @@ pub fn generate_script(
         // wildcard key-up hotkey (fires on the trigger's main key going up regardless
         // of modifier order) next to the press hotkey.
         if let (Some(hold_arg), Some(up_key)) = (parse_pure_hold(&hk.behavior), up_hotkey(&hk.trigger)) {
+            // Global-scope single-key hold-remaps are handled by the backend low-level
+            // keyboard hook instead (leak-free, and it can intercept keys Windows reserves
+            // for itself such as the Copilot key), so don't also emit an AHK hotkey here —
+            // that would double-fire the target key.
+            if global_game && hold_arg.split_whitespace().count() == 1 {
+                continue;
+            }
             let keys = escape_ahk_string(&hold_arg);
+            // Release the trigger's own modifiers (e.g. the LWin+LShift that the Copilot
+            // key sends alongside F23) so a remap emits only the held target key instead
+            // of the trigger's modifiers leaking through underneath it.
+            let release_mods = trigger_modifier_keys(&hk.trigger).join(" ");
             hotkey_lines.push_str(&format!(
-                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    HoldKeyDown(\"{keys}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
+                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    HoldKeyDown(\"{keys}\", \"{release_mods}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
             ));
             continue;
         }
@@ -313,6 +324,64 @@ fn parse_pure_hold(behavior: &str) -> Option<String> {
 fn up_hotkey(trigger: &str) -> Option<String> {
     let key = trigger_bare_key(trigger);
     if key.is_empty() { None } else { Some(format!("*{key} up")) }
+}
+
+/// A backend (low-level keyboard hook) key remap derived from a pure single-key
+/// hold-remap hotkey: the trigger's bare key, its modifiers, and the single target key
+/// to hold. All tokens are lowercased for mapping to virtual-key codes.
+pub struct KeyRemap {
+    pub source_key: String,
+    pub modifiers: Vec<String>,
+    pub target: String,
+}
+
+/// Describe `trigger -> hold(target)` as a [`KeyRemap`] when it is a pure hold of a single
+/// key (the case the backend hook handles). Returns None for multi-key holds, non-hold
+/// behaviors, or triggers that resolve to no key.
+pub fn pure_hold_remap(trigger: &str, behavior: &str) -> Option<KeyRemap> {
+    let target = parse_pure_hold(behavior)?;
+    if target.split_whitespace().count() != 1 {
+        return None;
+    }
+    let source_key = trigger_bare_key(trigger);
+    if source_key.is_empty() {
+        return None;
+    }
+    Some(KeyRemap {
+        source_key: source_key.to_lowercase(),
+        modifiers: trigger_modifier_keys(trigger)
+            .into_iter()
+            .map(|m| m.to_lowercase())
+            .collect(),
+        target: target.trim().to_lowercase(),
+    })
+}
+
+/// The AHK key names of a trigger's modifiers, sided where specified: "lwin lshift f23"
+/// -> ["LWin", "LShift"]. Used to release the trigger's own modifiers when remapping so
+/// they don't leak through alongside the remapped output.
+fn trigger_modifier_keys(trigger: &str) -> Vec<String> {
+    trigger
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .filter_map(|part| match part {
+            "ctrl"   => Some("Ctrl"),
+            "lctrl"  => Some("LCtrl"),
+            "rctrl"  => Some("RCtrl"),
+            "shift"  => Some("Shift"),
+            "lshift" => Some("LShift"),
+            "rshift" => Some("RShift"),
+            "alt"    => Some("Alt"),
+            "lalt"   => Some("LAlt"),
+            "ralt"   => Some("RAlt"),
+            "win"    => Some("LWin"),
+            "lwin"   => Some("LWin"),
+            "rwin"   => Some("RWin"),
+            _        => None,
+        })
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// The bare key of a trigger with modifiers stripped, AHK-cased: "shift win f23" ->
@@ -636,7 +705,13 @@ SendModState(modKey, dir) {
 ;   - DownR re-presses the key on the hardware's auto-repeat so it stays down.
 ; A key-up hotkey is the only reliable release signal: the press hotkey suppresses
 ; the trigger, so its logical/physical state can't be polled for release.
-HoldKeyDown(keyStr) {
+HoldKeyDown(keyStr, releaseMods := "") {
+    ; Release the trigger's own modifiers first so remapping a modifier+key combo
+    ; (e.g. the Copilot key's LWin+LShift+F23 -> RCtrl) emits only the held target
+    ; key, with the trigger's modifiers neutralized instead of leaking through.
+    for m in StrSplit(releaseMods, " ")
+        if (m != "")
+            SendInput("{Blind}{" m " Up}")
     for k in HoldKeyList(keyStr)
         SendInput("{Blind}{" k " DownR}")
 }

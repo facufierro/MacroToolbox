@@ -92,6 +92,395 @@ fn start_mouse_hook(handle: tauri::AppHandle) {
     });
 }
 
+// ── Key recorder ──────────────────────────────────────────────────────────────
+// A low-level keyboard hook that, only while a UI "recording" is active, captures the
+// raw key combo and swallows it. This is the only way to record keys Windows grabs for
+// itself before any app sees them — most notably the Copilot key (LWin+LShift+F23),
+// which otherwise just opens Copilot. Outside of recording the hook passes everything
+// through untouched.
+
+#[cfg(target_os = "windows")]
+struct KeyRecorderState {
+    app: tauri::AppHandle,
+    recording: std::sync::atomic::AtomicBool,
+    started_at: Mutex<std::time::Instant>,
+    modifiers: Mutex<Vec<&'static str>>,
+}
+
+#[cfg(target_os = "windows")]
+static KEY_RECORDER: OnceLock<KeyRecorderState> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn vk_to_modifier(vk: u32) -> Option<&'static str> {
+    Some(match vk {
+        0xA0 => "lshift",
+        0xA1 => "rshift",
+        0xA2 => "lctrl",
+        0xA3 => "rctrl",
+        0xA4 => "lalt",
+        0xA5 => "ralt",
+        0x5B => "lwin",
+        0x5C => "rwin",
+        0x10 => "shift", // generic fallbacks; the LL hook normally reports the sided VK
+        0x11 => "ctrl",
+        0x12 => "alt",
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn vk_to_key(vk: u32) -> String {
+    if (0x41..=0x5A).contains(&vk) {
+        return ((vk as u8) as char).to_ascii_lowercase().to_string(); // A-Z
+    }
+    if (0x30..=0x39).contains(&vk) {
+        return ((vk as u8) as char).to_string(); // 0-9
+    }
+    if (0x70..=0x87).contains(&vk) {
+        return format!("f{}", vk - 0x70 + 1); // F1-F24
+    }
+    let named = match vk {
+        0x20 => "space",
+        0x0D => "enter",
+        0x1B => "esc",
+        0x09 => "tab",
+        0x08 => "backspace",
+        0x2E => "del",
+        0x2D => "ins",
+        0x24 => "home",
+        0x23 => "end",
+        0x21 => "pgup",
+        0x22 => "pgdn",
+        0x25 => "left",
+        0x26 => "up",
+        0x27 => "right",
+        0x28 => "down",
+        0x2C => "printscreen",
+        0x14 => "capslock",
+        0x90 => "numlock",
+        _ => return format!("vk{vk:02x}"),
+    };
+    named.to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn ordered_trigger(active: &[&'static str], key: &str) -> String {
+    const ORDER: [&str; 11] = [
+        "lctrl", "rctrl", "ctrl", "lshift", "rshift", "shift",
+        "lalt", "ralt", "alt", "lwin", "rwin",
+    ];
+    let mut parts: Vec<String> = Vec::new();
+    for token in ORDER {
+        if active.contains(&token) {
+            parts.push(token.to_string());
+        }
+    }
+    parts.push(key.to_string());
+    parts.join(" ")
+}
+
+#[cfg(target_os = "windows")]
+fn handle_recording_key(state: &KeyRecorderState, vk: u32, is_down: bool, is_up: bool) {
+    use std::sync::atomic::Ordering;
+    if let Some(modifier) = vk_to_modifier(vk) {
+        let mut mods = state.modifiers.lock().unwrap();
+        if is_down {
+            if !mods.contains(&modifier) {
+                mods.push(modifier);
+            }
+        } else if is_up {
+            mods.retain(|m| *m != modifier);
+        }
+        return;
+    }
+    // A non-modifier key-down finalizes the combo.
+    if is_down {
+        let key = vk_to_key(vk);
+        let trigger = {
+            let mods = state.modifiers.lock().unwrap();
+            ordered_trigger(&mods, &key)
+        };
+        state.recording.store(false, Ordering::SeqCst);
+        let _ = state.app.emit("key-recorded", trigger);
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+    use std::sync::atomic::Ordering;
+    use winapi::um::winuser::{
+        CallNextHookEx, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+        WM_SYSKEYUP,
+    };
+    if code >= 0 {
+        if let Some(state) = KEY_RECORDER.get() {
+            if state.recording.load(Ordering::SeqCst) {
+                let timed_out = state.started_at.lock().unwrap().elapsed()
+                    > std::time::Duration::from_secs(10);
+                if timed_out {
+                    // Safety valve: never leave the keyboard globally suppressed.
+                    state.recording.store(false, Ordering::SeqCst);
+                    let _ = state.app.emit("key-recording-cancelled", ());
+                } else {
+                    let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+                    let msg = wparam as u32;
+                    let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                    let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+                    handle_recording_key(state, kb.vkCode, is_down, is_up);
+                    return 1; // swallow the key so it can't open Copilot or do anything else
+                }
+            }
+        }
+
+        // Not recording: apply global key remaps. Skip our own injected output to avoid
+        // remapping it again (infinite loop) — only real, physical key events are remapped.
+        if REMAPS_PRESENT.load(Ordering::Acquire) {
+            let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if kb.flags & LLKHF_INJECTED == 0 {
+                let msg = wparam as u32;
+                let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+                if (is_down || is_up) && apply_remap(kb.vkCode, is_down) {
+                    return 1;
+                }
+            }
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+#[cfg(target_os = "windows")]
+fn start_key_recorder(handle: tauri::AppHandle) {
+    use winapi::um::winuser::{SetWindowsHookExW, WH_KEYBOARD_LL};
+    let _ = KEY_RECORDER.set(KeyRecorderState {
+        app: handle,
+        recording: std::sync::atomic::AtomicBool::new(false),
+        started_at: Mutex::new(std::time::Instant::now()),
+        modifiers: Mutex::new(Vec::new()),
+    });
+    std::thread::spawn(|| unsafe {
+        use winapi::um::winuser::{DispatchMessageW, GetMessageW, TranslateMessage, MSG};
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), std::ptr::null_mut(), 0);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+#[tauri::command]
+fn start_key_recording() {
+    #[cfg(target_os = "windows")]
+    if let Some(state) = KEY_RECORDER.get() {
+        use std::sync::atomic::Ordering;
+        state.modifiers.lock().unwrap().clear();
+        *state.started_at.lock().unwrap() = std::time::Instant::now();
+        state.recording.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tauri::command]
+fn stop_key_recording() {
+    #[cfg(target_os = "windows")]
+    if let Some(state) = KEY_RECORDER.get() {
+        use std::sync::atomic::Ordering;
+        state.recording.store(false, Ordering::SeqCst);
+        state.modifiers.lock().unwrap().clear();
+    }
+}
+
+// ── Key remaps ──────────────────────────────────────────────────────────────────
+// The same low-level keyboard hook also performs leak-free key remaps for the active
+// GLOBAL-scope profile's single-key hold-remaps: it swallows the source combo (e.g. the
+// Copilot key's LWin+LShift+F23) and injects the target key (e.g. RCtrl) directly, so the
+// key truly *becomes* the target everywhere — no AutoHotkey, no Copilot launch, no leaked
+// modifiers. Only the global scope is handled here (the hook is window-agnostic); per-game
+// remaps stay in AutoHotkey. These remaps are always on — they are not gated by the
+// hotkeys enable/disable toggle.
+
+#[cfg(target_os = "windows")]
+struct RemapEntry {
+    source_vk: u32,
+    modifier_vks: Vec<u32>,
+    target_vk: u32,
+    active: bool,
+}
+
+#[cfg(target_os = "windows")]
+static KEY_REMAPS: OnceLock<Mutex<Vec<RemapEntry>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+static REMAPS_PRESENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn token_to_vk(token: &str) -> Option<u32> {
+    let t = token.to_lowercase();
+    let modifier = match t.as_str() {
+        "lshift" => 0xA0, "rshift" => 0xA1, "shift" => 0x10,
+        "lctrl" => 0xA2, "rctrl" => 0xA3, "ctrl" => 0x11,
+        "lalt" => 0xA4, "ralt" => 0xA5, "alt" => 0x12,
+        "lwin" => 0x5B, "rwin" => 0x5C, "win" => 0x5B,
+        _ => 0u32,
+    };
+    if modifier != 0 {
+        return Some(modifier);
+    }
+    if t.len() == 1 {
+        let c = t.as_bytes()[0];
+        if c.is_ascii_lowercase() {
+            return Some(c.to_ascii_uppercase() as u32); // VK for A-Z is the uppercase ASCII
+        }
+        if c.is_ascii_digit() {
+            return Some(c as u32); // VK for 0-9 is the ASCII digit
+        }
+    }
+    if let Some(rest) = t.strip_prefix('f') {
+        if let Ok(n) = rest.parse::<u32>() {
+            if (1..=24).contains(&n) {
+                return Some(0x70 + n - 1); // F1..F24
+            }
+        }
+    }
+    let named = match t.as_str() {
+        "space" => 0x20, "enter" => 0x0D, "esc" => 0x1B, "tab" => 0x09,
+        "backspace" => 0x08, "del" => 0x2E, "ins" => 0x2D, "home" => 0x24,
+        "end" => 0x23, "pgup" => 0x21, "pgdn" => 0x22, "left" => 0x25,
+        "up" => 0x26, "right" => 0x27, "down" => 0x28, "printscreen" => 0x2C,
+        "capslock" => 0x14, "numlock" => 0x90,
+        _ => 0u32,
+    };
+    if named != 0 {
+        return Some(named);
+    }
+    if let Some(hex) = t.strip_prefix("vk") {
+        if let Ok(v) = u32::from_str_radix(hex, 16) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn is_extended_vk(vk: u32) -> bool {
+    matches!(vk,
+        0xA3 | 0xA5 | 0x5B | 0x5C | // RCtrl, RAlt, LWin, RWin
+        0x21..=0x28 |               // PgUp, PgDn, End, Home, Left, Up, Right, Down
+        0x2D | 0x2E |               // Ins, Del
+        0x90 | 0x2C                 // NumLock, PrintScreen
+    )
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn key_is_down(vk: u32) -> bool {
+    use winapi::um::winuser::GetAsyncKeyState;
+    (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn send_key(vk: u32, down: bool) {
+    use winapi::um::winuser::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    };
+    let mut flags = 0u32;
+    if !down {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    if is_extended_vk(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    let mut input: INPUT = std::mem::zeroed();
+    input.type_ = INPUT_KEYBOARD;
+    {
+        let ki = input.u.ki_mut();
+        ki.wVk = vk as u16;
+        ki.dwFlags = flags;
+    }
+    SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32);
+}
+
+/// Apply any matching remap to a (non-injected) physical key event. Returns true if the
+/// event was handled and should be swallowed.
+#[cfg(target_os = "windows")]
+unsafe fn apply_remap(vk: u32, is_down: bool) -> bool {
+    let Some(lock) = KEY_REMAPS.get() else {
+        return false;
+    };
+    let Ok(mut remaps) = lock.lock() else {
+        return false;
+    };
+    for r in remaps.iter_mut() {
+        if r.source_vk != vk {
+            continue;
+        }
+        if is_down {
+            if r.active {
+                return true; // auto-repeat of a held source key: keep swallowing it
+            }
+            if !r.modifier_vks.iter().all(|m| key_is_down(*m)) {
+                return false; // configured modifiers aren't held: not this combo, let it pass
+            }
+            // Release the trigger's leaked modifiers, then press the target.
+            for m in &r.modifier_vks {
+                send_key(*m, false);
+            }
+            send_key(r.target_vk, true);
+            r.active = true;
+            return true;
+        } else if r.active {
+            send_key(r.target_vk, false);
+            r.active = false;
+            return true;
+        } else {
+            return false; // wasn't remapped on the way down: let the key-up pass through
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn set_key_remaps(remaps: Vec<ahk::KeyRemap>) {
+    use std::sync::atomic::Ordering;
+    let lock = KEY_REMAPS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut table = lock.lock().unwrap();
+    table.clear();
+    for r in remaps {
+        let (Some(source_vk), Some(target_vk)) =
+            (token_to_vk(&r.source_key), token_to_vk(&r.target))
+        else {
+            continue;
+        };
+        let modifier_vks = r.modifiers.iter().filter_map(|m| token_to_vk(m)).collect();
+        table.push(RemapEntry { source_vk, modifier_vks, target_vk, active: false });
+    }
+    REMAPS_PRESENT.store(!table.is_empty(), Ordering::Release);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_key_remaps(_remaps: Vec<ahk::KeyRemap>) {}
+
+/// Load the active GLOBAL-scope profile's single-key hold-remaps into the backend hook
+/// (or clear them when nothing global is active). Called whenever the active profile changes.
+fn sync_active_remaps(db_path: &std::path::Path) {
+    let remaps: Vec<ahk::KeyRemap> = (|| {
+        let db = config::load_db(db_path).ok()?;
+        let game = db.games.iter().find(|g| g.active_profile.is_some())?;
+        if !is_global_game_exe(&game.exe) {
+            return Some(Vec::new());
+        }
+        let profile_id = game.active_profile.as_ref()?;
+        let profile = game.profiles.iter().find(|p| &p.id == profile_id)?;
+        Some(
+            config::resolve_profile_hotkeys(&game.profiles, profile)
+                .into_iter()
+                .filter_map(|hk| ahk::pure_hold_remap(&hk.trigger, &hk.behavior))
+                .collect(),
+        )
+    })()
+    .unwrap_or_default();
+    set_key_remaps(remaps);
+}
+
 #[cfg(target_os = "windows")]
 fn debug_log_once(key: &'static str, message: String) {
     let state = DEBUG_LOG_STATE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -652,6 +1041,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
     std::fs::write(&script_path, &script).map_err(|e| e.to_string())?;
     state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path)?;
     config::save_db(&state.db_path, &db)?;
+    sync_active_remaps(&state.db_path);
 
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
     if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
@@ -672,6 +1062,7 @@ fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String
         }
     }
     config::save_db(&state.db_path, &db)?;
+    sync_active_remaps(&state.db_path);
     emit_overlay_event(&app, "profile_deactivated", None, None);
     clear_overlay(&app);
     set_overlay_visible(&app, false);
@@ -1319,6 +1710,8 @@ fn start_watcher(handle: tauri::AppHandle) {
                     }
                 }
             }
+            drop(mgr);
+            sync_active_remaps(&state.db_path);
         }
     });
 }
@@ -1448,6 +1841,9 @@ pub fn run() {
             start_watcher(app.handle().clone());
             #[cfg(target_os = "windows")]
             start_mouse_hook(app.handle().clone());
+            #[cfg(target_os = "windows")]
+            start_key_recorder(app.handle().clone());
+            sync_active_remaps(&app.state::<AppState>().db_path);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1473,6 +1869,8 @@ pub fn run() {
             save_settings,
             get_app_version,
             download_and_install_update,
+            start_key_recording,
+            stop_key_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
