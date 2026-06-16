@@ -1,22 +1,22 @@
 {
     "quickCommandButtons.buttons": [
         {
-            "name": "$(play) HKM Dev",
+            "name": "$(play) Dev",
             "color": "#7c6af7",
             "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Projects\\Games\\HotkeyManager\\dev.ps1'",
-            "terminalName": "HKM Dev"
+            "terminalName": "Dev"
         },
         {
-            "name": "$(package) HKM Build",
+            "name": "$(package) Build",
             "color": "#4ade80",
             "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1",
-            "terminalName": "HKM Build"
+            "terminalName": "Build"
         },
         {
-            "name": "$(rocket) HKM Release",
+            "name": "$(rocket) Open Releases",
             "color": "#38bdf8",
             "command": "Start-Process 'https://github.com/facufierro/HotkeyManager/releases/latest'",
-            "terminalName": "HKM Release"
+            "terminalName": "Releases"
         }
     ]
 }
