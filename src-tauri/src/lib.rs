@@ -35,6 +35,9 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     pub ahk_manager: Mutex<ahk::AhkManager>,
+    /// Persistent AutoHotkey process that remaps the Copilot key to Right Ctrl, always on
+    /// while the app runs (independent of profiles).
+    pub copilot_ahk: Mutex<ahk::AhkManager>,
     pub overlay_config: Mutex<config::OverlayConfig>,
     #[cfg(target_os = "windows")]
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
@@ -362,7 +365,9 @@ fn hide_main_window(app: &tauri::AppHandle) {
 }
 
 fn quit_app(app: &tauri::AppHandle) {
-    app.state::<AppState>().ahk_manager.lock().unwrap().kill();
+    let state = app.state::<AppState>();
+    state.ahk_manager.lock().unwrap().kill();
+    state.copilot_ahk.lock().unwrap().kill();
     app.exit(0);
 }
 
@@ -1355,6 +1360,7 @@ pub fn run() {
 
                     if !close_to_tray {
                         state.ahk_manager.lock().unwrap().kill();
+                        state.copilot_ahk.lock().unwrap().kill();
                     }
                 }
                 _ => {}
@@ -1380,11 +1386,25 @@ pub fn run() {
             app.manage(AppState {
                 db_path: db_path.clone(),
                 scripts_path: scripts_dir,
-                ahk_manager: Mutex::new(ahk::AhkManager::new(resource_dir)),
+                ahk_manager: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
+                copilot_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
             });
+
+            // Launch the always-on Copilot-key -> Right Ctrl remap as its own AHK process.
+            {
+                let state = app.state::<AppState>();
+                let copilot_path = state.scripts_path.join("copilot-fix.ahk");
+                if std::fs::write(&copilot_path, ahk::COPILOT_FIX_SCRIPT).is_ok() {
+                    let _ = state
+                        .copilot_ahk
+                        .lock()
+                        .unwrap()
+                        .launch(&startup_settings.ahk_exe, &copilot_path);
+                }
+            }
 
             build_tray(app)?;
             // Re-apply the login registration on every launch so the registered path

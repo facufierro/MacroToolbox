@@ -5,6 +5,99 @@ use crate::config::{self, Profile};
 
 const GLOBAL_GAME_EXE: &str = "*";
 
+/// Always-on remap of the Microsoft Copilot key to Right Ctrl, run as its own persistent
+/// AutoHotkey process. The Copilot key fires LWin+LShift+F23 (scancode SC06E) ~1ms apart;
+/// this 3-state machine holds LWin/LShift for 30ms and, only if the Copilot scancode
+/// follows, turns the whole thing into Right Ctrl. Real Win/Shift presses pass through
+/// untouched (after a ~30ms delay). Based on the open-source `copilot-key-fix` script.
+pub const COPILOT_FIX_SCRIPT: &str = r#"#Requires AutoHotkey v2.0
+#SingleInstance Force
+
+global state := "idle"
+global shiftSuppressed := false
+
+; LWin: intercept and hold briefly to see whether the Copilot key's F23 follows.
+$*LWin::{
+    global state
+    state := "waiting"
+    SetTimer(PassKeys, -30)
+}
+
+$*LWin up::{
+    global state, shiftSuppressed
+    if state = "waiting" {
+        SetTimer(PassKeys, 0)
+        state := "idle"
+        if shiftSuppressed {
+            shiftSuppressed := false
+            SendInput "{LWin down}{LShift down}{LWin up}"
+        } else {
+            SendInput "{LWin down}{LWin up}"
+        }
+    } else if state = "lwin_passed" {
+        state := "idle"
+        SendInput "{LWin up}"
+    }
+}
+
+; LShift: only swallow it while we're waiting to see the Copilot key.
+$*LShift::{
+    global state, shiftSuppressed
+    if state = "waiting" {
+        shiftSuppressed := true
+    } else {
+        shiftSuppressed := false
+        SendInput "{LShift down}"
+    }
+}
+
+$*LShift up::{
+    global shiftSuppressed
+    if shiftSuppressed {
+        shiftSuppressed := false
+    } else {
+        SendInput "{LShift up}"
+    }
+}
+
+; 30ms passed without F23 -> these were real Win/Shift presses; pass them through.
+PassKeys() {
+    global state, shiftSuppressed
+    if state = "waiting" {
+        state := "lwin_passed"
+        if shiftSuppressed {
+            shiftSuppressed := false
+            SendInput "{LWin down}{LShift down}"
+        } else {
+            SendInput "{LWin down}"
+        }
+    }
+}
+
+; F23 (scancode SC06E) = the Copilot key -> hold Right Ctrl.
+$*SC06E::{
+    global state, shiftSuppressed
+    SetTimer(PassKeys, 0)
+    state := "copilot"
+    shiftSuppressed := false
+    SendInput "{RCtrl down}"
+}
+
+$*SC06E up::{
+    global state
+    if state = "copilot" {
+        state := "idle"
+        SendInput "{RCtrl up}"
+    }
+}
+
+; Safety: release everything if this script exits cleanly.
+OnExit(ReleaseHeld)
+ReleaseHeld(*) {
+    SendInput "{RCtrl up}{LWin up}{LShift up}"
+}
+"#;
+
 pub struct AhkManager {
     process: Option<Child>,
     bundled_ahk_exe: Option<PathBuf>,
