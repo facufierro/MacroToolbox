@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
-import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
 import type {
@@ -221,34 +220,17 @@ function toAhkMouseButton(e: MouseEvent, activeSideModifiers: Set<string>): stri
   return [...bindingModifiers(e, activeSideModifiers), button].join(" ");
 }
 
-// `onResult` is called with the captured binding, or `null` if recording was cancelled
-// (e.g. the backend recorder timed out). It fires at most once per recording session.
-function useBindingRecorder(recording: boolean, onResult: (value: string | null) => void) {
-  const onResultRef = useRef(onResult);
+function useBindingRecorder(recording: boolean, onCapture: (value: string) => void) {
+  const onCaptureRef = useRef(onCapture);
   const activeSideModifiersRef = useRef<Set<string>>(new Set());
-  onResultRef.current = onResult;
+  onCaptureRef.current = onCapture;
 
   useEffect(() => {
     if (!recording) return;
 
-    let done = false;
-    const finish = (value: string | null) => {
-      if (done) return;
-      if (value === null || value) {
-        done = true;
-        onResultRef.current(value);
-      }
+    const capture = (value: string) => {
+      if (value) onCaptureRef.current(value);
     };
-
-    // Backend low-level keyboard hook: records keys Windows grabs for itself before any
-    // app sees them (e.g. the Copilot key) and suppresses them while recording. No-op on
-    // non-Windows, where the keyboard fallback below handles capture instead.
-    api.startKeyRecording().catch(() => {});
-    const recordedP = listen<string>("key-recorded", e => finish(e.payload));
-    const cancelledP = listen("key-recording-cancelled", () => finish(null));
-
-    // Frontend fallbacks: mouse buttons (the backend hook is keyboard-only), plus
-    // keyboard on platforms where the OS lets the keys reach the webview.
     const keyHandler = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -257,7 +239,7 @@ function useBindingRecorder(recording: boolean, onResult: (value: string | null)
         activeSideModifiersRef.current.add(sideMod);
         return;
       }
-      finish(toAhkKey(e, activeSideModifiersRef.current));
+      capture(toAhkKey(e, activeSideModifiersRef.current));
     };
     const keyUpHandler = (e: KeyboardEvent) => {
       const sideMod = sideModifier(e.code);
@@ -266,7 +248,7 @@ function useBindingRecorder(recording: boolean, onResult: (value: string | null)
     const mouseHandler = (e: MouseEvent) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      finish(toAhkMouseButton(e, activeSideModifiersRef.current));
+      capture(toAhkMouseButton(e, activeSideModifiersRef.current));
     };
     const contextMenuHandler = (e: MouseEvent) => {
       e.preventDefault();
@@ -278,9 +260,6 @@ function useBindingRecorder(recording: boolean, onResult: (value: string | null)
     window.addEventListener("mousedown", mouseHandler, true);
     window.addEventListener("contextmenu", contextMenuHandler, true);
     return () => {
-      api.stopKeyRecording().catch(() => {});
-      recordedP.then(un => un());
-      cancelledP.then(un => un());
       activeSideModifiersRef.current.clear();
       window.removeEventListener("keydown", keyHandler, true);
       window.removeEventListener("keyup", keyUpHandler, true);
@@ -292,8 +271,8 @@ function useBindingRecorder(recording: boolean, onResult: (value: string | null)
 
 function KeyInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [recording, setRecording] = useState(false);
-  useBindingRecorder(recording, result => {
-    if (result) onChange(result);
+  useBindingRecorder(recording, key => {
+    onChange(key);
     setRecording(false);
   });
 
@@ -609,8 +588,8 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
     return parsed;
   });
 
-  useBindingRecorder(recordingTrigger, result => {
-    if (result) setTrigger(result);
+  useBindingRecorder(recordingTrigger, key => {
+    setTrigger(key);
     setRecordingTrigger(false);
   });
 

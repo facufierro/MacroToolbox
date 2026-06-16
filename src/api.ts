@@ -60,10 +60,4 @@ export const api = {
 
   downloadAndInstallUpdate: (url: string) =>
     invoke<void>("download_and_install_update", { url }),
-
-  startKeyRecording: () =>
-    invoke<void>("start_key_recording"),
-
-  stopKeyRecording: () =>
-    invoke<void>("stop_key_recording"),
 };
