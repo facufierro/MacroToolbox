@@ -1169,11 +1169,22 @@ fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Register or unregister the app in the OS login list (on Windows, the HKCU `Run`
+/// registry key). Done through the autostart plugin so it always points at the
+/// current executable path — far more reliable than a Startup-folder shortcut, which
+/// goes stale when the app updates or moves.
+fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let _ = if enabled { manager.enable() } else { manager.disable() };
+}
+
 #[tauri::command]
-fn save_settings(state: State<AppState>, settings: Settings) -> Result<Database, String> {
+fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settings) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     db.settings = settings;
     config::save_db(&state.db_path, &db)?;
+    sync_autostart(&app, db.settings.launch_on_startup);
     Ok(db)
 }
 
@@ -1214,8 +1225,20 @@ fn is_process_running(exe: &str) -> bool {
 
 fn start_watcher(handle: tauri::AppHandle) {
     std::thread::spawn(move || {
+        let mut last_tick = std::time::SystemTime::now();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
+
+            // A wall-clock jump across a 3s sleep means the machine was suspended.
+            // The AHK process survives suspend but Windows may have dropped its
+            // keyboard hook, so kill it and let the logic below relaunch it fresh.
+            let now = std::time::SystemTime::now();
+            let resumed = now
+                .duration_since(last_tick)
+                .map(|gap| gap > std::time::Duration::from_secs(30))
+                .unwrap_or(false);
+            last_tick = now;
+
             let state = handle.state::<AppState>();
 
             let db = match config::load_db(&state.db_path) {
@@ -1225,6 +1248,9 @@ fn start_watcher(handle: tauri::AppHandle) {
 
             let active = active_game(&db);
             let mut mgr = state.ahk_manager.lock().unwrap();
+            if resumed {
+                mgr.kill();
+            }
 
             match active {
                 None => { mgr.kill(); }
@@ -1267,6 +1293,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
@@ -1322,6 +1352,9 @@ pub fn run() {
             });
 
             build_tray(app)?;
+            // Re-apply the login registration on every launch so the registered path
+            // tracks the current executable across updates and moves.
+            sync_autostart(app.handle(), startup_settings.launch_on_startup);
             if startup_settings.open_to_tray {
                 hide_main_window(app.handle());
             } else {

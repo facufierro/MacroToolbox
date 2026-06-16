@@ -1469,6 +1469,7 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
   const [ahkExe, setAhkExe] = useState(db.settings.ahk_exe);
   const [openToTray, setOpenToTray] = useState(db.settings.open_to_tray);
   const [closeToTray, setCloseToTray] = useState(db.settings.close_to_tray);
+  const [launchOnStartup, setLaunchOnStartup] = useState(db.settings.launch_on_startup);
   const [saved, setSaved] = useState(false);
 
   async function browse() {
@@ -1487,6 +1488,7 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
         ahk_exe: ahkExe,
         open_to_tray: openToTray,
         close_to_tray: closeToTray,
+        launch_on_startup: launchOnStartup,
       });
       onDb(updated);
       setSaved(true);
@@ -1524,6 +1526,17 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
         <span>
           Close to tray
           <small>Hide the main window instead of quitting when closing it.</small>
+        </span>
+      </label>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={launchOnStartup}
+          onChange={e => setLaunchOnStartup(e.target.checked)}
+        />
+        <span>
+          Launch on startup
+          <small>Start Hotkey Manager automatically when you log in to Windows. Pair with “Open to tray” to start hidden.</small>
         </span>
       </label>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>

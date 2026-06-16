@@ -214,6 +214,8 @@ pub struct Settings {
     pub open_to_tray: bool,
     #[serde(default)]
     pub close_to_tray: bool,
+    #[serde(default)]
+    pub launch_on_startup: bool,
 }
 
 pub fn load_db(path: &Path) -> Result<Database, String> {

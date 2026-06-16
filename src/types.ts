@@ -88,6 +88,7 @@ export interface Settings {
   ahk_exe: string;
   open_to_tray: boolean;
   close_to_tray: boolean;
+  launch_on_startup: boolean;
 }
 
 export interface Database {

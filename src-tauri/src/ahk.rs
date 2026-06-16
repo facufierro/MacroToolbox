@@ -228,6 +228,42 @@ HideOverlayOnExit(*) {{
 SetTimer SyncOverlay, 200
 SyncOverlay()
 
+; Windows silently removes low-level hooks when the system sleeps or the hook
+; times out while the process is throttled in the background (idle in the tray),
+; leaving hotkeys dead even though this script is still running. Install both hooks
+; up front and reinstall them on wake and whenever the keyboard hook looks dropped.
+InstallKeybdHook true, true
+InstallMouseHook true, true
+global lastHookReinstall := 0
+
+ReinstallHooks() {{
+    global lastHookReinstall
+    lastHookReinstall := A_TickCount
+    InstallKeybdHook true, true
+    InstallMouseHook true, true
+}}
+
+OnMessage 0x218, OnPowerBroadcast  ; WM_POWERBROADCAST
+
+OnPowerBroadcast(wParam, lParam, msg, hwnd) {{
+    ; PBT_APMRESUMESUSPEND (0x7) / PBT_APMRESUMEAUTOMATIC (0x12): just woke up.
+    if (wParam = 0x7 || wParam = 0x12)
+        ReinstallHooks()
+}}
+
+CheckHookHealth(*) {{
+    global lastHookReinstall
+    ; A_TimeIdle is the OS-wide idle time (GetLastInputInfo); A_TimeIdleKeyboard is
+    ; how long this script's keyboard hook has gone without a keystroke. If the OS
+    ; just registered input but the keyboard hook has been silent far longer, Windows
+    ; dropped the hook - reinstall it. Watching the keyboard hook itself (instead of
+    ; A_TimeIdlePhysical) keeps mouse movement from masking a dead keyboard hook,
+    ; which is what left hotkeys permanently dead after idling in the tray.
+    if (A_TimeIdle < 1000 && A_TimeIdleKeyboard > 10000 && A_TickCount - lastHookReinstall > 10000)
+        ReinstallHooks()
+}}
+SetTimer CheckHookHealth, 1000
+
 {toggle_scope}
 {hotkey_scope}
 
