@@ -57,4 +57,7 @@ export const api = {
 
   getAppVersion: () =>
     invoke<string>("get_app_version"),
+
+  downloadAndInstallUpdate: (url: string) =>
+    invoke<void>("download_and_install_update", { url }),
 };

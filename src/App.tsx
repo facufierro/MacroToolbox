@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "./api";
 import type {
@@ -1564,7 +1564,8 @@ export default function App() {
   const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [modal, setModal] = useState<Modal | null>(null);
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; url: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; downloadUrl: string | null; notesUrl: string } | null>(null);
+  const [updating, setUpdating] = useState(false);
 
   const loadDb = useCallback(async () => {
     const data = await api.getDatabase();
@@ -1584,8 +1585,12 @@ export default function App() {
           const latest: string = data.tag_name ?? "";
           if (latest && semverGt(latest, current)) {
             const asset = (data.assets as { name: string; browser_download_url: string }[])
-              ?.find(a => a.name.endsWith(".exe") || a.name.endsWith(".msi"));
-            setUpdateInfo({ version: latest, url: asset?.browser_download_url ?? data.html_url });
+              ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
+            setUpdateInfo({
+              version: latest,
+              downloadUrl: asset?.browser_download_url ?? null,
+              notesUrl: data.html_url,
+            });
           }
         })
         .catch(() => {});
@@ -1596,6 +1601,24 @@ export default function App() {
 
   function handleDb(updated: Database) {
     setDb(updated);
+  }
+
+  async function runUpdate() {
+    if (!updateInfo?.downloadUrl) return;
+    const ok = await ask(
+      `Hotkey Manager ${updateInfo.version} is available.\n\nDownload and install it now? The app will close to finish updating.`,
+      { title: "Update available", kind: "info", okLabel: "Update now", cancelLabel: "Later" }
+    );
+    if (!ok) return;
+    setUpdating(true);
+    try {
+      // On success the installer launches and the app exits, so control never
+      // returns here; a rejection means the download or launch failed.
+      await api.downloadAndInstallUpdate(updateInfo.downloadUrl);
+    } catch (e) {
+      setUpdating(false);
+      alert(`Update failed: ${e}`);
+    }
   }
 
   const selectedGame = db?.scopes.find(g => g.id === selectedGameId) ?? null;
@@ -1771,8 +1794,14 @@ export default function App() {
       {updateInfo && (
         <div className="update-banner">
           <span>Update available: <strong>{updateInfo.version}</strong></span>
-          <button className="btn btn--primary btn--sm" onClick={() => openUrl(updateInfo.url).catch(() => {})}>Download</button>
-          <button className="btn btn--ghost btn--sm" onClick={() => setUpdateInfo(null)}>Dismiss</button>
+          {updateInfo.downloadUrl && (
+            <button className="btn btn--primary btn--sm" disabled={updating} onClick={runUpdate}>
+              {updating ? "Downloading…" : "Update Now"}
+            </button>
+          )}
+          <button className="btn btn--ghost btn--sm" disabled={updating}
+            onClick={() => openUrl(updateInfo.notesUrl).catch(() => {})}>Release Notes</button>
+          <button className="btn btn--ghost btn--sm" disabled={updating} onClick={() => setUpdateInfo(null)}>Dismiss</button>
         </div>
       )}
       {/* Sidebar + main */}

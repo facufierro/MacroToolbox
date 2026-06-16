@@ -1188,6 +1188,41 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settin
     Ok(db)
 }
 
+/// Download the given release installer and launch it, then quit so the installer can
+/// replace the running executable. Downloading in the backend avoids the browser's
+/// download-redirect handling and any webview CORS restrictions.
+#[tauri::command]
+async fn download_and_install_update(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .user_agent("HotkeyManager")
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Could not start the download: {e}"))?;
+    let bytes = client
+        .get(&url)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|e| format!("Download failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    let mut installer_path = std::env::temp_dir();
+    installer_path.push("HotkeyManager-update-setup.exe");
+    std::fs::write(&installer_path, &bytes)
+        .map_err(|e| format!("Could not save the installer: {e}"))?;
+
+    // Launch the installer as an independent process (it keeps running after we exit),
+    // then quit so the running executable is unlocked and can be replaced.
+    std::process::Command::new(&installer_path)
+        .spawn()
+        .map_err(|e| format!("Could not launch the installer: {e}"))?;
+
+    quit_app(&app);
+    Ok(())
+}
+
 fn is_process_running(exe: &str) -> bool {
     if is_global_game_exe(exe) {
         return true;
@@ -1437,6 +1472,7 @@ pub fn run() {
             get_ahk_status,
             save_settings,
             get_app_version,
+            download_and_install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
