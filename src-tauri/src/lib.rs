@@ -1174,15 +1174,36 @@ fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Register or unregister the app in the OS login list (on Windows, the HKCU `Run`
-/// registry key). Done through the autostart plugin so it always points at the
-/// current executable path — far more reliable than a Startup-folder shortcut, which
-/// goes stale when the app updates or moves.
-fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    let _ = if enabled { manager.enable() } else { manager.disable() };
+/// Register or unregister the app in the Windows login list (the HKCU `Run` registry
+/// key), pointing at the current executable so the entry stays valid across updates and
+/// moves. Written directly with `reg` so the stored value is exactly the quoted path we
+/// control.
+#[cfg(target_os = "windows")]
+fn sync_autostart(_app: &tauri::AppHandle, enabled: bool) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE_NAME: &str = "Hotkey Manager";
+
+    let mut cmd = std::process::Command::new("reg");
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    if enabled {
+        let exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        cmd.args([
+            "add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ",
+            "/d", &format!("\"{}\"", exe.display()), "/f",
+        ]);
+    } else {
+        cmd.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
+    }
+    let _ = cmd.status();
 }
+
+#[cfg(not(target_os = "windows"))]
+fn sync_autostart(_app: &tauri::AppHandle, _enabled: bool) {}
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settings) -> Result<Database, String> {
@@ -1333,10 +1354,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
