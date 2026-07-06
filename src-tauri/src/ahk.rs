@@ -214,20 +214,34 @@ pub fn generate_script(
             continue;
         }
 
+        // A behavior that is exactly one repeat(...) becomes a hold-to-repeat: the key is
+        // pressed every `interval` ms while the trigger is held. Needs a release signal, so
+        // emit a wildcard key-up hotkey next to the press hotkey (same as pure hold).
+        if let (Some((repeat_keys, interval)), Some(up_key)) = (parse_pure_repeat(&hk.behavior), up_hotkey(&hk.trigger)) {
+            let keys = escape_ahk_string(&repeat_keys);
+            let poll_key = escape_ahk_string(&trigger_bare_key(&hk.trigger));
+            hotkey_lines.push_str(&format!(
+                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatStart(\"{trigger}\", \"{keys}\", {interval}, \"{poll_key}\")\n}}\n{up_key}:: RepeatStop(\"{trigger}\")\n"
+            ));
+            continue;
+        }
+
         let behavior = escape_ahk_string(&hk.behavior);
         hotkey_lines.push_str(&format!(
             "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
         ));
     }
 
+    // Only bind a toggle-hotkeys key when the user explicitly set one. Defaulting to
+    // backtick would globally hijack that key in an all-scopes scope (and it is the
+    // console key in many games).
     let toggle_key = toggle_hotkeys_key
-        .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
-        .unwrap_or_else(|| "$`".to_string());
+        .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } });
 
     let overlay_toggle_block = toggle_overlay_key
         .filter(|_| overlay_enabled)
         .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
-        .filter(|k| k != &toggle_key)
+        .filter(|k| Some(k) != toggle_key.as_ref())
         .map(|k| format!("{k}:: ToggleEnabled()\n"))
         .unwrap_or_default();
 
@@ -241,10 +255,15 @@ pub fn generate_script(
     } else {
         if overlay_enabled { "enabled && WinActive(\"ahk_group GAME\")".to_string() } else { "false".to_string() }
     };
+    let toggle_hotkeys_line = toggle_key
+        .map(|k| format!("{k}:: ToggleEnabled()\n"))
+        .unwrap_or_default();
     let toggle_scope = if global_game {
-        format!("{toggle_key}:: ToggleEnabled()\n{overlay_toggle_block}")
+        format!("{toggle_hotkeys_line}{overlay_toggle_block}")
+    } else if toggle_hotkeys_line.is_empty() && overlay_toggle_block.is_empty() {
+        String::new()
     } else {
-        format!("#HotIf WinActive(\"ahk_group GAME\")\n{toggle_key}:: ToggleEnabled()\n{overlay_toggle_block}#HotIf\n")
+        format!("#HotIf WinActive(\"ahk_group GAME\")\n{toggle_hotkeys_line}{overlay_toggle_block}#HotIf\n")
     };
     let hotkey_scope = if global_game {
         format!("#HotIf enabled\n{hotkey_lines}#HotIf\n")
@@ -262,6 +281,7 @@ SetTitleMatchMode 2
 
 global enabled := true
 global overlayVisible := false
+global repeatTimers := Map()
 {game_group}OnExit HideOverlayOnExit
 
 SendOverlayCommand(path) {{
@@ -400,6 +420,30 @@ fn parse_pure_hold(behavior: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+/// If `behavior` is exactly a single `repeat(<keys>, <interval_ms>)` action, return the
+/// key string (which may carry modifiers) and the interval. A multi-step behavior
+/// (containing `;`) is not treated as a hold-to-repeat.
+fn parse_pure_repeat(behavior: &str) -> Option<(String, u64)> {
+    let b = behavior.trim();
+    let lower = b.to_lowercase();
+    if !lower.starts_with("repeat(") || !b.ends_with(')') {
+        return None;
+    }
+    let inner = b["repeat(".len()..b.len() - 1].trim();
+    if inner.contains(';') {
+        return None;
+    }
+    // The key part never contains a comma (modifiers are space-separated), so the last
+    // comma splits keys from the interval.
+    let (keys, interval) = inner.rsplit_once(',')?;
+    let keys = keys.trim();
+    let interval = interval.trim().parse::<u64>().ok()?;
+    if keys.is_empty() || interval == 0 {
+        return None;
+    }
+    Some((keys.to_string(), interval))
+}
+
 /// The wildcard key-up hotkey that releases a held remap, e.g. trigger "shift win f23"
 /// -> "*F23 up". `*` makes it fire on the key release regardless of modifier state.
 /// Returns None when the trigger resolves to no key.
@@ -508,6 +552,9 @@ const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
             } else if RegExMatch(token, "i)^press\((.+)\)$", &m) {
                 for k in StrSplit(m[1], ",")
                     DoPress(Trim(k))
+                Sleep 30
+            } else if RegExMatch(token, "i)^repeat\((.+),\s*(\d+)\)$", &m) {
+                DoPress(Trim(m[1]))
                 Sleep 30
             } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
                 DoPress(Trim(m[1]))
@@ -779,4 +826,35 @@ HoldKeyList(keyStr) {
     if (key != "")
         held.Push(key)
     return held
+}
+
+; Hold-to-repeat. The press hotkey starts a timer that fires DoPress every `interval`
+; ms; the paired key-up hotkey stops it. As a safety net (the key-up hotkey is
+; suppressed while hotkeys are toggled off or the game window is inactive), each tick
+; also polls the trigger's physical key and stops itself once the key is released, so a
+; timer can never be stranded firing keystrokes forever.
+RepeatStart(id, keys, interval, triggerKey) {
+    global repeatTimers
+    if repeatTimers.Has(id)
+        return
+    fn := RepeatTick.Bind(id, keys, triggerKey)
+    repeatTimers[id] := fn
+    DoPress(keys)
+    SetTimer fn, interval
+}
+
+RepeatTick(id, keys, triggerKey) {
+    if (triggerKey != "" && !GetKeyState(triggerKey, "P")) {
+        RepeatStop(id)
+        return
+    }
+    DoPress(keys)
+}
+
+RepeatStop(id) {
+    global repeatTimers
+    if !repeatTimers.Has(id)
+        return
+    SetTimer repeatTimers[id], 0
+    repeatTimers.Delete(id)
 }"###;
