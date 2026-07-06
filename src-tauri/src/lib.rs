@@ -304,6 +304,7 @@ fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWin
     .title("Hotkey Manager")
     .inner_size(1100.0, 700.0)
     .min_inner_size(800.0, 500.0)
+    .maximized(true)
     .visible(true)
     .build()
 }
