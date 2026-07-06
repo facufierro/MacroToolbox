@@ -374,7 +374,13 @@ function GameModal({ initial, onSave, onClose }: {
   const globalGame = isGlobalGame(initial);
   const [name, setName] = useState(initial.name);
   const [exe, setExe] = useState(initial.exe);
+  const [openExes, setOpenExes] = useState<string[]>([]);
   const [image, setImage] = useState<string | null>(initial.image);
+
+  useEffect(() => {
+    if (globalGame) return;
+    api.listOpenExecutables().then(setOpenExes).catch(() => {});
+  }, [globalGame]);
   const [toggleHotkeysKey, setToggleHotkeysKey] = useState(initial.toggle_hotkeys_key ?? "");
   const [toggleOverlayKey, setToggleOverlayKey] = useState(initial.toggle_overlay_key ?? "");
 
@@ -412,7 +418,15 @@ function GameModal({ initial, onSave, onClose }: {
           <input value={name} onChange={e => setName(e.target.value)} />
         </label>
         <label>Executable
-          <input value={exe} onChange={e => setExe(e.target.value)} disabled={globalGame} />
+          <div className="input-row">
+            <input value={exe} onChange={e => setExe(e.target.value)} disabled={globalGame} />
+            {!globalGame && (
+              <select value="" onChange={e => { if (e.target.value) setExe(e.target.value); }} title="Pick an open app">
+                <option value="">Open apps…</option>
+                {openExes.map(exeName => <option key={exeName} value={exeName}>{exeName}</option>)}
+              </select>
+            )}
+          </div>
           {globalGame && <small>Global scopes apply to every app instead of a single executable.</small>}
         </label>
         <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(optional — leave empty to bind no key)</span>
