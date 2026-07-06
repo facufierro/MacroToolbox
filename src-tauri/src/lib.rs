@@ -808,6 +808,41 @@ fn get_window_process_name(hwnd: winapi::shared::windef::HWND) -> Option<String>
     }
 }
 
+/// Executable names of currently-open apps — visible, titled, top-level windows — for the
+/// scope editor's dropdown. Deduped and sorted (BTreeSet).
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_open_executables() -> Vec<String> {
+    use std::collections::BTreeSet;
+    use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+    use winapi::shared::windef::HWND;
+    use winapi::um::winuser::{EnumWindows, GetWindow, GetWindowTextLengthW, IsWindowVisible, GW_OWNER};
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let set = &mut *(lparam as *mut BTreeSet<String>);
+        // Only real, foreground-able app windows: visible, no owner, with a title bar text.
+        if IsWindowVisible(hwnd) == 0 { return TRUE; }
+        if !GetWindow(hwnd, GW_OWNER).is_null() { return TRUE; }
+        if GetWindowTextLengthW(hwnd) == 0 { return TRUE; }
+        if let Some(name) = get_window_process_name(hwnd) {
+            if !name.is_empty() {
+                set.insert(name);
+            }
+        }
+        TRUE
+    }
+
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    unsafe { EnumWindows(Some(enum_cb), &mut set as *mut _ as LPARAM); }
+    set.into_iter().collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn list_open_executables() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(target_os = "windows")]
 fn get_window_client_area(hwnd: winapi::shared::windef::HWND) -> i64 {
     use winapi::shared::windef::RECT;
@@ -1439,6 +1474,11 @@ fn start_watcher(handle: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin: a second launch hands off to the running instance,
+        // which just brings its window to the front instead of opening another copy.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
@@ -1594,6 +1634,7 @@ pub fn run() {
             set_overlay_passthrough,
             pick_coordinate,
             kill_game,
+            list_open_executables,
             make_borderless_fullscreen,
             write_text_file,
             read_text_file,
