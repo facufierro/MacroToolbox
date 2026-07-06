@@ -413,7 +413,7 @@ function GameModal({ initial, onSave, onClose }: {
           <input value={exe} onChange={e => setExe(e.target.value)} disabled={globalGame} />
           {globalGame && <small>Global scopes apply to every app instead of a single executable.</small>}
         </label>
-        <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(default: `)</span>
+        <label>Enable Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(optional — leave empty to bind no key)</span>
           <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} />
         </label>
         <label>Toggle Overlay And Hotkeys Key <span style={{ color: "var(--text2)", fontWeight: 400 }}>(use a modifier, e.g. ctrl F12)</span>
@@ -459,6 +459,7 @@ function ProfileModal({ initial = "", title, onSave, onClose }: {
 
 type Step =
   | { type: "press" | "hold"; key: string }
+  | { type: "repeat"; key: string; interval: string }
   | { type: "goto"; x: string; y: string }
   | { type: "state"; stateId: string }
   | { type: "sleep"; ms: string }
@@ -471,6 +472,7 @@ function parseSteps(behavior: string): Step[] {
     let m: RegExpMatchArray | null;
     if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
     if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
+    if ((m = s.match(/^repeat\((.+),\s*(\d+)\)$/))) return [{ type: "repeat" as const, key: m[1].trim(), interval: m[2] }];
     if ((m = s.match(/^goto\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
     if ((m = s.match(/^state\((.+)\)$/))) return [{ type: "state" as const, stateId: m[1] }];
     if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
@@ -487,6 +489,7 @@ function stepsToString(steps: Step[]): string {
     switch (s.type) {
       case "press": return `press(${s.key})`;
       case "hold":  return `hold(${s.key})`;
+      case "repeat": return `repeat(${s.key},${s.interval})`;
       case "goto":  return `goto(${s.x},${s.y})`;
       case "state": return `state(${s.stateId})`;
       case "sleep": return `sleep(${s.ms})`;
@@ -540,6 +543,13 @@ function StepRow({ step, index, total, gameExe, states, onChange, onDelete, onMo
       <div className="step-row__params">
         {(step.type === "press" || step.type === "hold") && (
           <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} />
+        )}
+        {step.type === "repeat" && (
+          <>
+            <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} />
+            <input type="number" min={1} value={step.interval} placeholder="ms"
+              onChange={e => onChange({ ...step, interval: e.target.value })} style={{ width: 90 }} />
+          </>
         )}
         {step.type === "goto" && (
           <GotoInput x={step.x} y={step.y} gameExe={gameExe} onChange={(x, y) => onChange({ ...step, x, y })} />
@@ -644,6 +654,7 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "hold", key: "" })}>hold</button>
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "lock" })}>lock</button>
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "press", key: "" })}>press</button>
+            <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "repeat", key: "", interval: "100" })}>repeat</button>
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "restorecursor" })}>restorecursor</button>
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "savecursor" })}>savecursor</button>
             <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "send", text: "" })}>send</button>
