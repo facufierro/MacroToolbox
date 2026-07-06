@@ -345,21 +345,23 @@ function Placeholder({ label }: { label?: string }) {
   );
 }
 
-function GameCard({ game, active, running, onClick }: {
-  game: Scope; active: boolean; running: boolean; onClick: () => void;
+function GameCard({ game, active, running, global, onClick }: {
+  game: Scope; active: boolean; running: boolean; global?: boolean; onClick: () => void;
 }) {
   const armed = !!game.active_profile;
   return (
-    <div className={`game-card ${active ? "game-card--active" : ""}`} onClick={onClick}>
+    <div className={`game-card ${active ? "game-card--active" : ""} ${global ? "game-card--global" : ""}`} onClick={onClick}>
       {game.image
         ? <img src={game.image} alt={game.name} className="game-card__img" />
         : <Placeholder />}
-      <div className="game-card__name">{game.name || "Unnamed"}</div>
-      {armed && (
-        <div className={`badge ${running ? "badge--on" : "badge--armed"}`}>
-          {running ? "● Running" : "◌ Armed"}
-        </div>
-      )}
+      <div className="game-card__name">{global ? `◎ ${game.name || "Global"}` : (game.name || "Unnamed")}</div>
+      {global
+        ? <div className="badge badge--on">● Always active</div>
+        : armed && (
+          <div className={`badge ${running ? "badge--on" : "badge--armed"}`}>
+            {running ? "● Running" : "◌ Armed"}
+          </div>
+        )}
     </div>
   );
 }
@@ -1186,10 +1188,10 @@ function GameView({ game, running, onDb, onModal, onBack }: {
 
   const profile = game.profiles.find(p => p.id === profileId);
 
-  async function activate() {
-    if (!profileId) return;
+  async function activate(id: string = profileId) {
+    if (!id) return;
     try {
-      const db = await api.activateProfile(game.id, profileId);
+      const db = await api.activateProfile(game.id, id);
       onDb(db);
     } catch (e) {
       alert(String(e));
@@ -1273,14 +1275,18 @@ function GameView({ game, running, onDb, onModal, onBack }: {
               try { await api.killGame(game.exe); }
               catch (e) { alert(String(e)); }
             }}>Kill Process</button>}
-            <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Scope</button>
+            {!globalGame && <button className="btn btn--danger btn--sm" onClick={deleteGame}>Delete Scope</button>}
           </div>
         </div>
       </div>
 
       {/* Profile bar */}
       <div className="profile-bar">
-        <select value={profileId} onChange={e => setProfileId(e.target.value)}>
+        <select value={profileId} onChange={e => {
+          const id = e.target.value;
+          setProfileId(id);
+          if (globalGame && id) activate(id);
+        }}>
           {game.profiles.map(p => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
@@ -1315,14 +1321,20 @@ function GameView({ game, running, onDb, onModal, onBack }: {
           <button className="btn btn--ghost btn--sm" onClick={deleteProfile}>Delete</button>
         )}
         <div style={{ flex: 1 }} />
-        {isActive
-          ? <button className="btn btn--danger" onClick={deactivate}>■ Deactivate</button>
-          : <button className="btn btn--primary" onClick={activate} disabled={!profileId}>▶ Activate</button>
-        }
-        {isActive && (
-          running
-            ? <span className="badge badge--on">● Running</span>
-            : <span className="badge badge--waiting">⏳ Waiting for game</span>
+        {globalGame ? (
+          <span className="badge badge--on">● Always active</span>
+        ) : (
+          <>
+            {isActive
+              ? <button className="btn btn--danger" onClick={() => deactivate()}>■ Deactivate</button>
+              : <button className="btn btn--primary" onClick={() => activate()} disabled={!profileId}>▶ Activate</button>
+            }
+            {isActive && (
+              running
+                ? <span className="badge badge--on">● Running</span>
+                : <span className="badge badge--waiting">⏳ Waiting for game</span>
+            )}
+          </>
         )}
       </div>
 
@@ -1820,7 +1832,17 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar__logo">⌨ HKM</div>
         <nav className="sidebar__games">
-          {[...db.scopes].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
+          <button
+            className={`sidebar__item sidebar__item--global ${globalGame && selectedGameId === globalGame.id ? "sidebar__item--active" : ""}`}
+            onClick={handleCreateGlobalGame}
+            title="Global scope — always active">
+            <div className="sidebar__thumb sidebar__thumb--placeholder">◎</div>
+            <span className="sidebar__label">{globalGame ? (globalGame.name || "Global") : "Add Global Scope"}</span>
+            {globalGame && (
+              <span className="sidebar__dot sidebar__dot--on" />
+            )}
+          </button>
+          {[...db.scopes].filter(g => !isGlobalGame(g)).sort((a, b) => a.name.localeCompare(b.name)).map(g => (
             <button key={g.id}
               className={`sidebar__item ${selectedGameId === g.id ? "sidebar__item--active" : ""}`}
               onClick={() => selectGame(g.id)}
@@ -1836,9 +1858,6 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar__bottom">
-          <button className="btn btn--ghost btn--full" onClick={handleCreateGlobalGame}>
-            {globalGame ? "◎ Open Global Scope" : "◎ Add Global Scope"}
-          </button>
           <button className="btn btn--ghost btn--full"
             onClick={() => { setModal({ type: "addGame" }); setView("dashboard"); }}>
             + Add Scope
@@ -1863,13 +1882,16 @@ export default function App() {
           <div className="dashboard">
             <h2>Scopes</h2>
             <div className="game-grid">
-              {!globalGame && (
-                <div className="game-card game-card--add" onClick={handleCreateGlobalGame}>
+              {globalGame ? (
+                <GameCard key={globalGame.id} game={globalGame} active={selectedGameId === globalGame.id}
+                  running={running} global onClick={() => selectGame(globalGame.id)} />
+              ) : (
+                <div className="game-card game-card--add game-card--global" onClick={handleCreateGlobalGame}>
                   <span>◎</span>
                   <div className="game-card__name">Add Global Scope</div>
                 </div>
               )}
-              {[...db.scopes].sort((a, b) => a.name.localeCompare(b.name)).map(g => (
+              {[...db.scopes].filter(g => !isGlobalGame(g)).sort((a, b) => a.name.localeCompare(b.name)).map(g => (
                 <GameCard key={g.id} game={g} active={selectedGameId === g.id}
                   running={running} onClick={() => selectGame(g.id)} />
               ))}

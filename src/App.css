@@ -90,6 +90,17 @@ body {
 
 .sidebar__item:hover { background: var(--bg3); color: var(--text); }
 .sidebar__item--active { background: var(--bg3); color: var(--text); }
+
+/* Pinned global scope: always first, set apart from the user scope list. */
+.sidebar__item--global {
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.sidebar__item--global .sidebar__thumb--placeholder {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .sidebar__item--active::before {
   content: '';
   position: absolute;
@@ -201,6 +212,9 @@ body {
 }
 
 .game-card--add:hover { color: var(--text); }
+
+/* The global scope is a permanent, always-active fixture, set apart from user scopes. */
+.game-card--global { border-color: var(--accent); background: var(--bg3); }
 
 /* ── Placeholder ───────────────────────────────────────────────────────────── */
 .placeholder {
