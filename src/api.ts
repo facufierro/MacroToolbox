@@ -22,6 +22,9 @@ export const api = {
   killGame: (exe: string) =>
     invoke<void>("kill_game", { exe }),
 
+  listOpenExecutables: () =>
+    invoke<string[]>("list_open_executables"),
+
   makeBorderlessFullscreen: (exe: string) =>
     invoke<boolean>("make_borderless_fullscreen", { exe }),
 
