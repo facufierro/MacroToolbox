@@ -767,11 +767,14 @@ DoPress(keyStr, holdMs := 30, spin := false) {
     if (mods != "")
         Sleep 20
     SendInput("{" key " Down}")
-    if (spin)
-        SpinHold(holdMs)      ; precise sub-Sleep-granularity hold for the repeat tap
-    else
-        Sleep holdMs
-    SendInput("{" key " Up}")
+    try {
+        if (spin)
+            SpinHold(holdMs)  ; precise sub-Sleep-granularity hold for the repeat tap
+        else
+            Sleep holdMs
+    } finally {
+        SendInput("{" key " Up}")   ; always release, even if the hold throws, so no key sticks
+    }
     if (mods != "")
         Sleep 20
     SendModState(altKey,   "Up")
