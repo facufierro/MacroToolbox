@@ -5,6 +5,10 @@ use crate::config::{self, Profile};
 
 const GLOBAL_GAME_EXE: &str = "*";
 
+/// Default precise key-down duration (ms) for a repeat tap when the behavior doesn't
+/// specify one. Kept small so a game that acts on the key per frame registers ~one press.
+const DEFAULT_REPEAT_HOLD_MS: u64 = 6;
+
 /// Always-on remap of the Microsoft Copilot key to Right Ctrl, run as its own persistent
 /// AutoHotkey process. The Copilot key fires LWin+LShift+F23 (scancode SC06E) ~1ms apart;
 /// this 3-state machine holds LWin/LShift for 30ms and, only if the Copilot scancode
@@ -215,18 +219,24 @@ pub fn generate_script(
         }
 
         // A behavior that is exactly one repeat(...) becomes a hold-to-repeat: the key is
-        // pressed every `interval` ms while the trigger is held. Needs a release signal, so
-        // emit a wildcard key-up hotkey next to the press hotkey (same as pure hold).
-        if let (Some((repeat_keys, interval)), Some(up_key)) = (parse_pure_repeat(&hk.behavior), up_hotkey(&hk.trigger)) {
-            let keys = escape_ahk_string(&repeat_keys);
-            let poll_key = escape_ahk_string(&trigger_bare_key(&hk.trigger));
-            // Per-app scopes must keep the repeat confined to the game window; the timer
-            // isn't gated by #HotIf, so the tick re-checks WinActive itself.
-            let require_active = if global_game { "false" } else { "true" };
-            hotkey_lines.push_str(&format!(
-                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatStart(\"{trigger}\", \"{keys}\", {interval}, \"{poll_key}\", {require_active})\n}}\n{up_key}:: RepeatStop(\"{trigger}\")\n"
-            ));
-            continue;
+        // pressed every `interval` ms while the trigger is held. The timer stops itself when
+        // the trigger's physical key is released (polled each tick), so NO key-up hotkey is
+        // emitted: a `*key up` hotkey gets re-triggered by the key-up events this repeat
+        // injects, which tears down and restarts the timer on every OS key-repeat — making
+        // the repeat run at the OS key-repeat rate instead of the configured interval.
+        if let Some((repeat_keys, interval, hold)) = parse_pure_repeat(&hk.behavior) {
+            let poll_key = trigger_bare_key(&hk.trigger);
+            if !poll_key.is_empty() {
+                let keys = escape_ahk_string(&repeat_keys);
+                let poll_key = escape_ahk_string(&poll_key);
+                // Per-app scopes must keep the repeat confined to the game window; the loop
+                // isn't gated by #HotIf, so the tick re-checks WinActive itself.
+                let require_active = if global_game { "false" } else { "true" };
+                hotkey_lines.push_str(&format!(
+                    "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", {require_active}, {hold})\n}}\n"
+                ));
+                continue;
+            }
         }
 
         let behavior = escape_ahk_string(&hk.behavior);
@@ -284,7 +294,6 @@ SetTitleMatchMode 2
 
 global enabled := true
 global overlayVisible := false
-global repeatTimers := Map()
 {game_group}OnExit HideOverlayOnExit
 
 SendOverlayCommand(path) {{
@@ -426,7 +435,11 @@ fn parse_pure_hold(behavior: &str) -> Option<String> {
 /// If `behavior` is exactly a single `repeat(<keys>, <interval_ms>)` action, return the
 /// key string (which may carry modifiers) and the interval. A multi-step behavior
 /// (containing `;`) is not treated as a hold-to-repeat.
-fn parse_pure_repeat(behavior: &str) -> Option<(String, u64)> {
+/// Parses `repeat(<keys>, <interval>[, <hold>])`. Returns (keys, interval_ms, hold_ms).
+/// `hold` (the precise key-down duration of each tap) is optional and defaults to
+/// DEFAULT_REPEAT_HOLD_MS. The key part never contains a comma (modifiers are
+/// space-separated), so splitting on commas is unambiguous.
+fn parse_pure_repeat(behavior: &str) -> Option<(String, u64, u64)> {
     let b = behavior.trim();
     let lower = b.to_lowercase();
     if !lower.starts_with("repeat(") || !b.ends_with(')') {
@@ -436,15 +449,20 @@ fn parse_pure_repeat(behavior: &str) -> Option<(String, u64)> {
     if inner.contains(';') {
         return None;
     }
-    // The key part never contains a comma (modifiers are space-separated), so the last
-    // comma splits keys from the interval.
-    let (keys, interval) = inner.rsplit_once(',')?;
-    let keys = keys.trim();
-    let interval = interval.trim().parse::<u64>().ok()?;
+    let parts: Vec<&str> = inner.splitn(3, ',').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let keys = parts[0].trim();
+    let interval = parts[1].trim().parse::<u64>().ok()?;
+    let hold = match parts.get(2) {
+        Some(h) => h.trim().parse::<u64>().ok()?,
+        None => DEFAULT_REPEAT_HOLD_MS,
+    };
     if keys.is_empty() || interval == 0 {
         return None;
     }
-    Some((keys.to_string(), interval))
+    Some((keys.to_string(), interval, hold))
 }
 
 /// The wildcard key-up hotkey that releases a held remap, e.g. trigger "shift win f23"
@@ -556,7 +574,7 @@ const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
                 for k in StrSplit(m[1], ",")
                     DoPress(Trim(k))
                 Sleep 30
-            } else if RegExMatch(token, "i)^repeat\((.+),\s*(\d+)\)$", &m) {
+            } else if RegExMatch(token, "i)^repeat\((.+?),\s*(\d+)(?:,\s*\d+)?\)$", &m) {
                 DoPress(Trim(m[1]))
                 Sleep 30
             } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
@@ -644,7 +662,7 @@ TryGetViewportFromApp(&x, &y, &w, &h) {
     }
 }
 
-DoPress(keyStr) {
+DoPress(keyStr, holdMs := 30, spin := false) {
     mods := ""
     key  := ""
     for part in StrSplit(Trim(StrLower(keyStr)), " ") {
@@ -749,7 +767,10 @@ DoPress(keyStr) {
     if (mods != "")
         Sleep 20
     SendInput("{" key " Down}")
-    Sleep 30
+    if (spin)
+        SpinHold(holdMs)      ; precise sub-Sleep-granularity hold for the repeat tap
+    else
+        Sleep holdMs
     SendInput("{" key " Up}")
     if (mods != "")
         Sleep 20
@@ -831,38 +852,43 @@ HoldKeyList(keyStr) {
     return held
 }
 
-; Hold-to-repeat. The press hotkey starts a timer that fires DoPress every `interval`
-; ms; the paired key-up hotkey stops it. As a safety net (the key-up hotkey is
-; suppressed while hotkeys are toggled off or the game window is inactive), each tick
-; also polls the trigger's physical key and stops itself once the key is released, so a
-; timer can never be stranded firing keystrokes forever.
-RepeatStart(id, keys, interval, triggerKey, requireGameActive) {
-    global repeatTimers
-    if repeatTimers.Has(id)
-        return
-    fn := RepeatTick.Bind(id, keys, triggerKey, requireGameActive)
-    repeatTimers[id] := fn
-    DoPress(keys)
-    SetTimer fn, interval
+; Busy-wait for `ms` milliseconds using the high-resolution performance counter. AHK's
+; Sleep can't reliably hold a key for only a few ms (its granularity floors near 15ms),
+; and a repeat aimed at a game that acts on a key every frame it is held needs the key
+; down for a short, EXACT window (about one frame) so it registers exactly one press.
+SpinHold(ms) {
+    static freq := 0
+    if (!freq)
+        DllCall("QueryPerformanceFrequency", "Int64*", &freq)
+    t0 := 0
+    t := 0
+    DllCall("QueryPerformanceCounter", "Int64*", &t0)
+    limit := t0 + Round(ms * freq / 1000)
+    loop {
+        DllCall("QueryPerformanceCounter", "Int64*", &t)
+    } until (t >= limit)
 }
 
-RepeatTick(id, keys, triggerKey, requireGameActive) {
-    if (triggerKey != "" && !GetKeyState(triggerKey, "P")) {
-        RepeatStop(id)
-        return
+; Hold-to-repeat. The press hotkey runs this loop for exactly as long as the trigger's
+; physical key is held, pressing `keys` once per `interval` ms. Because it occupies the
+; hotkey's single thread for the whole hold (#MaxThreadsPerHotkey is 1 by default), the
+; trigger's OS key-repeat — and any key events this loop itself injects — cannot re-enter
+; it, so there is only ever one loop and the rate is the interval, not the OS repeat rate.
+; Each press holds the key down for exactly `holdMs` (precise busy-wait), tunable so a game
+; that reads the key per frame can be made to register exactly one press per interval.
+RepeatHold(keys, interval, triggerKey, requireGameActive, holdMs) {
+    global enabled
+    while GetKeyState(triggerKey, "P") {
+        ; Pause (don't fire) while hotkeys are toggled off or the game window is not focused
+        ; — so the repeat can't leak into other apps — but keep looping until release.
+        if (!enabled || (requireGameActive && !WinActive("ahk_group GAME"))) {
+            Sleep 15
+            continue
+        }
+        start := A_TickCount
+        DoPress(keys, holdMs, true)
+        elapsed := A_TickCount - start
+        if (elapsed < interval)
+            Sleep interval - elapsed
     }
-    ; The timer is not gated by #HotIf, so re-check the game window here: pause (don't
-    ; fire) while it is not focused so the repeat can't leak into other apps, but keep the
-    ; timer alive so it resumes if the user tabs back while still holding the key.
-    if (requireGameActive && !WinActive("ahk_group GAME"))
-        return
-    DoPress(keys)
-}
-
-RepeatStop(id) {
-    global repeatTimers
-    if !repeatTimers.Has(id)
-        return
-    SetTimer repeatTimers[id], 0
-    repeatTimers.Delete(id)
 }"###;
