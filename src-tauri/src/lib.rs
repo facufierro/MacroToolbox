@@ -1296,66 +1296,23 @@ fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Register or unregister the app to launch at Windows login, pointing at the current
-/// executable so it stays valid across updates and moves. Uses two mechanisms so at least
-/// one takes effect: a Startup-folder shortcut (which the shell launches most reliably at
-/// login) and the HKCU `Run` registry key as a fallback. Both point at the same exe;
-/// single-instance keeps a double launch from opening two copies.
-#[cfg(target_os = "windows")]
-fn sync_autostart(_app: &tauri::AppHandle, enabled: bool) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    const VALUE_NAME: &str = "Hotkey Manager";
+/// Register or unregister the app to launch at login via the official autostart plugin
+/// (the HKCU `Run` key on Windows). Re-applied on every launch so the entry persists across
+/// updates/moves and survives the known Windows quirk of the entry being dropped after a boot.
+fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let _ = if enabled { manager.enable() } else { manager.disable() };
 
-    let exe = std::env::current_exe().ok();
-
-    // HKCU Run key (fallback mechanism).
-    {
-        let mut cmd = std::process::Command::new("reg");
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        match (enabled, exe.as_ref()) {
-            (true, Some(exe)) => {
-                cmd.args([
-                    "add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ",
-                    "/d", &format!("\"{}\"", exe.display()), "/f",
-                ]);
-            }
-            _ => {
-                cmd.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
-            }
-        }
-        let _ = cmd.status();
-    }
-
-    // Startup-folder shortcut (primary mechanism). Created via WScript.Shell so it is a
-    // real .lnk the shell honors; regenerated each launch so it tracks the current exe.
+    // Remove the Startup-folder shortcut a previous version created by hand — the plugin's
+    // Run-key entry is the single source of truth now.
+    #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
-        let lnk = format!(r"{appdata}\Microsoft\Windows\Start Menu\Programs\Startup\Hotkey Manager.lnk");
-        match (enabled, exe.as_ref()) {
-            (true, Some(exe)) => {
-                let esc = |s: String| s.replace('\'', "''");
-                let work_dir = exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                let ps = format!(
-                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.WorkingDirectory='{}';$s.Save()",
-                    esc(lnk),
-                    esc(exe.display().to_string()),
-                    esc(work_dir),
-                );
-                let _ = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn();
-            }
-            _ => {
-                let _ = std::fs::remove_file(&lnk);
-            }
-        }
+        let _ = std::fs::remove_file(format!(
+            r"{appdata}\Microsoft\Windows\Start Menu\Programs\Startup\Hotkey Manager.lnk"
+        ));
     }
 }
-
-#[cfg(not(target_os = "windows"))]
-fn sync_autostart(_app: &tauri::AppHandle, _enabled: bool) {}
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settings) -> Result<Database, String> {
@@ -1509,6 +1466,10 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
@@ -1591,7 +1552,25 @@ pub fn run() {
                 }
             }
 
-            build_tray(app)?;
+            // The tray/taskbar is often not ready yet when the app is auto-launched at
+            // Windows login, which makes tray creation fail. Retry instead of letting the
+            // error bubble up and exit the app — with open-to-tray the tray is the only UI,
+            // so a hard failure here looks exactly like "the app didn't start".
+            {
+                let mut built = false;
+                for attempt in 0..10u32 {
+                    match build_tray(app) {
+                        Ok(()) => { built = true; break; }
+                        Err(e) => {
+                            eprintln!("[tray] build attempt {} failed: {e}", attempt + 1);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                    }
+                }
+                if !built {
+                    eprintln!("[tray] could not create the tray icon; continuing without it");
+                }
+            }
             // Re-apply the login registration on every launch so the registered path
             // tracks the current executable across updates and moves.
             sync_autostart(app.handle(), startup_settings.launch_on_startup);
@@ -1623,7 +1602,9 @@ pub fn run() {
                 overlay_left, overlay_top, overlay_width, overlay_height,
             );
 
-            let overlay = tauri::WebviewWindowBuilder::new(
+            // Non-fatal: a transparent webview window can fail to build in the early login
+            // environment; the app (tray + hotkeys) must still start without the overlay.
+            match tauri::WebviewWindowBuilder::new(
                 app,
                 "overlay",
                 tauri::WebviewUrl::App("index.html?window=overlay".into()),
@@ -1636,9 +1617,10 @@ pub fn run() {
             .position(overlay_left as f64, overlay_top as f64)
             .visible(false)
             .build()
-            .expect("failed to create overlay window");
-
-            let _ = overlay.set_ignore_cursor_events(true);
+            {
+                Ok(overlay) => { let _ = overlay.set_ignore_cursor_events(true); }
+                Err(e) => eprintln!("[overlay] failed to create overlay window: {e}"),
+            }
 
             // Pre-populate overlay items from any already-active profile
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
