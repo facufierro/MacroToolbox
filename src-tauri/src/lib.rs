@@ -203,13 +203,17 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
     }
     config::save_db(&state.db_path, &db)?;
 
-    // If this profile is currently active, regenerate and reload the script. The global
-    // scope ("*") runs in its own always-on process, separate from the per-app scope.
+    // Regenerate/reload the script when the edit affects what's running. The global scope
+    // ("*") always runs its selected/first profile in its own process, so ANY edit to it
+    // must regenerate — it has no `active_profile` to match against.
     let game = db.games.iter().find(|g| g.id == game_id).unwrap();
-    if game.active_profile.as_ref() == Some(&profile_id) {
-        if is_global_game_exe(&game.exe) {
-            sync_global_scope(&state, &db);
-        } else if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
+    if is_global_game_exe(&game.exe) {
+        sync_global_scope(&state, &db);
+        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
+            send_overlay(&app, &game.profiles, p, !game.overlay_disabled);
+        }
+    } else if game.active_profile.as_ref() == Some(&profile_id) {
+        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
             let script = ahk::generate_script(
                 &game.exe,
                 !game.overlay_disabled,
@@ -222,8 +226,6 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
             if std::fs::write(&script_path, &script).is_ok() {
                 let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
             }
-        }
-        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
             send_overlay(&app, &game.profiles, p, !game.overlay_disabled);
         }
     }
