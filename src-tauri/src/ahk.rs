@@ -220,8 +220,11 @@ pub fn generate_script(
         if let (Some((repeat_keys, interval)), Some(up_key)) = (parse_pure_repeat(&hk.behavior), up_hotkey(&hk.trigger)) {
             let keys = escape_ahk_string(&repeat_keys);
             let poll_key = escape_ahk_string(&trigger_bare_key(&hk.trigger));
+            // Per-app scopes must keep the repeat confined to the game window; the timer
+            // isn't gated by #HotIf, so the tick re-checks WinActive itself.
+            let require_active = if global_game { "false" } else { "true" };
             hotkey_lines.push_str(&format!(
-                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatStart(\"{trigger}\", \"{keys}\", {interval}, \"{poll_key}\")\n}}\n{up_key}:: RepeatStop(\"{trigger}\")\n"
+                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatStart(\"{trigger}\", \"{keys}\", {interval}, \"{poll_key}\", {require_active})\n}}\n{up_key}:: RepeatStop(\"{trigger}\")\n"
             ));
             continue;
         }
@@ -833,21 +836,26 @@ HoldKeyList(keyStr) {
 ; suppressed while hotkeys are toggled off or the game window is inactive), each tick
 ; also polls the trigger's physical key and stops itself once the key is released, so a
 ; timer can never be stranded firing keystrokes forever.
-RepeatStart(id, keys, interval, triggerKey) {
+RepeatStart(id, keys, interval, triggerKey, requireGameActive) {
     global repeatTimers
     if repeatTimers.Has(id)
         return
-    fn := RepeatTick.Bind(id, keys, triggerKey)
+    fn := RepeatTick.Bind(id, keys, triggerKey, requireGameActive)
     repeatTimers[id] := fn
     DoPress(keys)
     SetTimer fn, interval
 }
 
-RepeatTick(id, keys, triggerKey) {
+RepeatTick(id, keys, triggerKey, requireGameActive) {
     if (triggerKey != "" && !GetKeyState(triggerKey, "P")) {
         RepeatStop(id)
         return
     }
+    ; The timer is not gated by #HotIf, so re-check the game window here: pause (don't
+    ; fire) while it is not focused so the repeat can't leak into other apps, but keep the
+    ; timer alive so it resumes if the user tabs back while still holding the key.
+    if (requireGameActive && !WinActive("ahk_group GAME"))
+        return
     DoPress(keys)
 }
 
