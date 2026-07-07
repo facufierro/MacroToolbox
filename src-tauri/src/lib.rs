@@ -1296,10 +1296,11 @@ fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Register or unregister the app in the Windows login list (the HKCU `Run` registry
-/// key), pointing at the current executable so the entry stays valid across updates and
-/// moves. Written directly with `reg` so the stored value is exactly the quoted path we
-/// control.
+/// Register or unregister the app to launch at Windows login, pointing at the current
+/// executable so it stays valid across updates and moves. Uses two mechanisms so at least
+/// one takes effect: a Startup-folder shortcut (which the shell launches most reliably at
+/// login) and the HKCU `Run` registry key as a fallback. Both point at the same exe;
+/// single-instance keeps a double launch from opening two copies.
 #[cfg(target_os = "windows")]
 fn sync_autostart(_app: &tauri::AppHandle, enabled: bool) {
     use std::os::windows::process::CommandExt;
@@ -1307,21 +1308,50 @@ fn sync_autostart(_app: &tauri::AppHandle, enabled: bool) {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     const VALUE_NAME: &str = "Hotkey Manager";
 
-    let mut cmd = std::process::Command::new("reg");
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    if enabled {
-        let exe = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(_) => return,
-        };
-        cmd.args([
-            "add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ",
-            "/d", &format!("\"{}\"", exe.display()), "/f",
-        ]);
-    } else {
-        cmd.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
+    let exe = std::env::current_exe().ok();
+
+    // HKCU Run key (fallback mechanism).
+    {
+        let mut cmd = std::process::Command::new("reg");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        match (enabled, exe.as_ref()) {
+            (true, Some(exe)) => {
+                cmd.args([
+                    "add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ",
+                    "/d", &format!("\"{}\"", exe.display()), "/f",
+                ]);
+            }
+            _ => {
+                cmd.args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"]);
+            }
+        }
+        let _ = cmd.status();
     }
-    let _ = cmd.status();
+
+    // Startup-folder shortcut (primary mechanism). Created via WScript.Shell so it is a
+    // real .lnk the shell honors; regenerated each launch so it tracks the current exe.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let lnk = format!(r"{appdata}\Microsoft\Windows\Start Menu\Programs\Startup\Hotkey Manager.lnk");
+        match (enabled, exe.as_ref()) {
+            (true, Some(exe)) => {
+                let esc = |s: String| s.replace('\'', "''");
+                let work_dir = exe.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                let ps = format!(
+                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.WorkingDirectory='{}';$s.Save()",
+                    esc(lnk),
+                    esc(exe.display().to_string()),
+                    esc(work_dir),
+                );
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+            }
+            _ => {
+                let _ = std::fs::remove_file(&lnk);
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
