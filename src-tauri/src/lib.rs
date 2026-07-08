@@ -1306,6 +1306,29 @@ fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
     let manager = app.autolaunch();
     let _ = if enabled { manager.enable() } else { manager.disable() };
 
+    // The plugin (auto-launch 0.5.0) writes the HKCU `Run` value as an *unquoted* path with a
+    // trailing space. When the install path contains a space (e.g. "…\Hotkey Manager\…"),
+    // Windows fails to parse it at logon (CreateProcess error 123) and the app silently never
+    // starts. Rewrite the value ourselves, properly quoted and untrimmed, so it launches.
+    #[cfg(target_os = "windows")]
+    if enabled {
+        if let Ok(exe) = std::env::current_exe() {
+            use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+            use winreg::RegKey;
+            let app_name = app
+                .config()
+                .product_name
+                .clone()
+                .unwrap_or_else(|| app.package_info().name.clone());
+            if let Ok(run) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                KEY_SET_VALUE,
+            ) {
+                let _ = run.set_value(&app_name, &format!("\"{}\"", exe.display()));
+            }
+        }
+    }
+
     // Remove the Startup-folder shortcut a previous version created by hand — the plugin's
     // Run-key entry is the single source of truth now.
     #[cfg(target_os = "windows")]
