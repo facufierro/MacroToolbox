@@ -1298,44 +1298,78 @@ fn get_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Register or unregister the app to launch at login via the official autostart plugin
-/// (the HKCU `Run` key on Windows). Re-applied on every launch so the entry persists across
-/// updates/moves and survives the known Windows quirk of the entry being dropped after a boot.
+/// Register or unregister the app to launch at login. Re-applied on every launch so the
+/// registration tracks the current executable across updates and moves.
+///
+/// On Windows the app runs elevated (`requireAdministrator`, see build.rs). Windows refuses to
+/// auto-launch an elevated app from the HKCU `Run` key at logon — it can't show a UAC prompt
+/// during logon, so the entry is silently skipped and the app never starts. The autostart
+/// plugin only knows the Run key, so on Windows we register a Scheduled Task with highest
+/// privileges triggered at logon instead — the only supported way to start an admin app at
+/// logon without a prompt. (Creating the task itself needs elevation, which we already have.)
+/// Other platforms use the plugin as normal.
 fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    let _ = if enabled { manager.enable() } else { manager.disable() };
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let manager = app.autolaunch();
+        let _ = if enabled { manager.enable() } else { manager.disable() };
+    }
 
-    // The plugin (auto-launch 0.5.0) writes the HKCU `Run` value as an *unquoted* path with a
-    // trailing space. When the install path contains a space (e.g. "…\Hotkey Manager\…"),
-    // Windows fails to parse it at logon (CreateProcess error 123) and the app silently never
-    // starts. Rewrite the value ourselves, properly quoted and untrimmed, so it launches.
     #[cfg(target_os = "windows")]
-    if enabled {
-        if let Ok(exe) = std::env::current_exe() {
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const TASK_NAME: &str = "Hotkey Manager";
+
+        // Drop the dead Run-key entry and Startup-folder shortcut earlier versions created:
+        // neither can launch an elevated app at logon, yet they show as "enabled" in Task
+        // Manager's Startup tab while never actually starting.
+        let app_name = app
+            .config()
+            .product_name
+            .clone()
+            .unwrap_or_else(|| app.package_info().name.clone());
+        {
             use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
             use winreg::RegKey;
-            let app_name = app
-                .config()
-                .product_name
-                .clone()
-                .unwrap_or_else(|| app.package_info().name.clone());
             if let Ok(run) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
                 r"Software\Microsoft\Windows\CurrentVersion\Run",
                 KEY_SET_VALUE,
             ) {
-                let _ = run.set_value(&app_name, &format!("\"{}\"", exe.display()));
+                let _ = run.delete_value(&app_name);
             }
         }
-    }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let _ = std::fs::remove_file(format!(
+                r"{appdata}\Microsoft\Windows\Start Menu\Programs\Startup\Hotkey Manager.lnk"
+            ));
+        }
 
-    // Remove the Startup-folder shortcut a previous version created by hand — the plugin's
-    // Run-key entry is the single source of truth now.
-    #[cfg(target_os = "windows")]
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let _ = std::fs::remove_file(format!(
-            r"{appdata}\Microsoft\Windows\Start Menu\Programs\Startup\Hotkey Manager.lnk"
-        ));
+        if enabled {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new("schtasks")
+                    .args([
+                        "/Create",
+                        "/F",
+                        "/TN",
+                        TASK_NAME,
+                        "/TR",
+                        &format!("\"{}\"", exe.display()),
+                        "/SC",
+                        "ONLOGON",
+                        "/RL",
+                        "HIGHEST",
+                    ])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+        } else {
+            let _ = std::process::Command::new("schtasks")
+                .args(["/Delete", "/F", "/TN", TASK_NAME])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
     }
 }
 
