@@ -1407,9 +1407,12 @@ async fn download_and_install_update(app: tauri::AppHandle, url: String) -> Resu
     std::fs::write(&installer_path, &bytes)
         .map_err(|e| format!("Could not save the installer: {e}"))?;
 
-    // Launch the installer as an independent process (it keeps running after we exit),
-    // then quit so the running executable is unlocked and can be replaced.
+    // Launch the installer in passive mode so an update just applies instead of prompting:
+    // /P passive (progress bar, no delete-data prompt or shortcut checkbox), /R relaunch the
+    // app when done, /NS don't (re)create shortcuts. It keeps running after we exit, so we
+    // then quit to unlock the running executable and let it be replaced.
     std::process::Command::new(&installer_path)
+        .args(["/P", "/R", "/NS"])
         .spawn()
         .map_err(|e| format!("Could not launch the installer: {e}"))?;
 
