@@ -35,13 +35,12 @@ struct WindowClientBounds {
 pub struct AppState {
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
-    pub ahk_manager: Mutex<ahk::AhkManager>,
+    /// The single always-on AutoHotkey process holding every armed profile's hotkeys, each
+    /// gated to its own app via #HotIf. Regenerated + relaunched whenever profiles change.
+    pub hotkeys_ahk: Mutex<ahk::AhkManager>,
     /// Persistent AutoHotkey process that remaps the Copilot key to Right Ctrl, always on
     /// while the app runs (independent of profiles).
     pub copilot_ahk: Mutex<ahk::AhkManager>,
-    /// Persistent AutoHotkey process for the global scope ("*"). Runs independently of the
-    /// per-app scope in `ahk_manager`, so the global scope stays active alongside any game.
-    pub global_ahk: Mutex<ahk::AhkManager>,
     pub overlay_config: Mutex<config::OverlayConfig>,
     #[cfg(target_os = "windows")]
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
@@ -135,104 +134,42 @@ fn debug_overlay_log(message: String) {
 }
 
 #[tauri::command]
-fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Result<Database, String> {
+fn upsert_game(state: State<AppState>, game: Game) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
-    let game_id = game.id.clone();
     match db.games.iter_mut().find(|g| g.id == game.id) {
         Some(existing) => *existing = game,
         None => db.games.push(game),
     }
-
-    // The global scope is always on and runs in its own process — never in `ahk_manager`.
-    if db.games.iter().any(|g| g.id == game_id && is_global_game_exe(&g.exe)) {
-        config::save_db(&state.db_path, &db)?;
-        sync_global_scope(&state, &db);
-        return Ok(db);
-    }
-
-    let active_game = db.games.iter().find(|g| g.id == game_id && g.active_profile.is_some());
-    if let Some(game) = active_game {
-        if let Some(profile_id) = game.active_profile.as_ref() {
-            if let Some(profile) = game.profiles.iter().find(|p| &p.id == profile_id) {
-                let script = ahk::generate_script(
-                    &game.exe,
-                    !game.overlay_disabled,
-                    game.toggle_hotkeys_key.as_deref(),
-                    game.toggle_overlay_key.as_deref(),
-                    &game.profiles,
-                    profile,
-                    &game.scripts,
-                );
-                let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
-                if std::fs::write(&script_path, &script).is_ok() {
-                    let ahk_exe = db.settings.ahk_exe.clone();
-                    let _ = state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path);
-                }
-                if game.overlay_disabled {
-                    clear_overlay(&app);
-                    set_overlay_visible(&app, false);
-                } else {
-                    send_overlay(&app, &game.profiles, profile, true);
-                }
-            }
-        }
-    }
     config::save_db(&state.db_path, &db)?;
+    sync_hotkeys(&state, &db);
     Ok(db)
 }
 
 #[tauri::command]
 fn delete_game(state: State<AppState>, id: String) -> Result<Database, String> {
-    let mut db = config::load_db(&state.db_path)?;
-    // The global scope ("*") is a permanent fixture and cannot be deleted.
-    if db.games.iter().any(|g| g.id == id && g.exe.trim() == "*") {
-        return Err("The global scope cannot be deleted.".to_string());
+    // The Global folder is a permanent fixture and can never be deleted.
+    if id == config::GLOBAL_FOLDER_ID {
+        return Err("The Global folder can't be deleted.".to_string());
     }
+    let mut db = config::load_db(&state.db_path)?;
     db.games.retain(|g| g.id != id);
     config::save_db(&state.db_path, &db)?;
+    sync_hotkeys(&state, &db);
     Ok(db)
 }
 
 #[tauri::command]
-fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
+        .ok_or_else(|| "Folder not found".to_string())?;
     match game.profiles.iter_mut().find(|p| p.id == profile_id) {
         Some(existing) => *existing = profile,
         None => game.profiles.push(profile),
     }
     config::save_db(&state.db_path, &db)?;
-
-    // Regenerate/reload the script when the edit affects what's running. The global scope
-    // ("*") always runs its selected/first profile in its own process, so ANY edit to it
-    // must regenerate — it has no `active_profile` to match against.
-    let game = db.games.iter().find(|g| g.id == game_id).unwrap();
-    if is_global_game_exe(&game.exe) {
-        sync_global_scope(&state, &db);
-        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
-            send_overlay(&app, &game.profiles, p, !game.overlay_disabled);
-        }
-    } else if game.active_profile.as_ref() == Some(&profile_id) {
-        if let Some(p) = game.profiles.iter().find(|p| p.id == profile_id) {
-            let script = ahk::generate_script(
-                &game.exe,
-                !game.overlay_disabled,
-                game.toggle_hotkeys_key.as_deref(),
-                game.toggle_overlay_key.as_deref(),
-                &game.profiles,
-                p,
-                &game.scripts,
-            );
-            let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
-            if std::fs::write(&script_path, &script).is_ok() {
-                let _ = state.ahk_manager.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
-            }
-            send_overlay(&app, &game.profiles, p, !game.overlay_disabled);
-        }
-    }
-
+    sync_hotkeys(&state, &db);
     Ok(db)
 }
 
@@ -240,15 +177,36 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
 fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
-        .ok_or_else(|| "Game not found".to_string())?;
-    let is_global = is_global_game_exe(&game.exe);
+        .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
-    if game.active_profile.as_deref() == Some(&profile_id) {
-        game.active_profile = game.profiles.first().map(|p| p.id.clone());
+    config::save_db(&state.db_path, &db)?;
+    sync_hotkeys(&state, &db);
+    Ok(db)
+}
+
+/// Arm or disarm a profile (the replacement for the old activate/deactivate). Arming makes its
+/// hotkeys/scripts live automatically whenever its app is focused; multiple profiles can be
+/// armed at once.
+#[tauri::command]
+fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: String, armed: bool) -> Result<Database, String> {
+    let mut db = config::load_db(&state.db_path)?;
+    let mut found = false;
+    for game in &mut db.games {
+        if let Some(profile) = game.profiles.iter_mut().find(|p| p.id == profile_id) {
+            profile.armed = armed;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return Err("Profile not found".to_string());
     }
     config::save_db(&state.db_path, &db)?;
-    if is_global {
-        sync_global_scope(&state, &db);
+    sync_hotkeys(&state, &db);
+    if !armed {
+        // If the just-disarmed profile owns the visible overlay, drop it.
+        clear_overlay(&app);
+        set_overlay_visible(&app, false);
     }
     Ok(db)
 }
@@ -338,22 +296,28 @@ fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWin
 }
 
 fn restore_main_window(window: &tauri::WebviewWindow) {
+    // Preserve the maximized state across the restore dance below: SW_RESTORE and unminimize
+    // both collapse a maximized window back to its normal size, so re-apply maximize after.
+    // Default to true so a freshly-created (maximized) window still comes up maximized.
+    let was_maximized = window.is_maximized().unwrap_or(true);
     let _ = window.set_skip_taskbar(false);
     let _ = window.show();
 
     #[cfg(target_os = "windows")]
     if let Ok(hwnd) = window.hwnd() {
         unsafe {
-            use winapi::um::winuser::{SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW};
+            use winapi::um::winuser::{SetForegroundWindow, ShowWindow, SW_SHOW};
 
             let hwnd = hwnd.0 as winapi::shared::windef::HWND;
             ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
         }
     }
 
     let _ = window.unminimize();
+    if was_maximized {
+        let _ = window.maximize();
+    }
     let _ = window.set_focus();
 }
 
@@ -395,9 +359,8 @@ fn hide_main_window(app: &tauri::AppHandle) {
 
 fn quit_app(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    state.ahk_manager.lock().unwrap().kill();
+    state.hotkeys_ahk.lock().unwrap().kill();
     state.copilot_ahk.lock().unwrap().kill();
-    state.global_ahk.lock().unwrap().kill();
     app.exit(0);
 }
 
@@ -448,49 +411,70 @@ fn is_global_game_exe(exe: &str) -> bool {
     exe.trim() == GLOBAL_GAME_EXE
 }
 
-/// The active per-app scope. Never the global "*" scope, which runs in its own always-on
-/// process — only one per-app scope is managed by `ahk_manager` at a time.
-fn active_app_scope<'a>(db: &'a Database) -> Option<&'a Game> {
-    db.games.iter().find(|game| game.active_profile.is_some() && !is_global_game_exe(&game.exe))
-}
-
-/// The active scope for overlay/viewport purposes: a focused per-app scope if there is one,
-/// otherwise the global scope when it is the only thing active.
-fn active_game<'a>(db: &'a Database) -> Option<&'a Game> {
-    active_app_scope(db).or_else(|| db.games.iter().find(|game| game.active_profile.is_some()))
-}
-
-/// (Re)launch the global scope ("*") in its own always-on process. The global scope has no
-/// activate/deactivate — while the app runs it is always live, running its selected profile
-/// (or the first one). Independent of the per-app scope in `ahk_manager`.
-fn sync_global_scope(state: &AppState, db: &Database) {
-    let Some(game) = db.games.iter().find(|g| is_global_game_exe(&g.exe)) else {
-        state.global_ahk.lock().unwrap().kill();
-        return;
-    };
-    let profile = game.active_profile.as_ref()
-        .and_then(|pid| game.profiles.iter().find(|p| &p.id == pid))
-        .or_else(|| game.profiles.first());
-    let Some(profile) = profile else {
-        state.global_ahk.lock().unwrap().kill();
-        return;
-    };
-
-    // The global scope's process never drives the overlay: the overlay follows the focused
-    // per-app scope, and two scripts fighting over show/hide would make it flicker.
-    let script = ahk::generate_script(
-        &game.exe,
-        false,
-        game.toggle_hotkeys_key.as_deref(),
-        game.toggle_overlay_key.as_deref(),
-        &game.profiles,
-        profile,
-        &game.scripts,
-    );
-    let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
-    if std::fs::write(&script_path, &script).is_ok() {
-        let _ = state.global_ahk.lock().unwrap().launch(&db.settings.ahk_exe, &script_path);
+/// Regenerate the combined AHK script from every armed profile across all folders and
+/// (re)launch the single always-on hotkeys process. Called after any profile/arming change.
+/// If nothing is armed, the process is stopped. Note: an edit briefly drops all hotkeys while
+/// the process relaunches — fine because edits happen from the manager UI, not in a game.
+fn sync_hotkeys(state: &AppState, db: &Database) {
+    let mut armed: Vec<ahk::ArmedProfile> = Vec::new();
+    for game in &db.games {
+        for profile in &game.profiles {
+            if profile.armed {
+                armed.push(ahk::ArmedProfile { siblings: &game.profiles, profile });
+            }
+        }
     }
+
+    let mut mgr = state.hotkeys_ahk.lock().unwrap();
+    if armed.is_empty() {
+        mgr.kill();
+        return;
+    }
+    let script = ahk::generate_combined_script(&armed);
+    let script_path = state.scripts_path.join("hotkeys.ahk");
+    if std::fs::write(&script_path, &script).is_ok() {
+        let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
+    }
+}
+
+/// Find the profile with the given id and the sibling slice it lives in (for overlay pushes).
+fn find_profile<'a>(db: &'a Database, profile_id: &str) -> Option<(&'a [Profile], &'a Profile)> {
+    db.games.iter().find_map(|g| {
+        g.profiles.iter().find(|p| p.id == profile_id).map(|p| (g.profiles.as_slice(), p))
+    })
+}
+
+/// Push the overlay config for a just-focused profile (by id), or clear the overlay when no
+/// armed overlay profile is focused. Driven by the AHK `/focus` route.
+fn push_overlay_for_focus(handle: &tauri::AppHandle, profile_id: Option<String>) {
+    let state = handle.state::<AppState>();
+    let db = match config::load_db(&state.db_path) {
+        Ok(db) => db,
+        Err(_) => return,
+    };
+    if let Some(id) = profile_id {
+        if let Some((siblings, profile)) = find_profile(&db, &id) {
+            if profile.kind == "overlay" && !profile.overlay_disabled {
+                send_overlay(handle, siblings, profile, true);
+                emit_overlay_event(handle, "profile_activated", None, None);
+                return;
+            }
+        }
+    }
+    emit_overlay_event(handle, "profile_deactivated", None, None);
+    clear_overlay(handle);
+    set_overlay_visible(handle, false);
+}
+
+/// The foreground window's executable name (lowercased), used to resolve which armed profile
+/// owns the overlay/viewport right now.
+#[cfg(target_os = "windows")]
+fn foreground_exe() -> Option<String> {
+    let hwnd = unsafe { winapi::um::winuser::GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+    get_window_process_name(hwnd)
 }
 
 #[cfg(target_os = "windows")]
@@ -513,41 +497,47 @@ fn get_global_viewport() -> WindowClientBounds {
     WindowClientBounds { left, top, width, height }
 }
 
+/// The exe whose window the overlay currently belongs to: the foreground app if an armed,
+/// overlay-enabled profile targets it, else "*" if an armed global overlay profile exists.
+#[cfg(target_os = "windows")]
+fn overlay_target_exe(db: &Database) -> Option<String> {
+    if let Some(fg) = foreground_exe() {
+        let matches = db.games.iter().flat_map(|g| &g.profiles)
+            .any(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled && p.exe.eq_ignore_ascii_case(&fg));
+        if matches {
+            return Some(fg);
+        }
+    }
+    let has_global = db.games.iter().flat_map(|g| &g.profiles)
+        .any(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled && is_global_game_exe(&p.exe));
+    if has_global {
+        return Some(GLOBAL_GAME_EXE.to_string());
+    }
+    None
+}
+
 #[tauri::command]
 fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
     #[cfg(target_os = "windows")]
     {
         let db = config::load_db(&state.db_path)?;
-        let Some(game) = active_game(&db) else {
-            return Ok((0, 0, 0, 0));
+        let target = match overlay_target_exe(&db) {
+            Some(exe) => exe,
+            None => return Ok((0, 0, 0, 0)),
         };
-        if is_global_game_exe(&game.exe) {
+        if is_global_game_exe(&target) {
             return Ok(get_global_overlay_origin());
         }
-        let hwnd = find_window_by_exe(&game.exe)
-            .ok_or_else(|| format!("Game window not found for '{}'", game.exe))?;
+        let hwnd = find_window_by_exe(&target)
+            .ok_or_else(|| format!("Window not found for '{target}'"))?;
         let scale = get_window_scale_factor(hwnd);
-        let bounds = get_game_client_bounds(&game.exe)?;
+        let bounds = get_game_client_bounds(&target)?;
         let (virtual_left, virtual_top, _, _) = get_virtual_screen_bounds();
         let origin = (
             physical_to_logical(bounds.left - virtual_left, scale),
             physical_to_logical(bounds.top - virtual_top, scale),
             physical_to_logical(bounds.width, scale),
             physical_to_logical(bounds.height, scale),
-        );
-        debug_log_once(
-            "overlay_origin",
-            format!(
-                "[debug][overlay_origin] exe={} screen_left={} screen_top={} width={} height={} virtual_left={} virtual_top={} scale={:.3}",
-                game.exe,
-                origin.0,
-                origin.1,
-                origin.2,
-                origin.3,
-                virtual_left,
-                virtual_top,
-                scale,
-            ),
         );
         Ok(origin)
     }
@@ -563,20 +553,12 @@ fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), St
 fn get_active_game_viewport(handle: &tauri::AppHandle) -> Result<WindowClientBounds, String> {
     let state = handle.state::<AppState>();
     let db = config::load_db(&state.db_path)?;
-    let game = active_game(&db)
-        .ok_or_else(|| "No active game".to_string())?;
-    if is_global_game_exe(&game.exe) {
+    let target = overlay_target_exe(&db)
+        .ok_or_else(|| "No overlay target".to_string())?;
+    if is_global_game_exe(&target) {
         return Ok(get_global_viewport());
     }
-    let bounds = get_game_client_bounds(&game.exe)?;
-    debug_log_once(
-        "active_viewport",
-        format!(
-            "[debug][viewport] exe={} left={} top={} width={} height={}",
-            game.exe, bounds.left, bounds.top, bounds.width, bounds.height,
-        ),
-    );
-    Ok(bounds)
+    get_game_client_bounds(&target)
 }
 
 fn decode_query_value(value: &str) -> String {
@@ -651,6 +633,11 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             run_script_by_id(&handle, &id);
                         }
                         ("200 OK", Vec::new())
+                    } else if route == "/focus" {
+                        // The AHK script reports which armed profile's app just became focused
+                        // (or none). Push that profile's overlay config, or clear it.
+                        push_overlay_for_focus(&handle, get_query_param(action, "id").filter(|v| !v.is_empty()));
+                        ("200 OK", Vec::new())
                     } else {
                         match route {
                             "/show" => {
@@ -703,88 +690,8 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
-    let mut db = config::load_db(&state.db_path)?;
-    let ahk_exe = db.settings.ahk_exe.clone();
-
-    let activating_global = db.games.iter().any(|g| g.id == game_id && is_global_game_exe(&g.exe));
-
-    // Only one per-app scope runs at a time; the always-on global scope is left alone.
-    for game in &mut db.games {
-        if game.id != game_id && !is_global_game_exe(&game.exe) {
-            game.active_profile = None;
-        }
-    }
-
-    {
-        let game = db.games.iter_mut().find(|g| g.id == game_id)
-            .ok_or_else(|| "Game not found".to_string())?;
-        if !game.profiles.iter().any(|p| p.id == profile_id) {
-            return Err("Profile not found".to_string());
-        }
-        game.active_profile = Some(profile_id.clone());
-    }
-
-    if activating_global {
-        sync_global_scope(&state, &db);
-    } else {
-        let game = db.games.iter().find(|g| g.id == game_id).unwrap();
-        let profile = game.profiles.iter().find(|p| p.id == profile_id).unwrap();
-        let script = ahk::generate_script(
-            &game.exe,
-            !game.overlay_disabled,
-            game.toggle_hotkeys_key.as_deref(),
-            game.toggle_overlay_key.as_deref(),
-            &game.profiles,
-            profile,
-            &game.scripts,
-        );
-        let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
-        std::fs::write(&script_path, &script).map_err(|e| e.to_string())?;
-        state.ahk_manager.lock().unwrap().launch(&ahk_exe, &script_path)?;
-    }
-    config::save_db(&state.db_path, &db)?;
-
-    let game = db.games.iter().find(|g| g.id == game_id).unwrap();
-    if let Some(profile) = game.profiles.iter().find(|p| p.id == profile_id) {
-        send_overlay(&app, &game.profiles, profile, !game.overlay_disabled);
-        emit_overlay_event(&app, "profile_activated", None, None);
-    }
-
-    Ok(db)
-}
-
-#[tauri::command]
-fn deactivate_ahk(app: tauri::AppHandle, state: State<AppState>, game_id: String) -> Result<Database, String> {
-    let mut db = config::load_db(&state.db_path)?;
-    let deactivating_global = db.games.iter().any(|g| g.id == game_id && is_global_game_exe(&g.exe));
-
-    // Deactivating a per-app scope must not stop the global scope, and vice versa.
-    if deactivating_global {
-        state.global_ahk.lock().unwrap().kill();
-        for game in &mut db.games {
-            if is_global_game_exe(&game.exe) {
-                game.active_profile = None;
-            }
-        }
-    } else {
-        state.ahk_manager.lock().unwrap().kill();
-        for game in &mut db.games {
-            if !is_global_game_exe(&game.exe) {
-                game.active_profile = None;
-            }
-        }
-    }
-    config::save_db(&state.db_path, &db)?;
-    emit_overlay_event(&app, "profile_deactivated", None, None);
-    clear_overlay(&app);
-    set_overlay_visible(&app, false);
-    Ok(db)
-}
-
-#[tauri::command]
 fn get_ahk_status(state: State<AppState>) -> bool {
-    state.ahk_manager.lock().unwrap().is_running()
+    state.hotkeys_ahk.lock().unwrap().is_running()
 }
 
 #[cfg(target_os = "windows")]
@@ -1473,7 +1380,10 @@ fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
         Ok(db) => db,
         Err(_) => return,
     };
-    let script = db.games.iter().flat_map(|g| &g.scripts).find(|s| s.id == id);
+    let script = db.games.iter()
+        .flat_map(|g| &g.profiles)
+        .flat_map(|p| &p.scripts)
+        .find(|s| s.id == id);
     if let Some(script) = script {
         if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
             eprintln!("[scripts] {e}");
@@ -1492,16 +1402,15 @@ fn run_script_now(state: State<AppState>, script: Script) -> Result<(), String> 
 fn start_watcher(handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last_tick = std::time::SystemTime::now();
-        // Per-scope "was the app running last tick" state, so launch-triggered scripts fire
-        // once on the not-running -> running edge. A scope already running when the app starts
-        // is seeded as running on its first observation, so it doesn't fire retroactively.
+        // Per-armed-profile "was the app running last tick", so launch-triggered scripts fire
+        // once on the not-running -> running edge. A profile whose app is already running at
+        // first observation is seeded, so it doesn't fire retroactively.
         let mut launch_running: HashMap<String, bool> = HashMap::new();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
 
-            // A wall-clock jump across a 3s sleep means the machine was suspended.
-            // The AHK process survives suspend but Windows may have dropped its
-            // keyboard hook, so kill it and let the logic below relaunch it fresh.
+            // A wall-clock jump across a 3s sleep means the machine was suspended. Windows may
+            // have dropped the AHK hooks, so relaunch the hotkeys script fresh below.
             let now = std::time::SystemTime::now();
             let resumed = now
                 .duration_since(last_tick)
@@ -1516,62 +1425,39 @@ fn start_watcher(handle: tauri::AppHandle) {
                 Err(_) => continue,
             };
 
-            // Launch-triggered scripts: fire when a scope's app transitions to running.
+            // Launch-triggered scripts: fire when an armed profile's app transitions to running.
             for game in &db.games {
-                let has_launch = game.scripts.iter().any(|s| s.enabled && s.trigger == "launch");
-                if !has_launch {
-                    launch_running.remove(&game.id);
-                    continue;
-                }
-                let now_running = is_process_running(&game.exe);
-                let was_running = launch_running.insert(game.id.clone(), now_running);
-                if was_running == Some(false) && now_running {
-                    for script in game.scripts.iter().filter(|s| s.enabled && s.trigger == "launch") {
-                        if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
-                            eprintln!("[scripts] {e}");
-                        }
+                for profile in &game.profiles {
+                    let has_launch = profile.armed
+                        && profile.scripts.iter().any(|s| s.enabled && s.trigger == "launch");
+                    if !has_launch {
+                        launch_running.remove(&profile.id);
+                        continue;
                     }
-                }
-            }
-
-            let active = active_app_scope(&db);
-            let mut mgr = state.ahk_manager.lock().unwrap();
-            if resumed {
-                mgr.kill();
-            }
-
-            match active {
-                None => { mgr.kill(); }
-                Some(game) => {
-                    let profile_id = game.active_profile.as_ref().unwrap();
-                    let game_open   = is_process_running(&game.exe);
-                    let script_live = mgr.is_running();
-
-                    if game_open && !script_live {
-                        if let Some(profile) = game.profiles.iter().find(|p| p.id == *profile_id) {
-                            let script      = ahk::generate_script(
-                                &game.exe,
-                                !game.overlay_disabled,
-                                game.toggle_hotkeys_key.as_deref(),
-                                game.toggle_overlay_key.as_deref(),
-                                &game.profiles,
-                                profile,
-                                &game.scripts,
-                            );
-                            let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
-                            if std::fs::write(&script_path, &script).is_ok() {
-                                let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
+                    let now_running = is_process_running(&profile.exe);
+                    let was_running = launch_running.insert(profile.id.clone(), now_running);
+                    if was_running == Some(false) && now_running {
+                        for script in profile.scripts.iter().filter(|s| s.enabled && s.trigger == "launch") {
+                            if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
+                                eprintln!("[scripts] {e}");
                             }
-                            send_overlay(&handle, &game.profiles, profile, !game.overlay_disabled);
-                            emit_overlay_event(&handle, "profile_activated", None, None);
                         }
-                    } else if !game_open && script_live {
-                        mgr.kill();
-                        emit_overlay_event(&handle, "profile_deactivated", None, None);
-                        clear_overlay(&handle);
-                        set_overlay_visible(&handle, false);
                     }
                 }
+            }
+
+            // Keep the single always-on hotkeys script alive: relaunch after a suspend and if it
+            // died while any profile is armed; stop it when nothing is armed. #HotIf does all the
+            // focus gating, so there's no per-app launch/kill here anymore.
+            let any_armed = db.games.iter().flat_map(|g| &g.profiles).any(|p| p.armed);
+            if resumed {
+                state.hotkeys_ahk.lock().unwrap().kill();
+            }
+            let running = state.hotkeys_ahk.lock().unwrap().is_running();
+            if any_armed && !running {
+                sync_hotkeys(&state, &db);
+            } else if !any_armed {
+                state.hotkeys_ahk.lock().unwrap().kill();
             }
         }
     });
@@ -1613,9 +1499,8 @@ pub fn run() {
                         .unwrap_or(false);
 
                     if !close_to_tray {
-                        state.ahk_manager.lock().unwrap().kill();
+                        state.hotkeys_ahk.lock().unwrap().kill();
                         state.copilot_ahk.lock().unwrap().kill();
-                        state.global_ahk.lock().unwrap().kill();
                     }
                 }
                 _ => {}
@@ -1641,9 +1526,8 @@ pub fn run() {
             app.manage(AppState {
                 db_path: db_path.clone(),
                 scripts_path: scripts_dir,
-                ahk_manager: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
-                copilot_ahk: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
-                global_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
+                hotkeys_ahk: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
+                copilot_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
@@ -1662,12 +1546,12 @@ pub fn run() {
                 }
             }
 
-            // Launch the global scope ("*") in its own process so its hotkeys work at
-            // startup and stay active regardless of which per-app scope is running.
+            // Launch the combined hotkeys script for every armed profile so hotkeys work at
+            // startup, each gated to its own app.
             {
                 let state = app.state::<AppState>();
                 if let Ok(db) = config::load_db(&state.db_path) {
-                    sync_global_scope(&state, &db);
+                    sync_hotkeys(&state, &db);
                 }
             }
 
@@ -1697,6 +1581,9 @@ pub fn run() {
                 hide_main_window(app.handle());
             } else {
                 show_main_window(app.handle());
+                if let Some(window) = main_window(app.handle()) {
+                    let _ = window.maximize();
+                }
             }
 
             #[cfg(target_os = "windows")]
@@ -1741,11 +1628,12 @@ pub fn run() {
                 Err(e) => eprintln!("[overlay] failed to create overlay window: {e}"),
             }
 
-            // Pre-populate overlay items from any already-active profile
+            // Pre-populate overlay items from the first armed overlay profile; the AHK /focus
+            // path swaps to the right one once an app is focused.
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
-                if let Some(game) = db.games.iter().find(|g| g.active_profile.is_some()) {
-                    if let Some(profile) = game.profiles.iter().find(|p| Some(&p.id) == game.active_profile.as_ref()) {
-                        send_overlay(app.handle(), &game.profiles, profile, !game.overlay_disabled);
+                if let Some(game) = db.games.iter().find(|g| g.profiles.iter().any(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled)) {
+                    if let Some(profile) = game.profiles.iter().find(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled) {
+                        send_overlay(app.handle(), &game.profiles, profile, true);
                     }
                 }
             }
@@ -1774,8 +1662,7 @@ pub fn run() {
             delete_game,
             upsert_profile,
             delete_profile,
-            activate_profile,
-            deactivate_ahk,
+            set_profile_armed,
             run_script_now,
             get_ahk_status,
             save_settings,

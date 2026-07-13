@@ -34,6 +34,11 @@ pub fn run_script(python_exe: &str, script: &Script, scripts_path: &Path) -> Res
     for interpreter in python_candidates(python_exe) {
         let mut command = Command::new(&interpreter);
         command.arg(&target);
+        // Run from the script's own folder so relative paths in the script resolve next to it
+        // (a path script → its .py's directory; inline code → the scripts data folder).
+        if let Some(dir) = target.parent() {
+            command.current_dir(dir);
+        }
         // Don't pop a console window each time a hotkey/launch fires the script.
         #[cfg(target_os = "windows")]
         {
