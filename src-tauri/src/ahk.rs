@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use crate::config::{self, Profile};
+use crate::config::{self, Profile, Script};
 
 const GLOBAL_GAME_EXE: &str = "*";
 
@@ -196,14 +197,17 @@ pub fn generate_script(
     toggle_overlay_key: Option<&str>,
     profiles: &[Profile],
     profile: &Profile,
+    scripts: &[Script],
 ) -> String {
     let global_game = exe.trim() == GLOBAL_GAME_EXE;
     let resolved = config::resolve_profile_hotkeys(profiles, profile);
     let mut hotkey_lines = String::new();
+    let mut used_keys: HashSet<String> = HashSet::new();
 
     for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() { continue; }
+        used_keys.insert(ahk_key.clone());
         let trigger = escape_ahk_string(&hk.trigger);
 
         // A behavior that is exactly one hold(...) becomes a true held remap: the key
@@ -243,6 +247,21 @@ pub fn generate_script(
         hotkey_lines.push_str(&format!(
             "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
         ));
+    }
+
+    // Hotkey-triggered scripts share the scope's #HotIf block, so they only fire while the
+    // scope's app is focused. Skip a script whose key a hotkey already claimed — two `X::`
+    // labels would fail to load and kill every hotkey in the scope.
+    for script in scripts {
+        if !script.enabled || script.trigger != "hotkey" {
+            continue;
+        }
+        let ahk_key = trigger_to_key(&script.hotkey);
+        if ahk_key.is_empty() || !used_keys.insert(ahk_key.clone()) {
+            continue;
+        }
+        let id = escape_ahk_string(&script.id);
+        hotkey_lines.push_str(&format!("{ahk_key}:: RunScript(\"{id}\")\n"));
     }
 
     // Only bind a toggle-hotkeys key when the user explicitly set one. Defaulting to
@@ -325,6 +344,10 @@ SendAppEvent(eventType, hotkeyTrigger := "", stateId := "") {{
     if (stateId != "")
         path .= "&state_id=" UriEncode(stateId)
     SendOverlayCommand(path)
+}}
+
+RunScript(id) {{
+    SendOverlayCommand("script?id=" UriEncode(id))
 }}
 
 SyncOverlay(*) {{

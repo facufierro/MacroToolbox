@@ -72,6 +72,20 @@ export interface Profile {
   overlay_groups: OverlayGroup[];
 }
 
+export type ScriptTrigger = "hotkey" | "launch";
+export type ScriptSource = "code" | "path";
+
+export interface Script {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: ScriptTrigger;
+  hotkey: string;
+  source: ScriptSource;
+  code: string;
+  path: string;
+}
+
 export interface Scope {
   id: string;
   name: string;
@@ -82,10 +96,12 @@ export interface Scope {
   overlay_disabled?: boolean;
   toggle_hotkeys_key: string | null;
   toggle_overlay_key: string | null;
+  scripts?: Script[];
 }
 
 export interface Settings {
   ahk_exe: string;
+  python_exe: string;
   open_to_tray: boolean;
   close_to_tray: boolean;
   launch_on_startup: boolean;

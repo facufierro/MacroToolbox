@@ -10,6 +10,7 @@ import type {
   OverlayItem,
   OverlayGroup,
   ProfileState,
+  Script,
 } from "./types";
 import "./App.css";
 
@@ -27,7 +28,8 @@ type Modal =
   | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string; states: ProfileState[]; groups: OverlayGroup[] }
   | { type: "copyOverlayItem"; sourceGameId: string; sourceProfileId: string; item: OverlayItem }
   | { type: "copyState"; sourceGameId: string; sourceProfileId: string; state: ProfileState }
-  | { type: "profileState"; gameId: string; profileId: string; index: number | null; state: ProfileState };
+  | { type: "profileState"; gameId: string; profileId: string; index: number | null; state: ProfileState }
+  | { type: "script"; gameId: string; index: number | null; script: Script };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +66,7 @@ function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), name: 
 function blankBar():     OverlayItem { return { type: "bar",   id: uid(), name: "", x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100, state_id: null }; }
 function blankText():    OverlayItem { return { type: "text",  id: uid(), name: "", x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
 function blankState(): ProfileState { return { id: uid(), name: "", duration_ms: null }; }
+function blankScript(): Script { return { id: uid(), name: "", enabled: true, trigger: "hotkey", hotkey: "", source: "code", code: "", path: "" }; }
 
 // ── Export / Import helpers ───────────────────────────────────────────────────
 
@@ -1175,6 +1178,113 @@ function StateModal({ initial, onSave, onClose }: {
   );
 }
 
+function scriptTriggerDesc(script: Script): string {
+  return script.trigger === "hotkey"
+    ? `hotkey: ${script.hotkey || "(unset)"}`
+    : "on app launch";
+}
+
+function ScriptRow({ script, onEdit, onRun, onToggle, onDelete }: {
+  script: Script;
+  onEdit: () => void;
+  onRun: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={`step-row${script.enabled ? "" : " step-row--muted"}`}>
+      <span className="overlay-type-badge overlay-type-badge--text">{script.name || "Unnamed"} - script</span>
+      <span className="overlay-item-desc">{scriptTriggerDesc(script)} · {script.source === "path" ? "file" : "inline"}</span>
+      <div className="step-row__btns">
+        <button className="icon-btn" title={script.enabled ? "Disable" : "Enable"} onClick={onToggle}>{script.enabled ? "◉" : "○"}</button>
+        <button className="icon-btn" title="Run now" onClick={onRun}>▶</button>
+        <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
+        <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+      </div>
+    </div>
+  );
+}
+
+function ScriptModal({ initial, onSave, onClose }: {
+  initial: Script;
+  onSave: (script: Script) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(initial.name);
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [trigger, setTrigger] = useState(initial.trigger);
+  const [hotkey, setHotkey] = useState(initial.hotkey);
+  const [source, setSource] = useState(initial.source);
+  const [code, setCode] = useState(initial.code);
+  const [path, setPath] = useState(initial.path);
+
+  function build(): Script {
+    return { id: initial.id, name: name.trim(), enabled, trigger, hotkey, source, code, path: path.trim() };
+  }
+
+  async function browse() {
+    const selected = await openDialog({ title: "Select Python Script", filters: [{ name: "Python", extensions: ["py"] }], multiple: false, directory: false });
+    if (selected) setPath(selected as string);
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h2>{initial.name ? "Edit Script" : "Add Script"}</h2>
+
+        <label>Name
+          <input value={name} onChange={e => setName(e.target.value)} />
+        </label>
+
+        <label>Trigger
+          <select value={trigger} onChange={e => setTrigger(e.target.value as Script["trigger"])}>
+            <option value="hotkey">When a hotkey is pressed</option>
+            <option value="launch">When the app is launched</option>
+          </select>
+        </label>
+
+        {trigger === "hotkey" && (
+          <label>Hotkey
+            <KeyInput value={hotkey} onChange={setHotkey} />
+            <small>Fires only while this scope's app is focused.</small>
+          </label>
+        )}
+
+        <label>Source
+          <select value={source} onChange={e => setSource(e.target.value as Script["source"])}>
+            <option value="code">Python code</option>
+            <option value="path">Path to a .py file</option>
+          </select>
+        </label>
+
+        {source === "code" ? (
+          <label>Code
+            <textarea value={code} onChange={e => setCode(e.target.value)} rows={12} spellCheck={false}
+              style={{ fontFamily: "monospace", resize: "vertical" }} placeholder="print('hello')" />
+          </label>
+        ) : (
+          <label>Script file
+            <div className="input-row">
+              <input value={path} onChange={e => setPath(e.target.value)} placeholder="C:\path\to\script.py" />
+              <button className="btn btn--ghost" onClick={browse}>Browse…</button>
+            </div>
+          </label>
+        )}
+
+        <label className="checkbox-row">
+          <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
+          <span>Enabled</span>
+        </label>
+
+        <div className="modal__actions">
+          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Game detail view ──────────────────────────────────────────────────────────
 
 function GameView({ game, running, onDb, onModal, onBack }: {
@@ -1188,7 +1298,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
   const [profileId, setProfileId] = useState<string>(
     game.active_profile ?? game.profiles[0]?.id ?? ""
   );
-  const [tab, setTab] = useState<"hotkeys" | "widgets" | "states">("hotkeys");
+  const [tab, setTab] = useState<"hotkeys" | "widgets" | "states" | "scripts">("hotkeys");
   const [isBorderless, setIsBorderless] = useState(false);
 
   useEffect(() => {
@@ -1232,6 +1342,12 @@ function GameView({ game, running, onDb, onModal, onBack }: {
     if (!profileId) return;
     const db = await api.deleteProfile(game.id, profileId);
     onDb(db);
+  }
+
+  async function saveScripts(scripts: Script[]) {
+    try {
+      onDb(await api.upsertGame({ ...game, scripts }));
+    } catch (e) { alert(String(e)); }
   }
 
   async function deleteGame() {
@@ -1359,6 +1475,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
         <button className={`view-tab ${tab === "hotkeys" ? "view-tab--active" : ""}`} onClick={() => setTab("hotkeys")}>Hotkeys</button>
         <button className={`view-tab ${tab === "widgets" ? "view-tab--active" : ""}`} onClick={() => setTab("widgets")}>Widgets</button>
         <button className={`view-tab ${tab === "states" ? "view-tab--active" : ""}`} onClick={() => setTab("states")}>States</button>
+        <button className={`view-tab ${tab === "scripts" ? "view-tab--active" : ""}`} onClick={() => setTab("scripts")}>Scripts</button>
       </div>
 
       {/* Hotkeys tab */}
@@ -1498,6 +1615,29 @@ function GameView({ game, running, onDb, onModal, onBack }: {
       ) : (
         <p className="empty-row">Create a profile to start adding widgets.</p>
       ))}
+
+      {/* Scripts tab */}
+      {tab === "scripts" && (
+        <>
+          <div className="step-add-btns">
+            <span className="step-add-label">Add:</span>
+            <button className="btn btn--ghost btn--sm"
+              onClick={() => onModal({ type: "script", gameId: game.id, index: null, script: blankScript() })}>
+              Script
+            </button>
+          </div>
+          <div className="steps-list" style={{ marginTop: 8 }}>
+            {(game.scripts ?? []).map((script, i) => (
+              <ScriptRow key={script.id} script={script}
+                onEdit={() => onModal({ type: "script", gameId: game.id, index: i, script })}
+                onRun={() => api.runScriptNow(script).catch(e => alert(String(e)))}
+                onToggle={() => saveScripts((game.scripts ?? []).map((s, idx) => idx === i ? { ...s, enabled: !s.enabled } : s))}
+                onDelete={() => saveScripts((game.scripts ?? []).filter((_, idx) => idx !== i))} />
+            ))}
+            {(game.scripts ?? []).length === 0 && <div className="steps-empty">No scripts yet</div>}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1506,6 +1646,7 @@ function GameView({ game, running, onDb, onModal, onBack }: {
 
 function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void }) {
   const [ahkExe, setAhkExe] = useState(db.settings.ahk_exe);
+  const [pythonExe, setPythonExe] = useState(db.settings.python_exe ?? "");
   const [openToTray, setOpenToTray] = useState(db.settings.open_to_tray);
   const [closeToTray, setCloseToTray] = useState(db.settings.close_to_tray);
   const [launchOnStartup, setLaunchOnStartup] = useState(db.settings.launch_on_startup);
@@ -1521,10 +1662,21 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
     if (selected) setAhkExe(selected as string);
   }
 
+  async function browsePython() {
+    const selected = await openDialog({
+      title: "Select Python Executable",
+      filters: [{ name: "Executable", extensions: ["exe"] }],
+      multiple: false,
+      directory: false,
+    });
+    if (selected) setPythonExe(selected as string);
+  }
+
   async function save() {
     try {
       const updated = await api.saveSettings({
         ahk_exe: ahkExe,
+        python_exe: pythonExe,
         open_to_tray: openToTray,
         close_to_tray: closeToTray,
         launch_on_startup: launchOnStartup,
@@ -1544,6 +1696,13 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
           <button className="btn btn--ghost" onClick={browse}>Browse…</button>
         </div>
         <small>Example: C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe</small>
+      </label>
+      <label>Python Executable Path <span style={{ color: "var(--text2)", fontWeight: 400 }}>(optional)</span>
+        <div className="input-row">
+          <input value={pythonExe} onChange={e => setPythonExe(e.target.value)} placeholder="python" />
+          <button className="btn btn--ghost" onClick={browsePython}>Browse…</button>
+        </div>
+        <small>Used to run scripts. Leave empty to use “python” (then the “py” launcher) from your PATH.</small>
       </label>
       <label className="checkbox-row">
         <input
@@ -1993,6 +2152,22 @@ export default function App() {
         const { sourceGameId, sourceProfileId, state } = modal;
         return <CopyToProfileModal games={db.scopes} title="Copy State To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
           onSave={(targetGameId, targetProfileId) => handleCopyState(sourceGameId, sourceProfileId, state, targetGameId, targetProfileId)}
+          onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "script" && (() => {
+        const { gameId, index, script } = modal;
+        return <ScriptModal initial={script}
+          onSave={async next => {
+            const game = db.scopes.find(g => g.id === gameId);
+            if (!game) return;
+            const current = game.scripts ?? [];
+            const scripts = index === null
+              ? [...current, next]
+              : current.map((s, i) => i === index ? next : s);
+            try { handleDb(await api.upsertGame({ ...game, scripts })); }
+            catch (e) { alert(String(e)); }
+            setModal(null);
+          }}
           onClose={() => setModal(null)} />;
       })()}
       </div>{/* layout__body */}
