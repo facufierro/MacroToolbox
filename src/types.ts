@@ -61,15 +61,24 @@ export interface OverlayGroup {
   name: string;
 }
 
+export type ProfileKind = "hotkeys" | "scripts" | "overlay";
+
 export interface Profile {
   id: string;
   name: string;
+  kind: ProfileKind;
+  exe: string;
+  armed: boolean;
   parent_id: string | null;
   hotkeys: Hotkey[];
   states: ProfileState[];
   overlay_items: OverlayItem[];
   overlay_triggers: OverlayTrigger[];
   overlay_groups: OverlayGroup[];
+  scripts: Script[];
+  overlay_disabled?: boolean;
+  toggle_hotkeys_key: string | null;
+  toggle_overlay_key: string | null;
 }
 
 export type ScriptTrigger = "hotkey" | "launch";
@@ -86,17 +95,12 @@ export interface Script {
   path: string;
 }
 
+/** A Scope is just a named folder that groups profiles. */
 export interface Scope {
   id: string;
   name: string;
-  exe: string;
   image: string | null;
-  active_profile: string | null;
   profiles: Profile[];
-  overlay_disabled?: boolean;
-  toggle_hotkeys_key: string | null;
-  toggle_overlay_key: string | null;
-  scripts?: Script[];
 }
 
 export interface Settings {
@@ -108,6 +112,7 @@ export interface Settings {
 }
 
 export interface Database {
+  version: number;
   scopes: Scope[];
   settings: Settings;
 }

@@ -40,11 +40,8 @@ export const api = {
   deleteProfile: (gameId: string, profileId: string) =>
     invoke<Database>("delete_profile", { gameId, profileId }),
 
-  activateProfile: (gameId: string, profileId: string) =>
-    invoke<Database>("activate_profile", { gameId, profileId }),
-
-  deactivateAhk: (gameId: string) =>
-    invoke<Database>("deactivate_ahk", { gameId }),
+  setProfileArmed: (profileId: string, armed: boolean) =>
+    invoke<Database>("set_profile_armed", { profileId, armed }),
 
   runScriptNow: (script: Script) =>
     invoke<void>("run_script_now", { script }),
