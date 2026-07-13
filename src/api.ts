@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Database, Scope, Profile, Settings } from "./types";
+import type { Database, Scope, Profile, Settings, Script } from "./types";
 
 export const api = {
   getDatabase: () =>
@@ -45,6 +45,9 @@ export const api = {
 
   deactivateAhk: (gameId: string) =>
     invoke<Database>("deactivate_ahk", { gameId }),
+
+  runScriptNow: (script: Script) =>
+    invoke<void>("run_script_now", { script }),
 
   getAhkStatus: () =>
     invoke<boolean>("get_ahk_status"),

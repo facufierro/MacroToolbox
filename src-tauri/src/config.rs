@@ -23,6 +23,37 @@ pub struct Game {
     pub toggle_hotkeys_key: Option<String>,
     #[serde(default)]
     pub toggle_overlay_key: Option<String>,
+    #[serde(default)]
+    pub scripts: Vec<Script>,
+}
+
+/// A Python script bound to a scope. It runs either when its hotkey is pressed (while the
+/// scope's app is focused) or when the scope's app is launched. The body is either inline
+/// code typed by the user or a path to a `.py` file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Script {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_script_enabled")]
+    pub enabled: bool,
+    /// "hotkey" | "launch"
+    pub trigger: String,
+    /// The key combo when `trigger` is "hotkey".
+    #[serde(default)]
+    pub hotkey: String,
+    /// "code" | "path"
+    pub source: String,
+    /// Inline Python when `source` is "code".
+    #[serde(default)]
+    pub code: String,
+    /// Path to a `.py` file when `source` is "path".
+    #[serde(default)]
+    pub path: String,
+}
+
+fn default_script_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +241,10 @@ pub struct Hotkey {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub ahk_exe: String,
+    /// Python interpreter used to run scripts. Empty falls back to `python` then the
+    /// Windows `py` launcher.
+    #[serde(default)]
+    pub python_exe: String,
     #[serde(default)]
     pub open_to_tray: bool,
     #[serde(default)]

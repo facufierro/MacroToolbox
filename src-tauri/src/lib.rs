@@ -6,8 +6,9 @@ use tauri::{Emitter, Manager, State};
 
 mod ahk;
 mod config;
+mod scripts;
 
-use config::{Database, Game, Profile, Settings};
+use config::{Database, Game, Profile, Script, Settings};
 
 const OVERLAY_PORT: u16 = 17823;
 const TRAY_SHOW_ID: &str = "tray_show";
@@ -160,6 +161,7 @@ fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Res
                     game.toggle_overlay_key.as_deref(),
                     &game.profiles,
                     profile,
+                    &game.scripts,
                 );
                 let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
                 if std::fs::write(&script_path, &script).is_ok() {
@@ -221,6 +223,7 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
                 game.toggle_overlay_key.as_deref(),
                 &game.profiles,
                 p,
+                &game.scripts,
             );
             let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
             if std::fs::write(&script_path, &script).is_ok() {
@@ -482,6 +485,7 @@ fn sync_global_scope(state: &AppState, db: &Database) {
         game.toggle_overlay_key.as_deref(),
         &game.profiles,
         profile,
+        &game.scripts,
     );
     let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
     if std::fs::write(&script_path, &script).is_ok() {
@@ -642,6 +646,11 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             .filter(|value| !value.is_empty());
                         emit_overlay_event(&handle, &event, hotkey_trigger, state_id);
                         ("200 OK", Vec::new())
+                    } else if route == "/script" {
+                        if let Some(id) = get_query_param(action, "id").filter(|v| !v.is_empty()) {
+                            run_script_by_id(&handle, &id);
+                        }
+                        ("200 OK", Vec::new())
                     } else {
                         match route {
                             "/show" => {
@@ -728,6 +737,7 @@ fn activate_profile(app: tauri::AppHandle, state: State<AppState>, game_id: Stri
             game.toggle_overlay_key.as_deref(),
             &game.profiles,
             profile,
+            &game.scripts,
         );
         let script_path = state.scripts_path.join(format!("{game_id}.ahk"));
         std::fs::write(&script_path, &script).map_err(|e| e.to_string())?;
@@ -1455,9 +1465,37 @@ fn is_process_running(exe: &str) -> bool {
     false
 }
 
+/// Look up a saved script by id across every scope and run it. Used by the AHK `/script`
+/// route (a hotkey fired) — failures are logged, not surfaced, since there is no UI in the loop.
+fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
+    let state = handle.state::<AppState>();
+    let db = match config::load_db(&state.db_path) {
+        Ok(db) => db,
+        Err(_) => return,
+    };
+    let script = db.games.iter().flat_map(|g| &g.scripts).find(|s| s.id == id);
+    if let Some(script) = script {
+        if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
+            eprintln!("[scripts] {e}");
+        }
+    }
+}
+
+/// Run a script on demand (the "Run now" button), so the user can test it — including
+/// unsaved edits — without waiting for its trigger.
+#[tauri::command]
+fn run_script_now(state: State<AppState>, script: Script) -> Result<(), String> {
+    let db = config::load_db(&state.db_path)?;
+    scripts::run_script(&db.settings.python_exe, &script, &state.scripts_path)
+}
+
 fn start_watcher(handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut last_tick = std::time::SystemTime::now();
+        // Per-scope "was the app running last tick" state, so launch-triggered scripts fire
+        // once on the not-running -> running edge. A scope already running when the app starts
+        // is seeded as running on its first observation, so it doesn't fire retroactively.
+        let mut launch_running: HashMap<String, bool> = HashMap::new();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
 
@@ -1477,6 +1515,24 @@ fn start_watcher(handle: tauri::AppHandle) {
                 Ok(db) => db,
                 Err(_) => continue,
             };
+
+            // Launch-triggered scripts: fire when a scope's app transitions to running.
+            for game in &db.games {
+                let has_launch = game.scripts.iter().any(|s| s.enabled && s.trigger == "launch");
+                if !has_launch {
+                    launch_running.remove(&game.id);
+                    continue;
+                }
+                let now_running = is_process_running(&game.exe);
+                let was_running = launch_running.insert(game.id.clone(), now_running);
+                if was_running == Some(false) && now_running {
+                    for script in game.scripts.iter().filter(|s| s.enabled && s.trigger == "launch") {
+                        if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
+                            eprintln!("[scripts] {e}");
+                        }
+                    }
+                }
+            }
 
             let active = active_app_scope(&db);
             let mut mgr = state.ahk_manager.lock().unwrap();
@@ -1500,6 +1556,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                                 game.toggle_overlay_key.as_deref(),
                                 &game.profiles,
                                 profile,
+                                &game.scripts,
                             );
                             let script_path = state.scripts_path.join(format!("{}.ahk", game.id));
                             if std::fs::write(&script_path, &script).is_ok() {
@@ -1719,6 +1776,7 @@ pub fn run() {
             delete_profile,
             activate_profile,
             deactivate_ahk,
+            run_script_now,
             get_ahk_status,
             save_settings,
             get_app_version,
