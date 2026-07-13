@@ -1,8 +1,8 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "Hotkey Manager",
+    "productName":  "MacroToolbox",
     "version":  "1.6.8",
-    "identifier":  "com.fierro.hotkey-manager",
+    "identifier":  "com.fierro.macro-toolbox",
     "build":  {
                   "beforeDevCommand":  "npm run dev",
                   "devUrl":  "http://localhost:1420",
@@ -12,7 +12,7 @@
     "app":  {
                 "windows":  [
                                 {
-                                    "title":  "Hotkey Manager",
+                                    "title":  "MacroToolbox",
                                     "width":  1100,
                                     "height":  700,
                                     "minWidth":  800,

@@ -1,12 +1,12 @@
 [package]
-name = "hotkey-manager"
+name = "macro-toolbox"
 version = "1.6.8"
-description = "Hotkey Manager"
+description = "MacroToolbox"
 authors = ["Facundo Fierro"]
 edition = "2021"
 
 [lib]
-name = "hotkey_manager_lib"
+name = "macro_toolbox_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

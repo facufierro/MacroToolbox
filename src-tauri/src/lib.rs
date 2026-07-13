@@ -326,7 +326,7 @@ fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWin
         "main",
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("Hotkey Manager")
+    .title("MacroToolbox")
     .inner_size(1100.0, 700.0)
     .min_inner_size(800.0, 500.0)
     .maximized(true)
@@ -399,7 +399,7 @@ fn quit_app(app: &tauri::AppHandle) {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, TRAY_SHOW_ID, "Show Hotkey Manager", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, TRAY_SHOW_ID, "Show MacroToolbox", true, None::<&str>)?;
     let hide_item = MenuItem::with_id(app, TRAY_HIDE_ID, "Hide to Tray", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -407,7 +407,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let mut tray = TrayIconBuilder::new()
         .menu(&menu)
-        .tooltip("Hotkey Manager")
+        .tooltip("MacroToolbox")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_SHOW_ID => show_main_window(app),
@@ -1320,7 +1320,7 @@ fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const TASK_NAME: &str = "Hotkey Manager";
+        const TASK_NAME: &str = "MacroToolbox";
 
         // Drop the dead Run-key entry and Startup-folder shortcut earlier versions created:
         // neither can launch an elevated app at logon, yet they show as "enabled" in Task
@@ -1388,7 +1388,7 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settin
 #[tauri::command]
 async fn download_and_install_update(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        .user_agent("HotkeyManager")
+        .user_agent("MacroToolbox")
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| format!("Could not start the download: {e}"))?;
@@ -1403,7 +1403,7 @@ async fn download_and_install_update(app: tauri::AppHandle, url: String) -> Resu
         .map_err(|e| format!("Download failed: {e}"))?;
 
     let mut installer_path = std::env::temp_dir();
-    installer_path.push("HotkeyManager-update-setup.exe");
+    installer_path.push("MacroToolbox-update-setup.exe");
     std::fs::write(&installer_path, &bytes)
         .map_err(|e| format!("Could not save the installer: {e}"))?;
 

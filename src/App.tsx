@@ -1575,7 +1575,7 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
         />
         <span>
           Launch on startup
-          <small>Start Hotkey Manager automatically when you log in to Windows. Pair with “Open to tray” to start hidden.</small>
+          <small>Start MacroToolbox automatically when you log in to Windows. Pair with “Open to tray” to start hidden.</small>
         </span>
       </label>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -1618,7 +1618,7 @@ export default function App() {
     }, 2000);
 
     api.getAppVersion().then(current => {
-      fetch("https://api.github.com/repos/facufierro/HotkeyManager/releases/latest")
+      fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")
         .then(r => r.json())
         .then(data => {
           const latest: string = data.tag_name ?? "";
@@ -1645,7 +1645,7 @@ export default function App() {
   async function runUpdate() {
     if (!updateInfo?.downloadUrl) return;
     const ok = await ask(
-      `Hotkey Manager ${updateInfo.version} is available.\n\nDownload and install it now? The app will close to finish updating.`,
+      `MacroToolbox ${updateInfo.version} is available.\n\nDownload and install it now? The app will close to finish updating.`,
       { title: "Update available", kind: "info", okLabel: "Update now", cancelLabel: "Later" }
     );
     if (!ok) return;

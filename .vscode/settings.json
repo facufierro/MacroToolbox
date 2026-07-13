@@ -15,7 +15,7 @@
         {
             "name": "$(rocket) Open Releases",
             "color": "#38bdf8",
-            "command": "Start-Process 'https://github.com/facufierro/HotkeyManager/releases/latest'",
+            "command": "Start-Process 'https://github.com/facufierro/MacroToolbox/releases/latest'",
             "terminalName": "Releases"
         }
     ],
