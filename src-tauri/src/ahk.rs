@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
-use crate::config::{self, Profile, Script};
+use crate::config::{self, Profile};
 
 const GLOBAL_GAME_EXE: &str = "*";
 
@@ -190,118 +190,132 @@ fn resolve_ahk_exe(configured: &str, bundled: Option<&Path>) -> String {
     configured.to_string()
 }
 
-pub fn generate_script(
-    exe: &str,
-    overlay_enabled: bool,
-    toggle_hotkeys_key: Option<&str>,
-    toggle_overlay_key: Option<&str>,
-    profiles: &[Profile],
-    profile: &Profile,
-    scripts: &[Script],
-) -> String {
-    let global_game = exe.trim() == GLOBAL_GAME_EXE;
-    let resolved = config::resolve_profile_hotkeys(profiles, profile);
-    let mut hotkey_lines = String::new();
-    let mut used_keys: HashSet<String> = HashSet::new();
+/// One armed profile plus the sibling slice it needs to resolve `parent_id` inheritance.
+pub struct ArmedProfile<'a> {
+    pub siblings: &'a [Profile],
+    pub profile: &'a Profile,
+}
+
+/// Emit one armed profile's `#HotIf` block(s). Hotkeys/scripts sit under
+/// `WinActive("ahk_exe <exe>") && enabled["<id>"]` (or just `enabled["<id>"]` for exe "*") so
+/// they only fire while that app is focused; toggle keys sit under a focus-only gate so a
+/// disabled profile can still be re-enabled. `used_keys` is keyed by exe: the same key may be
+/// bound for different apps, but within one app the first armed profile wins it (a duplicate
+/// `X::` label under an identical #HotIf would fail to load and kill every hotkey).
+fn generate_profile_block(ap: &ArmedProfile, used_keys: &mut HashMap<String, HashSet<String>>) -> String {
+    let p = ap.profile;
+    let exe = p.exe.trim();
+    let global_game = exe == GLOBAL_GAME_EXE;
+    let id = escape_ahk_string(&p.id);
+    let exe_esc = escape_ahk_string(exe);
+    let resolved = config::resolve_profile_hotkeys(ap.siblings, p);
+    let keyset = used_keys.entry(exe.to_string()).or_default();
+    let mut lines = String::new();
 
     for hk in resolved {
         let ahk_key = trigger_to_key(&hk.trigger);
         if ahk_key.is_empty() { continue; }
-        used_keys.insert(ahk_key.clone());
+        if !keyset.insert(ahk_key.clone()) { continue; }
         let trigger = escape_ahk_string(&hk.trigger);
 
-        // A behavior that is exactly one hold(...) becomes a true held remap: the key
-        // stays down while the hotkey is held. That needs a release signal, so emit a
-        // wildcard key-up hotkey (fires on the trigger's main key going up regardless
-        // of modifier order) next to the press hotkey.
+        // A behavior that is exactly one hold(...) becomes a true held remap: the key stays
+        // down while the hotkey is held, released by a paired wildcard key-up hotkey.
         if let (Some(hold_arg), Some(up_key)) = (parse_pure_hold(&hk.behavior), up_hotkey(&hk.trigger)) {
             let keys = escape_ahk_string(&hold_arg);
-            hotkey_lines.push_str(&format!(
+            lines.push_str(&format!(
                 "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    HoldKeyDown(\"{keys}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
             ));
             continue;
         }
 
-        // A behavior that is exactly one repeat(...) becomes a hold-to-repeat: the key is
-        // pressed every `interval` ms while the trigger is held. The timer stops itself when
-        // the trigger's physical key is released (polled each tick), so NO key-up hotkey is
-        // emitted: a `*key up` hotkey gets re-triggered by the key-up events this repeat
-        // injects, which tears down and restarts the timer on every OS key-repeat — making
-        // the repeat run at the OS key-repeat rate instead of the configured interval.
+        // A behavior that is exactly one repeat(...) becomes a hold-to-repeat. The loop
+        // outlives the #HotIf press gate, so it re-checks focus (exe) and this profile's
+        // enabled flag (id) itself each tick.
         if let Some((repeat_keys, interval, hold)) = parse_pure_repeat(&hk.behavior) {
             let poll_key = trigger_bare_key(&hk.trigger);
             if !poll_key.is_empty() {
                 let keys = escape_ahk_string(&repeat_keys);
                 let poll_key = escape_ahk_string(&poll_key);
-                // Per-app scopes must keep the repeat confined to the game window; the loop
-                // isn't gated by #HotIf, so the tick re-checks WinActive itself.
-                let require_active = if global_game { "false" } else { "true" };
-                hotkey_lines.push_str(&format!(
-                    "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", {require_active}, {hold})\n}}\n"
+                let repeat_exe = if global_game { String::new() } else { exe_esc.clone() };
+                lines.push_str(&format!(
+                    "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{repeat_exe}\", {hold}, \"{id}\")\n}}\n"
                 ));
                 continue;
             }
         }
 
         let behavior = escape_ahk_string(&hk.behavior);
-        hotkey_lines.push_str(&format!(
+        lines.push_str(&format!(
             "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
         ));
     }
 
-    // Hotkey-triggered scripts share the scope's #HotIf block, so they only fire while the
-    // scope's app is focused. Skip a script whose key a hotkey already claimed — two `X::`
-    // labels would fail to load and kill every hotkey in the scope.
-    for script in scripts {
-        if !script.enabled || script.trigger != "hotkey" {
-            continue;
-        }
+    for script in &p.scripts {
+        if !script.enabled || script.trigger != "hotkey" { continue; }
         let ahk_key = trigger_to_key(&script.hotkey);
-        if ahk_key.is_empty() || !used_keys.insert(ahk_key.clone()) {
-            continue;
-        }
-        let id = escape_ahk_string(&script.id);
-        hotkey_lines.push_str(&format!("{ahk_key}:: RunScript(\"{id}\")\n"));
+        if ahk_key.is_empty() || !keyset.insert(ahk_key.clone()) { continue; }
+        let sid = escape_ahk_string(&script.id);
+        lines.push_str(&format!("{ahk_key}:: RunScript(\"{sid}\")\n"));
     }
 
-    // Only bind a toggle-hotkeys key when the user explicitly set one. Defaulting to
-    // backtick would globally hijack that key in an all-scopes scope (and it is the
-    // console key in many games).
-    let toggle_key = toggle_hotkeys_key
+    // Toggle keys only bind when explicitly set; the overlay-toggle is skipped when it equals
+    // the hotkeys-toggle. Both flip THIS profile's enabled flag, gated by focus only so a
+    // disabled profile can be re-enabled from its own app.
+    let toggle_h = p.toggle_hotkeys_key.as_deref()
         .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } });
-
-    let overlay_toggle_block = toggle_overlay_key
-        .filter(|_| overlay_enabled)
+    let toggle_o = p.toggle_overlay_key.as_deref()
         .and_then(|k| { let k = trigger_to_key(k); if k.is_empty() { None } else { Some(k) } })
-        .filter(|k| Some(k) != toggle_key.as_ref())
-        .map(|k| format!("{k}:: ToggleEnabled()\n"))
-        .unwrap_or_default();
+        .filter(|k| Some(k) != toggle_h.as_ref());
+    let mut toggle_lines = String::new();
+    if let Some(k) = &toggle_h { toggle_lines.push_str(&format!("{k}:: ToggleEnabled(\"{id}\")\n")); }
+    if let Some(k) = &toggle_o { toggle_lines.push_str(&format!("{k}:: ToggleEnabled(\"{id}\")\n")); }
 
-    let game_group = if global_game {
-        String::new()
-    } else {
-        format!("GroupAdd \"GAME\", \"ahk_exe {}\"\n", escape_ahk_string(exe))
-    };
-    let overlay_visibility_condition = if global_game {
-        if overlay_enabled { "enabled".to_string() } else { "false".to_string() }
-    } else {
-        if overlay_enabled { "enabled && WinActive(\"ahk_group GAME\")".to_string() } else { "false".to_string() }
-    };
-    let toggle_hotkeys_line = toggle_key
-        .map(|k| format!("{k}:: ToggleEnabled()\n"))
-        .unwrap_or_default();
-    let toggle_scope = if global_game {
-        format!("{toggle_hotkeys_line}{overlay_toggle_block}")
-    } else if toggle_hotkeys_line.is_empty() && overlay_toggle_block.is_empty() {
-        String::new()
-    } else {
-        format!("#HotIf WinActive(\"ahk_group GAME\")\n{toggle_hotkeys_line}{overlay_toggle_block}#HotIf\n")
-    };
-    let hotkey_scope = if global_game {
-        format!("#HotIf enabled\n{hotkey_lines}#HotIf\n")
-    } else {
-        format!("#HotIf WinActive(\"ahk_group GAME\") && enabled\n{hotkey_lines}#HotIf\n")
-    };
+    let mut out = String::new();
+    if !lines.is_empty() {
+        if global_game {
+            out.push_str(&format!("#HotIf enabled[\"{id}\"]\n{lines}#HotIf\n"));
+        } else {
+            out.push_str(&format!("#HotIf WinActive(\"ahk_exe {exe_esc}\") && enabled[\"{id}\"]\n{lines}#HotIf\n"));
+        }
+    }
+    if !toggle_lines.is_empty() {
+        if global_game {
+            out.push_str(&format!("#HotIf\n{toggle_lines}#HotIf\n"));
+        } else {
+            out.push_str(&format!("#HotIf WinActive(\"ahk_exe {exe_esc}\")\n{toggle_lines}#HotIf\n"));
+        }
+    }
+    out
+}
+
+/// Build ONE always-on AHK script for every armed profile, each gated to its own app.
+pub fn generate_combined_script(armed: &[ArmedProfile]) -> String {
+    // Specific-exe blocks first, "*" last, so an app's binding takes precedence over a global
+    // one for the same key.
+    let mut ordered: Vec<&ArmedProfile> = armed.iter().collect();
+    ordered.sort_by_key(|ap| ap.profile.exe.trim() == GLOBAL_GAME_EXE);
+
+    let mut used_keys: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut blocks = String::new();
+    let mut enabled_init = String::new();
+    let mut overlay_init = String::new();
+
+    for ap in &ordered {
+        let p = ap.profile;
+        let exe = p.exe.trim();
+        if exe.is_empty() { continue; }
+        let id = escape_ahk_string(&p.id);
+        enabled_init.push_str(&format!("enabled[\"{id}\"] := true\n"));
+        blocks.push_str(&generate_profile_block(ap, &mut used_keys));
+        // Only overlay-type profiles drive the overlay window; a hotkeys/scripts profile never
+        // shows it (otherwise an armed hotkeys profile would pop an empty overlay).
+        if p.kind == "overlay" && !p.overlay_disabled {
+            let exe_esc = if exe == GLOBAL_GAME_EXE { "*".to_string() } else { escape_ahk_string(exe) };
+            overlay_init.push_str(&format!(
+                "overlayProfiles.Push(Map(\"id\", \"{id}\", \"exe\", \"{exe_esc}\"))\n"
+            ));
+        }
+    }
 
     let header = format!(
         r###"#Requires AutoHotkey v2.0
@@ -311,9 +325,11 @@ CoordMode "Pixel", "Screen"
 CoordMode "Mouse", "Screen"
 SetTitleMatchMode 2
 
-global enabled := true
+global enabled := Map()
 global overlayVisible := false
-{game_group}OnExit HideOverlayOnExit
+global overlayProfiles := []
+global lastFocusId := ""
+{enabled_init}{overlay_init}OnExit HideOverlayOnExit
 
 SendOverlayCommand(path) {{
     try {{
@@ -350,19 +366,34 @@ RunScript(id) {{
     SendOverlayCommand("script?id=" UriEncode(id))
 }}
 
+; The overlay follows the focused app: find the first armed overlay profile whose app is
+; focused (specific apps first, then "*"), tell the backend which profile's config to push,
+; and show/hide from that profile's enabled flag.
 SyncOverlay(*) {{
-    global enabled, overlayVisible
-    shouldShow := {overlay_visibility_condition}
-    if (shouldShow = overlayVisible)
-        return
-    overlayVisible := shouldShow
-    SendOverlayCommand(shouldShow ? "show" : "hide")
+    global enabled, overlayProfiles, overlayVisible, lastFocusId
+    focusId := ""
+    shouldShow := false
+    for p in overlayProfiles {{
+        if (p["exe"] = "*" || WinActive("ahk_exe " p["exe"])) {{
+            focusId := p["id"]
+            shouldShow := enabled.Has(focusId) && enabled[focusId]
+            break
+        }}
+    }}
+    if (focusId != lastFocusId) {{
+        lastFocusId := focusId
+        SendOverlayCommand(focusId = "" ? "focus" : "focus?id=" UriEncode(focusId))
+    }}
+    if (shouldShow != overlayVisible) {{
+        overlayVisible := shouldShow
+        SendOverlayCommand(shouldShow ? "show" : "hide")
+    }}
 }}
 
-ToggleEnabled(*) {{
+ToggleEnabled(id) {{
     global enabled
-    enabled := !enabled
-    SyncOverlay()
+    if enabled.Has(id)
+        enabled[id] := !enabled[id]
 }}
 
 HideOverlayOnExit(*) {{
@@ -412,9 +443,7 @@ CheckHookHealth(*) {{
 }}
 SetTimer CheckHookHealth, 1000
 
-{toggle_scope}
-{hotkey_scope}
-
+{blocks}
 "###
     );
 
@@ -902,12 +931,12 @@ SpinHold(ms) {
 ; it, so there is only ever one loop and the rate is the interval, not the OS repeat rate.
 ; Each press holds the key down for exactly `holdMs` (precise busy-wait), tunable so a game
 ; that reads the key per frame can be made to register exactly one press per interval.
-RepeatHold(keys, interval, triggerKey, requireGameActive, holdMs) {
+RepeatHold(keys, interval, triggerKey, exe, holdMs, enabledKey) {
     global enabled
     while GetKeyState(triggerKey, "P") {
-        ; Pause (don't fire) while hotkeys are toggled off or the game window is not focused
-        ; — so the repeat can't leak into other apps — but keep looping until release.
-        if (!enabled || (requireGameActive && !WinActive("ahk_group GAME"))) {
+        ; Pause (don't fire) while this profile is toggled off or its app is not focused —
+        ; so the repeat can't leak into other apps — but keep looping until release.
+        if (!enabled[enabledKey] || (exe != "" && !WinActive("ahk_exe " exe))) {
             Sleep 15
             continue
         }
