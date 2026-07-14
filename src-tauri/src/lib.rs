@@ -42,6 +42,9 @@ pub struct AppState {
     /// while the app runs (independent of profiles).
     pub copilot_ahk: Mutex<ahk::AhkManager>,
     pub overlay_config: Mutex<config::OverlayConfig>,
+    /// Python script processes we launched, keyed by the owning profile id, so they can be
+    /// terminated when the app quits or the profile is disarmed instead of outliving the app.
+    pub script_procs: Mutex<HashMap<String, Vec<std::process::Child>>>,
     #[cfg(target_os = "windows")]
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
 }
@@ -204,7 +207,8 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
     config::save_db(&state.db_path, &db)?;
     sync_hotkeys(&state, &db);
     if !armed {
-        // If the just-disarmed profile owns the visible overlay, drop it.
+        // Stop the profile's running scripts and, if it owns the visible overlay, drop it.
+        kill_profile_scripts(&state, &profile_id);
         clear_overlay(&app);
         set_overlay_visible(&app, false);
     }
@@ -361,6 +365,7 @@ fn quit_app(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     state.hotkeys_ahk.lock().unwrap().kill();
     state.copilot_ahk.lock().unwrap().kill();
+    kill_all_scripts(&state);
     app.exit(0);
 }
 
@@ -1374,19 +1379,69 @@ fn is_process_running(exe: &str) -> bool {
 
 /// Look up a saved script by id across every scope and run it. Used by the AHK `/script`
 /// route (a hotkey fired) — failures are logged, not surfaced, since there is no UI in the loop.
+/// Spawn a script and remember its process under the owning profile, so it can be terminated when
+/// the app quits or the profile is disarmed. Reaps that profile's already-exited processes first
+/// so the list doesn't grow unbounded.
+fn spawn_tracked_script(state: &AppState, python_exe: &str, script: &Script, profile_id: &str) -> Result<(), String> {
+    let child = scripts::run_script(python_exe, script, &state.scripts_path)?;
+    let mut procs = state.script_procs.lock().unwrap();
+    let entry = procs.entry(profile_id.to_string()).or_default();
+    entry.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+    entry.push(child);
+    Ok(())
+}
+
+/// Force-kill a script process and any children it spawned, then reap it.
+fn kill_child_tree(mut child: std::process::Child) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // The interpreter may have spawned its own subprocesses; kill the whole tree.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &child.id().to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Terminate every script process launched by one profile (used when it is disarmed).
+fn kill_profile_scripts(state: &AppState, profile_id: &str) {
+    let children = state.script_procs.lock().unwrap().remove(profile_id);
+    if let Some(children) = children {
+        for child in children {
+            kill_child_tree(child);
+        }
+    }
+}
+
+/// Terminate every script process we launched (used when the app quits).
+fn kill_all_scripts(state: &AppState) {
+    let children: Vec<std::process::Child> = {
+        let mut procs = state.script_procs.lock().unwrap();
+        procs.drain().flat_map(|(_, v)| v).collect()
+    };
+    for child in children {
+        kill_child_tree(child);
+    }
+}
+
 fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
     let state = handle.state::<AppState>();
     let db = match config::load_db(&state.db_path) {
         Ok(db) => db,
         Err(_) => return,
     };
-    let script = db.games.iter()
-        .flat_map(|g| &g.profiles)
-        .flat_map(|p| &p.scripts)
-        .find(|s| s.id == id);
-    if let Some(script) = script {
-        if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
-            eprintln!("[scripts] {e}");
+    for game in &db.games {
+        for profile in &game.profiles {
+            if let Some(script) = profile.scripts.iter().find(|s| s.id == id) {
+                if let Err(e) = spawn_tracked_script(&state, &db.settings.python_exe, script, &profile.id) {
+                    eprintln!("[scripts] {e}");
+                }
+                return;
+            }
         }
     }
 }
@@ -1396,7 +1451,12 @@ fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
 #[tauri::command]
 fn run_script_now(state: State<AppState>, script: Script) -> Result<(), String> {
     let db = config::load_db(&state.db_path)?;
-    scripts::run_script(&db.settings.python_exe, &script, &state.scripts_path)
+    let profile_id = db.games.iter()
+        .flat_map(|g| &g.profiles)
+        .find(|p| p.scripts.iter().any(|s| s.id == script.id))
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| "__adhoc__".to_string());
+    spawn_tracked_script(&state, &db.settings.python_exe, &script, &profile_id)
 }
 
 fn start_watcher(handle: tauri::AppHandle) {
@@ -1438,7 +1498,7 @@ fn start_watcher(handle: tauri::AppHandle) {
                     let was_running = launch_running.insert(profile.id.clone(), now_running);
                     if was_running == Some(false) && now_running {
                         for script in profile.scripts.iter().filter(|s| s.enabled && s.trigger == "launch") {
-                            if let Err(e) = scripts::run_script(&db.settings.python_exe, script, &state.scripts_path) {
+                            if let Err(e) = spawn_tracked_script(&state, &db.settings.python_exe, script, &profile.id) {
                                 eprintln!("[scripts] {e}");
                             }
                         }
@@ -1501,6 +1561,7 @@ pub fn run() {
                     if !close_to_tray {
                         state.hotkeys_ahk.lock().unwrap().kill();
                         state.copilot_ahk.lock().unwrap().kill();
+                        kill_all_scripts(&state);
                     }
                 }
                 _ => {}
@@ -1529,6 +1590,7 @@ pub fn run() {
                 hotkeys_ahk: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
                 copilot_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
+                script_procs: Mutex::new(HashMap::new()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
             });

@@ -14,9 +14,10 @@ fn python_candidates(configured: &str) -> Vec<String> {
 }
 
 /// Run a script: spawn the Python interpreter on either its `.py` file (source = "path") or
-/// on inline code written to a file under `scripts_path` (source = "code"). Fire-and-forget —
-/// the child runs independently and this returns as soon as it is spawned.
-pub fn run_script(python_exe: &str, script: &Script, scripts_path: &Path) -> Result<(), String> {
+/// on inline code written to a file under `scripts_path` (source = "code"). Returns the spawned
+/// child so the caller can track it and terminate it when the app quits or the owning profile is
+/// disarmed, instead of letting it outlive the app.
+pub fn run_script(python_exe: &str, script: &Script, scripts_path: &Path) -> Result<std::process::Child, String> {
     let target = if script.source == "path" {
         let path = script.path.trim();
         if path.is_empty() {
@@ -47,7 +48,7 @@ pub fn run_script(python_exe: &str, script: &Script, scripts_path: &Path) -> Res
             command.creation_flags(CREATE_NO_WINDOW);
         }
         match command.spawn() {
-            Ok(_) => return Ok(()),
+            Ok(child) => return Ok(child),
             Err(e) => last_err = format!("Failed to run '{interpreter}': {e}"),
         }
     }
