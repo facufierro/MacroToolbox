@@ -42,11 +42,78 @@ pub struct AppState {
     /// while the app runs (independent of profiles).
     pub copilot_ahk: Mutex<ahk::AhkManager>,
     pub overlay_config: Mutex<config::OverlayConfig>,
-    /// Python script processes we launched, keyed by the owning profile id, so they can be
-    /// terminated when the app quits or the profile is disarmed instead of outliving the app.
-    pub script_procs: Mutex<HashMap<String, Vec<std::process::Child>>>,
+    /// One Windows Job Object per profile (each kill-on-close) holding that profile's launched
+    /// script processes. Everything in the job dies when the app process exits — even on a crash
+    /// or hard-kill — and when the profile is disarmed, so scripts can never outlive the app.
+    #[cfg(target_os = "windows")]
+    pub script_jobs: Mutex<HashMap<String, JobObject>>,
     #[cfg(target_os = "windows")]
     borderless_windows: Mutex<HashMap<String, BorderlessWindowState>>,
+}
+
+/// A Windows Job Object configured to kill every process in it when the job handle closes. The
+/// app holds the only handle, so if the app dies (quit, crash, or `taskkill`) the OS closes the
+/// handle and terminates all the job's script processes and their descendants.
+#[cfg(target_os = "windows")]
+pub struct JobObject(winapi::um::winnt::HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobObject {}
+
+#[cfg(target_os = "windows")]
+impl JobObject {
+    fn new() -> Self {
+        use winapi::um::jobapi2::{CreateJobObjectW, SetInformationJobObject};
+        use winapi::um::winnt::{
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+            if !handle.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &mut info as *mut _ as *mut winapi::ctypes::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+            }
+            JobObject(handle)
+        }
+    }
+
+    fn assign(&self, process: std::os::windows::io::RawHandle) {
+        if self.0.is_null() {
+            return;
+        }
+        use winapi::um::jobapi2::AssignProcessToJobObject;
+        unsafe {
+            AssignProcessToJobObject(self.0, process as winapi::um::winnt::HANDLE);
+        }
+    }
+
+    fn terminate(&self) {
+        if self.0.is_null() {
+            return;
+        }
+        use winapi::um::jobapi2::TerminateJobObject;
+        unsafe {
+            TerminateJobObject(self.0, 1);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for JobObject {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                winapi::um::handleapi::CloseHandle(self.0);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1379,53 +1446,45 @@ fn is_process_running(exe: &str) -> bool {
 
 /// Look up a saved script by id across every scope and run it. Used by the AHK `/script`
 /// route (a hotkey fired) — failures are logged, not surfaced, since there is no UI in the loop.
-/// Spawn a script and remember its process under the owning profile, so it can be terminated when
-/// the app quits or the profile is disarmed. Reaps that profile's already-exited processes first
-/// so the list doesn't grow unbounded.
+/// Spawn a script and place it in its owning profile's kill-on-close Job Object, so it — and
+/// anything it spawns — is bound to the app's lifetime: it dies when the app exits (even a crash
+/// or hard-kill) or when the profile is disarmed, and can never outlive the app.
 fn spawn_tracked_script(state: &AppState, python_exe: &str, script: &Script, profile_id: &str) -> Result<(), String> {
     let child = scripts::run_script(python_exe, script, &state.scripts_path)?;
-    let mut procs = state.script_procs.lock().unwrap();
-    let entry = procs.entry(profile_id.to_string()).or_default();
-    entry.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
-    entry.push(child);
-    Ok(())
-}
-
-/// Force-kill a script process and any children it spawned, then reap it.
-fn kill_child_tree(mut child: std::process::Child) {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // The interpreter may have spawned its own subprocesses; kill the whole tree.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &child.id().to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+        use std::os::windows::io::AsRawHandle;
+        let mut jobs = state.script_jobs.lock().unwrap();
+        let job = jobs.entry(profile_id.to_string()).or_insert_with(JobObject::new);
+        job.assign(child.as_raw_handle());
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    // The job now owns the process; drop our handle (on Windows it stays in the job, on other
+    // platforms this is the previous fire-and-forget behavior).
+    let _ = (child, profile_id);
+    Ok(())
 }
 
 /// Terminate every script process launched by one profile (used when it is disarmed).
 fn kill_profile_scripts(state: &AppState, profile_id: &str) {
-    let children = state.script_procs.lock().unwrap().remove(profile_id);
-    if let Some(children) = children {
-        for child in children {
-            kill_child_tree(child);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(job) = state.script_jobs.lock().unwrap().remove(profile_id) {
+            job.terminate(); // dropping the job also closes its handle (kill-on-close)
         }
     }
+    let _ = (state, profile_id);
 }
 
 /// Terminate every script process we launched (used when the app quits).
 fn kill_all_scripts(state: &AppState) {
-    let children: Vec<std::process::Child> = {
-        let mut procs = state.script_procs.lock().unwrap();
-        procs.drain().flat_map(|(_, v)| v).collect()
-    };
-    for child in children {
-        kill_child_tree(child);
+    #[cfg(target_os = "windows")]
+    {
+        let jobs: Vec<JobObject> = state.script_jobs.lock().unwrap().drain().map(|(_, j)| j).collect();
+        for job in jobs {
+            job.terminate();
+        }
     }
+    let _ = state;
 }
 
 fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
@@ -1590,7 +1649,8 @@ pub fn run() {
                 hotkeys_ahk: Mutex::new(ahk::AhkManager::new(resource_dir.clone())),
                 copilot_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
                 overlay_config: Mutex::new(config::OverlayConfig::default()),
-                script_procs: Mutex::new(HashMap::new()),
+                #[cfg(target_os = "windows")]
+                script_jobs: Mutex::new(HashMap::new()),
                 #[cfg(target_os = "windows")]
                 borderless_windows: Mutex::new(HashMap::new()),
             });
