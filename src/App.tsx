@@ -1765,6 +1765,8 @@ export default function App() {
   const [modal, setModal] = useState<Modal | null>(null);
   const [updateInfo, setUpdateInfo] = useState<{ version: string; downloadUrl: string | null; notesUrl: string } | null>(null);
   const [updating, setUpdating] = useState(false);
+  // The version the user dismissed, so the periodic re-check doesn't keep re-surfacing it.
+  const dismissedUpdate = useRef<string | null>(null);
   const { w: libW, onPointerDown: onResize } = useLibraryWidth();
 
   const loadDb = useCallback(async () => {
@@ -1780,25 +1782,27 @@ export default function App() {
     poll();
     const id = setInterval(poll, 2000);
 
-    api.getAppVersion().then(current => {
-      fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")
-        .then(r => r.json())
-        .then(data => {
-          const latest: string = data.tag_name ?? "";
-          if (latest && semverGt(latest, current)) {
-            const asset = (data.assets as { name: string; browser_download_url: string }[])
-              ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
-            setUpdateInfo({
-              version: latest,
-              downloadUrl: asset?.browser_download_url ?? null,
-              notesUrl: data.html_url,
-            });
-          }
-        })
-        .catch(() => {});
-    }).catch(() => {});
+    // Check for updates on launch and periodically after: the app autostarts and lives in the
+    // tray for days, so a one-shot check would miss any release published while it stays open.
+    const checkUpdate = async () => {
+      try {
+        const current = await api.getAppVersion();
+        const data = await (await fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")).json();
+        const latest: string = data.tag_name ?? "";
+        if (!latest || !semverGt(latest, current) || dismissedUpdate.current === latest) return;
+        const asset = (data.assets as { name: string; browser_download_url: string }[])
+          ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
+        setUpdateInfo({
+          version: latest,
+          downloadUrl: asset?.browser_download_url ?? null,
+          notesUrl: data.html_url,
+        });
+      } catch { /* ignore */ }
+    };
+    checkUpdate();
+    const updateId = setInterval(checkUpdate, 30 * 60 * 1000);
 
-    return () => clearInterval(id);
+    return () => { clearInterval(id); clearInterval(updateId); };
   }, [loadDb]);
 
   // Suppress the browser's native right-click menu (this is a desktop app), but keep it in
@@ -2072,7 +2076,7 @@ export default function App() {
           )}
           <button className="btn btn--ghost btn--sm" disabled={updating}
             onClick={() => openUrl(updateInfo.notesUrl).catch(() => {})}>Release Notes</button>
-          <button className="btn btn--ghost btn--sm" disabled={updating} onClick={() => setUpdateInfo(null)}>Dismiss</button>
+          <button className="btn btn--ghost btn--sm" disabled={updating} onClick={() => { dismissedUpdate.current = updateInfo.version; setUpdateInfo(null); }}>Dismiss</button>
         </div>
       )}
       <div className="layout__body">
