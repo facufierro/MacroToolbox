@@ -6,6 +6,62 @@ use crate::config::{self, Profile};
 
 const GLOBAL_GAME_EXE: &str = "*";
 
+/// A kill-on-close Windows Job Object holding the manager's AutoHotkey process. The manager
+/// (owned by the app for its whole lifetime) holds the only handle, so if the app process dies
+/// for any reason — clean quit, crash, or taskkill — the OS closes the handle and terminates the
+/// AutoHotkey process. This prevents an orphaned AutoHotkey64.exe from locking the bundled
+/// binary and breaking the updater. Mirrors the job used for launched user scripts.
+#[cfg(target_os = "windows")]
+struct AhkJob(winapi::um::winnt::HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for AhkJob {}
+
+#[cfg(target_os = "windows")]
+impl AhkJob {
+    fn new() -> Self {
+        use winapi::um::jobapi2::{CreateJobObjectW, SetInformationJobObject};
+        use winapi::um::winnt::{
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+            if !handle.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &mut info as *mut _ as *mut winapi::ctypes::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+            }
+            AhkJob(handle)
+        }
+    }
+
+    fn assign(&self, child: &Child) {
+        use std::os::windows::io::AsRawHandle;
+        use winapi::um::jobapi2::AssignProcessToJobObject;
+        if self.0.is_null() {
+            return;
+        }
+        unsafe {
+            AssignProcessToJobObject(self.0, child.as_raw_handle() as winapi::um::winnt::HANDLE);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for AhkJob {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { winapi::um::handleapi::CloseHandle(self.0); }
+        }
+    }
+}
+
 /// Default precise key-down duration (ms) for a repeat tap when the behavior doesn't
 /// specify one. Kept small so a game that acts on the key per frame registers ~one press.
 const DEFAULT_REPEAT_HOLD_MS: u64 = 6;
@@ -106,6 +162,8 @@ ReleaseHeld(*) {
 pub struct AhkManager {
     process: Option<Child>,
     bundled_ahk_exe: Option<PathBuf>,
+    #[cfg(target_os = "windows")]
+    job: AhkJob,
 }
 
 impl AhkManager {
@@ -115,6 +173,8 @@ impl AhkManager {
             bundled_ahk_exe: resource_dir
                 .map(|dir| dir.join("resources").join("autohotkey").join("AutoHotkey64.exe"))
                 .filter(|path| path.exists()),
+            #[cfg(target_os = "windows")]
+            job: AhkJob::new(),
         }
     }
 
@@ -136,6 +196,12 @@ impl AhkManager {
             .arg(script_path)
             .spawn()
             .map_err(|e| format!("Failed to launch '{exe}': {e}. Check the bundled AutoHotkey file or the path in Settings."))?;
+        // Tie the process to a kill-on-close job so it can never outlive the app — a crash or
+        // hard-kill that skips kill() would otherwise orphan this AutoHotkey process, and a
+        // lingering AutoHotkey64.exe keeps the bundled binary locked so the updater's file
+        // replacement fails ("Unable to uninstall!").
+        #[cfg(target_os = "windows")]
+        self.job.assign(&child);
         self.process = Some(child);
         Ok(())
     }
