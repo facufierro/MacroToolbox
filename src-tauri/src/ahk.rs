@@ -202,7 +202,12 @@ pub struct ArmedProfile<'a> {
 /// disabled profile can still be re-enabled. `used_keys` is keyed by exe: the same key may be
 /// bound for different apps, but within one app the first armed profile wins it (a duplicate
 /// `X::` label under an identical #HotIf would fail to load and kill every hotkey).
-fn generate_profile_block(ap: &ArmedProfile, used_keys: &mut HashMap<String, HashSet<String>>) -> String {
+fn generate_profile_block(
+    ap: &ArmedProfile,
+    used_keys: &mut HashMap<String, HashSet<String>>,
+    repeat_ups: &mut HashSet<String>,
+    repeat_up_lines: &mut String,
+) -> String {
     let p = ap.profile;
     let exe = p.exe.trim();
     let global_game = exe == GLOBAL_GAME_EXE;
@@ -223,7 +228,7 @@ fn generate_profile_block(ap: &ArmedProfile, used_keys: &mut HashMap<String, Has
         if let (Some(hold_arg), Some(up_key)) = (parse_pure_hold(&hk.behavior), up_hotkey(&hk.trigger)) {
             let keys = escape_ahk_string(&hold_arg);
             lines.push_str(&format!(
-                "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    HoldKeyDown(\"{keys}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
+                "{ahk_key}:: {{\n    HoldKeyDown(\"{keys}\")\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
             ));
             continue;
         }
@@ -238,15 +243,25 @@ fn generate_profile_block(ap: &ArmedProfile, used_keys: &mut HashMap<String, Has
                 let poll_key = escape_ahk_string(&poll_key);
                 let repeat_exe = if global_game { String::new() } else { exe_esc.clone() };
                 lines.push_str(&format!(
-                    "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{repeat_exe}\", {hold}, \"{id}\")\n}}\n"
+                    "{ahk_key}:: {{\n    repeatDown[\"{poll_key}\"] := true\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{repeat_exe}\", {hold}, \"{id}\")\n}}\n"
                 ));
+                // One global key-up hotkey per physical key clears the repeat flag. `~` lets the
+                // native key-up through so normal typing of the key still works; keyed by the bare
+                // key because there is only one physical key regardless of how many triggers use it.
+                if repeat_ups.insert(poll_key.clone()) {
+                    repeat_up_lines.push_str(&format!(
+                        "~*{poll_key} up:: repeatDown[\"{poll_key}\"] := false\n"
+                    ));
+                }
                 continue;
             }
         }
 
         let behavior = escape_ahk_string(&hk.behavior);
+        // Run the behavior first, then notify the overlay: the overlay ping is a blocking
+        // localhost request, so doing it after keeps a busy backend from delaying the output.
         lines.push_str(&format!(
-            "{ahk_key}:: {{\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    ExecuteBehavior(\"{behavior}\")\n}}\n"
+            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\")\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n}}\n"
         ));
     }
 
@@ -296,6 +311,8 @@ pub fn generate_combined_script(armed: &[ArmedProfile]) -> String {
     ordered.sort_by_key(|ap| ap.profile.exe.trim() == GLOBAL_GAME_EXE);
 
     let mut used_keys: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut repeat_ups: HashSet<String> = HashSet::new();
+    let mut repeat_up_lines = String::new();
     let mut blocks = String::new();
     let mut enabled_init = String::new();
     let mut overlay_init = String::new();
@@ -306,7 +323,7 @@ pub fn generate_combined_script(armed: &[ArmedProfile]) -> String {
         if exe.is_empty() { continue; }
         let id = escape_ahk_string(&p.id);
         enabled_init.push_str(&format!("enabled[\"{id}\"] := true\n"));
-        blocks.push_str(&generate_profile_block(ap, &mut used_keys));
+        blocks.push_str(&generate_profile_block(ap, &mut used_keys, &mut repeat_ups, &mut repeat_up_lines));
         // Only overlay-type profiles drive the overlay window; a hotkeys/scripts profile never
         // shows it (otherwise an armed hotkeys profile would pop an empty overlay).
         if p.kind == "overlay" && !p.overlay_disabled {
@@ -329,12 +346,15 @@ global enabled := Map()
 global overlayVisible := false
 global overlayProfiles := []
 global lastFocusId := ""
+global repeatDown := Map()
 {enabled_init}{overlay_init}OnExit HideOverlayOnExit
 
 SendOverlayCommand(path) {{
     try {{
         xhr := ComObject("WinHttp.WinHttpRequest.5.1")
         xhr.Open("GET", "http://127.0.0.1:17823/" path, false)
+        ; Bound the wait so a momentarily busy backend can't stall the keypress that triggered it.
+        xhr.SetTimeouts(500, 500, 500, 500)
         xhr.Send()
     }} catch Error {{
     }}
@@ -443,6 +463,7 @@ CheckHookHealth(*) {{
 }}
 SetTimer CheckHookHealth, 1000
 
+{repeat_up_lines}
 {blocks}
 "###
     );
@@ -932,8 +953,12 @@ SpinHold(ms) {
 ; Each press holds the key down for exactly `holdMs` (precise busy-wait), tunable so a game
 ; that reads the key per frame can be made to register exactly one press per interval.
 RepeatHold(keys, interval, triggerKey, exe, holdMs, enabledKey) {
-    global enabled
-    while GetKeyState(triggerKey, "P") {
+    global enabled, repeatDown
+    ; Stop as soon as EITHER release signal fires: the key-up hotkey clearing repeatDown, or
+    ; the physical-state poll. SendInput disables the keyboard hook while it sends, so a real
+    ; key-up landing in that window can be missed by one path and leave the key stuck "down";
+    ; requiring both to stay true means a miss on either one can no longer wedge the loop.
+    while ((repeatDown.Has(triggerKey) && repeatDown[triggerKey]) && GetKeyState(triggerKey, "P")) {
         ; Pause (don't fire) while this profile is toggled off or its app is not focused —
         ; so the repeat can't leak into other apps — but keep looping until release.
         if (!enabled[enabledKey] || (exe != "" && !WinActive("ahk_exe " exe))) {
@@ -946,4 +971,5 @@ RepeatHold(keys, interval, triggerKey, exe, holdMs, enabledKey) {
         if (elapsed < interval)
             Sleep interval - elapsed
     }
+    repeatDown[triggerKey] := false
 }"###;
