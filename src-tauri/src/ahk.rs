@@ -643,7 +643,33 @@ fn trigger_bare_key(trigger: &str) -> String {
             key = format!("F{rest}");
         }
     }
+    if let Some(sc) = us_scancode(&key) {
+        key = sc.to_string();
+    }
     key
+}
+
+/// Scancode names (US-QWERTY positions) for keys whose single-character AHK names
+/// resolve through the ACTIVE keyboard layout. Binding by scancode keeps hotkeys on
+/// the same physical keys under any layout — a name like "q" doesn't exist on e.g. a
+/// Cyrillic layout, so the hotkey would never fire there.
+fn us_scancode(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "a" => "SC01E", "b" => "SC030", "c" => "SC02E", "d" => "SC020",
+        "e" => "SC012", "f" => "SC021", "g" => "SC022", "h" => "SC023",
+        "i" => "SC017", "j" => "SC024", "k" => "SC025", "l" => "SC026",
+        "m" => "SC032", "n" => "SC031", "o" => "SC018", "p" => "SC019",
+        "q" => "SC010", "r" => "SC013", "s" => "SC01F", "t" => "SC014",
+        "u" => "SC016", "v" => "SC02F", "w" => "SC011", "x" => "SC02D",
+        "y" => "SC015", "z" => "SC02C",
+        "1" => "SC002", "2" => "SC003", "3" => "SC004", "4" => "SC005",
+        "5" => "SC006", "6" => "SC007", "7" => "SC008", "8" => "SC009",
+        "9" => "SC00A", "0" => "SC00B",
+        "-" => "SC00C", "=" => "SC00D", "[" => "SC01A", "]" => "SC01B",
+        "\\" => "SC02B", ";" => "SC027", "'" => "SC028", "`" => "SC029",
+        "," => "SC033", "." => "SC034", "/" => "SC035",
+        _ => return None,
+    })
 }
 
 fn trigger_to_key(trigger: &str) -> String {
@@ -680,10 +706,35 @@ fn trigger_to_key(trigger: &str) -> String {
         }
     }
 
+    if let Some(sc) = us_scancode(&key) {
+        key = sc.to_string();
+    }
+
     format!("${mods}{key}")
 }
 
-const BEHAVIOR_ENGINE: &str = r###"ExecuteBehavior(str) {
+const BEHAVIOR_ENGINE: &str = r###"; Map single-character key names to their US-QWERTY scancodes so sends target the
+; physical key regardless of the active keyboard layout (a name like "q" resolves
+; through the active layout and doesn't exist on e.g. a Cyrillic layout).
+PhysKey(key) {
+    static sc := Map(
+        "a", "SC01E", "b", "SC030", "c", "SC02E", "d", "SC020",
+        "e", "SC012", "f", "SC021", "g", "SC022", "h", "SC023",
+        "i", "SC017", "j", "SC024", "k", "SC025", "l", "SC026",
+        "m", "SC032", "n", "SC031", "o", "SC018", "p", "SC019",
+        "q", "SC010", "r", "SC013", "s", "SC01F", "t", "SC014",
+        "u", "SC016", "v", "SC02F", "w", "SC011", "x", "SC02D",
+        "y", "SC015", "z", "SC02C",
+        "1", "SC002", "2", "SC003", "3", "SC004", "4", "SC005",
+        "5", "SC006", "6", "SC007", "7", "SC008", "8", "SC009",
+        "9", "SC00A", "0", "SC00B",
+        "-", "SC00C", "=", "SC00D", "[", "SC01A", "]", "SC01B",
+        "\", "SC02B", ";", "SC027", "'", "SC028", "``", "SC029",
+        ",", "SC033", ".", "SC034", "/", "SC035")
+    return sc.Has(key) ? sc[key] : key
+}
+
+ExecuteBehavior(str) {
     MouseGetPos &savedX, &savedY
     locked := false
     try {
@@ -834,6 +885,7 @@ DoPress(keyStr, holdMs := 30, spin := false) {
     }
     if RegExMatch(key, "i)^f(\d+)$", &m)
         key := "F" m[1]
+    key := PhysKey(key)
     ; If no key was given, the modifier itself is the key to press
     if (key = "") {
         if (mods = "<^")
@@ -990,7 +1042,7 @@ HoldKeyList(keyStr) {
     if RegExMatch(key, "i)^f(\d+)$", &m)
         key := "F" m[1]
     if (key != "")
-        held.Push(key)
+        held.Push(PhysKey(key))
     return held
 }
 
