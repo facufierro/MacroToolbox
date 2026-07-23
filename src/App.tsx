@@ -177,12 +177,16 @@ function bindingModifiers(
   activeSideModifiers: Set<string> = new Set(),
 ) {
   const mods: string[] = [];
+  // AltGr (RAlt on non-US layouts) arrives as a synthetic LCtrl held together with
+  // RAlt — drop that phantom Ctrl so AltGr combos record as plain ralt.
+  const altGr = activeSideModifiers.has("ralt");
+  const isHeld = (mod: string) => activeSideModifiers.has(mod) && !(altGr && mod === "lctrl");
   const addSideOrGeneric = (left: string, right: string, generic: string, active: boolean) => {
-    const sides = [left, right].filter(mod => activeSideModifiers.has(mod));
+    const sides = [left, right].filter(isHeld);
     if (sides.length) mods.push(...sides);
     else if (active) mods.push(generic);
   };
-  addSideOrGeneric("lctrl", "rctrl", "ctrl", e.ctrlKey);
+  addSideOrGeneric("lctrl", "rctrl", "ctrl", e.ctrlKey && !altGr);
   addSideOrGeneric("lshift", "rshift", "shift", e.shiftKey);
   addSideOrGeneric("lalt", "ralt", "alt", e.altKey);
   addSideOrGeneric("lwin", "rwin", "win", e.metaKey);
