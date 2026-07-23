@@ -17,4 +17,5 @@ Tauri v2 app (React/TS frontend, Rust backend) that manages per-app hotkey/overl
 - Copilot key → Right Ctrl remap runs as its own persistent AHK process (`COPILOT_FIX_SCRIPT`).
 - Keyboard-hook health check + reinstall on wake so hotkeys survive sleep/tray idling.
 - Overlay follows the focused app's armed overlay profile (200ms poll → backend show/hide/focus).
+- Update check (launch + every 30min, GitHub latest release): in-app banner + Windows toast via tauri-plugin-notification (`checkUpdate` in App.tsx).
 - Releases: `scripts/package-release.ps1` + `.github/workflows/release.yml`; both require `changelog/v<version>.md` (see CLAUDE.md rules). Installer is NSIS perMachine (app runs elevated + autostarts).
