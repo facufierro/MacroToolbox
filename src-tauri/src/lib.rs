@@ -390,6 +390,9 @@ fn restore_main_window(window: &tauri::WebviewWindow) {
         let _ = window.maximize();
     }
     let _ = window.set_focus();
+    // WebView2 doesn't reliably fire visibilitychange for native show/hide, so tell the
+    // frontend explicitly that it just became visible (it re-checks for updates on this).
+    let _ = window.emit("main-window-shown", ());
 }
 
 fn hide_window_for_tray(window: &tauri::WebviewWindow) {
