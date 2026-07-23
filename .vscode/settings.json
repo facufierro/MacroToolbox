@@ -13,19 +13,25 @@
                 "name": "$(play) Run Dev",
                 "color": "#7c6af7",
                 "command": "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -File D:\\Projects\\Games\\MacroToolbox\\dev.ps1'",
-                "tooltip": "Launch the dev environment (dev.ps1) in an elevated PowerShell window"
+                "tooltip": "Launch the dev environment (dev.ps1) in an elevated PowerShell window",
+                "singleInstance": true,
+                "focus": true
             },
             {
                 "name": "$(package) Build",
                 "color": "#4ade80",
                 "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1",
-                "tooltip": "Package a release build via scripts/package-release.ps1"
+                "tooltip": "Package a release build via scripts/package-release.ps1",
+                "singleInstance": true,
+                "focus": true
             },
             {
                 "name": "$(rocket) Open Releases",
                 "color": "#38bdf8",
                 "command": "Start-Process 'https://github.com/facufierro/MacroToolbox/releases/latest'",
-                "tooltip": "Open the latest GitHub release page in your browser"
+                "tooltip": "Open the latest GitHub release page in your browser",
+                "singleInstance": true,
+                "focus": true
             }
         ]
     },
