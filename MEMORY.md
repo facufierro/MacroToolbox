@@ -3,7 +3,7 @@
 Tauri v2 app (React/TS frontend, Rust backend) that manages per-app hotkey/overlay/script profiles and runs them through one always-on AutoHotkey v2 process.
 
 ## Structure
-- [src/App.tsx](src/App.tsx) — main UI: profiles, hotkey binding recorder (`toAhkKey` uses `e.code` for physical keys; AltGr's synthetic LCtrl is dropped so it records as plain ralt), settings. Update check: on mount, every 30 min, and on the backend's `main-window-shown` event (WebView2 doesn't fire visibilitychange on native show/hide).
+- [src/App.tsx](src/App.tsx) — main UI: profiles, hotkey binding recorder (records the typed character for letters/digits, `e.code` position as fallback; AltGr's synthetic LCtrl is dropped so it records as plain ralt), settings. Key semantics are character-based end to end: triggers resolve via the active layout in `layout_scancode` (ahk.rs), sends via `GetKeySC` in `PhysKey`, both with US-position fallback for layouts missing the character. Update check: on mount, every 30 min, and on the backend's `main-window-shown` event (WebView2 doesn't fire visibilitychange on native show/hide).
 - [src/OverlayApp.tsx](src/OverlayApp.tsx) — in-game overlay window UI.
 - [src-tauri/src/ahk.rs](src-tauri/src/ahk.rs) — generates the combined AHK script from armed profiles (`#HotIf` per exe), launches/kills AutoHotkey64 in a kill-on-close Job Object; behavior engine (press/hold/repeat/goto/state/send) lives in `BEHAVIOR_ENGINE`.
 - [src-tauri/src/config.rs](src-tauri/src/config.rs) — profile/config model, hotkey inheritance via `parent_id`.
