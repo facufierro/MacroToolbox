@@ -16,30 +16,36 @@ $tauriConfigPath = Join-Path $repoRoot "src-tauri\tauri.conf.json"
 $tauriConfig = Get-Content $tauriConfigPath -Raw | ConvertFrom-Json
 $gitTag = if ($Version) { $Version.Trim() } else { $env:HKM_RELEASE_VERSION }
 if (-not $gitTag) {
-    # Derive the version from the highest changelog/vX.Y.Z.md that has NOT been released
-    # yet (no git tag and no releases/ directory). The changelog is the source of truth,
-    # so a minor/major bump there is honored instead of blindly bumping the patch.
+    # Pick the target version from changelog/vX.Y.Z.md. Prefer the highest changelog that
+    # has NOT been released yet (no git tag, no releases/ dir) so a minor/major bump there
+    # is honored. If every changelog is already released, fall back to the highest existing
+    # one and rebuild it, so pressing Build always produces a build instead of failing.
     $releasedTags = @(& git tag 2>$null | ForEach-Object { $_.Trim() })
-    $candidate =
+    $changelogs = @(
         Get-ChildItem -Path (Join-Path $repoRoot "changelog") -Filter "v*.md" -File -ErrorAction SilentlyContinue |
         ForEach-Object {
             if ($_.BaseName -match '^v(\d+)\.(\d+)\.(\d+)$') {
                 $tag = "v$($matches[1]).$($matches[2]).$($matches[3])"
                 $isReleased = ($releasedTags -contains $tag) -or (Test-Path (Join-Path $repoRoot "releases\$tag"))
-                if (-not $isReleased) {
-                    [pscustomobject]@{
-                        Tag     = $tag
-                        Version = [version]"$($matches[1]).$($matches[2]).$($matches[3])"
-                    }
+                [pscustomobject]@{
+                    Tag        = $tag
+                    Version    = [version]"$($matches[1]).$($matches[2]).$($matches[3])"
+                    IsReleased = $isReleased
                 }
             }
-        } |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
-    if (-not $candidate) {
-        throw "No unreleased changelog found in changelog\. Create changelog\v<next>.md first (see CLAUDE.md)."
+        }
+    )
+    if (-not $changelogs) {
+        throw "No changelog found in changelog\. Create changelog\v<next>.md first (see CLAUDE.md)."
     }
-    $gitTag = $candidate.Tag
+    $unreleased = @($changelogs | Where-Object { -not $_.IsReleased } | Sort-Object Version -Descending)
+    if ($unreleased.Count) {
+        $gitTag = $unreleased[0].Tag
+    } else {
+        $latest = $changelogs | Sort-Object Version -Descending | Select-Object -First 1
+        $gitTag = $latest.Tag
+        Write-Host "No unreleased changelog; rebuilding the latest released version $($latest.Tag)."
+    }
 }
 $tagName = if ($gitTag.StartsWith("v")) { $gitTag } else { "v$gitTag" }
 $version = $tagName.TrimStart("v")
