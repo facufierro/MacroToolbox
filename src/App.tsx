@@ -201,8 +201,13 @@ function toAhkKey(e: KeyboardEvent, activeSideModifiers: Set<string>): string {
   else if (/^F\d+$/.test(key)) key = key.toLowerCase();
   else if (key.length === 1) {
     // Use e.code to get the physical key, ignoring shift transforms (e.g. Shift+5 → "5" not "%")
+    // and the active keyboard layout (e.g. Cyrillic "й" → "q")
+    const punctCodes: Record<string, string> = {
+      Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backslash: "\\",
+      BracketLeft: "[", BracketRight: "]", Backquote: "`", Minus: "-", Equal: "=",
+    };
     const codeMatch = e.code.match(/^(Key|Digit)(.+)$/);
-    key = codeMatch ? codeMatch[2].toLowerCase() : key.toLowerCase();
+    key = codeMatch ? codeMatch[2].toLowerCase() : (punctCodes[e.code] ?? key.toLowerCase());
   }
   return [...mods, key].join(" ");
 }
