@@ -62,6 +62,51 @@ impl Drop for AhkJob {
     }
 }
 
+/// Keep the AutoHotkey process responsive while the app sits idle in the tray. Windows drops
+/// idle background processes into EcoQoS power throttling, which adds latency to the low-level
+/// keyboard hook that dispatches every hotkey — so the first keypress after an idle stretch
+/// lands late (feels like a "cold start") before the throttled process spins back up. Opting
+/// out of throttling and nudging the priority above idle keeps hotkey dispatch prompt.
+#[cfg(target_os = "windows")]
+fn keep_process_responsive(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::processthreadsapi::{SetPriorityClass, SetProcessInformation};
+
+    // Not in winapi 0.3.9: the ProcessPowerThrottling info class (4), its state struct, and
+    // ABOVE_NORMAL_PRIORITY_CLASS. Declared locally to match <winnt.h>/<winbase.h>.
+    const PROCESS_POWER_THROTTLING: u32 = 4;
+    const PROCESS_POWER_THROTTLING_CURRENT_VERSION: u32 = 1;
+    const PROCESS_POWER_THROTTLING_EXECUTION_SPEED: u32 = 0x1;
+    const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+
+    #[repr(C)]
+    struct ProcessPowerThrottlingState {
+        version: u32,
+        control_mask: u32,
+        state_mask: u32,
+    }
+
+    let handle = child.as_raw_handle() as winapi::um::winnt::HANDLE;
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        // ControlMask selects the policy we manage; StateMask 0 = leave EcoQoS explicitly OFF.
+        let mut state = ProcessPowerThrottlingState {
+            version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            control_mask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            state_mask: 0,
+        };
+        SetProcessInformation(
+            handle,
+            PROCESS_POWER_THROTTLING,
+            &mut state as *mut _ as *mut winapi::ctypes::c_void,
+            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
+        );
+        SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 /// Default precise key-down duration (ms) for a repeat tap when the behavior doesn't
 /// specify one. Kept small so a game that acts on the key per frame registers ~one press.
 const DEFAULT_REPEAT_HOLD_MS: u64 = 6;
@@ -202,6 +247,8 @@ impl AhkManager {
         // replacement fails ("Unable to uninstall!").
         #[cfg(target_os = "windows")]
         self.job.assign(&child);
+        #[cfg(target_os = "windows")]
+        keep_process_responsive(&child);
         self.process = Some(child);
         Ok(())
     }
@@ -288,13 +335,23 @@ fn generate_profile_block(
         if ahk_key.is_empty() { continue; }
         if !keyset.insert(ahk_key.clone()) { continue; }
         let trigger = escape_ahk_string(&hk.trigger);
+        // The overlay only reacts to a hotkey_triggered ping for a binding that carries a
+        // state_id (it drives overlay state flags/timers). For every other hotkey the ping is
+        // a wasted blocking localhost round-trip on the hotkey's own thread — its first-call
+        // COM init and the idle-throttled backend are what make an early keypress feel like a
+        // cold start — so emit it only when a state_id makes it meaningful.
+        let notify = if hk.state_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            format!("    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n")
+        } else {
+            String::new()
+        };
 
         // A behavior that is exactly one hold(...) becomes a true held remap: the key stays
         // down while the hotkey is held, released by a paired wildcard key-up hotkey.
         if let (Some(hold_arg), Some(up_key)) = (parse_pure_hold(&hk.behavior), up_hotkey(&hk.trigger)) {
             let keys = escape_ahk_string(&hold_arg);
             lines.push_str(&format!(
-                "{ahk_key}:: {{\n    HoldKeyDown(\"{keys}\")\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
+                "{ahk_key}:: {{\n    HoldKeyDown(\"{keys}\")\n{notify}}}\n{up_key}:: HoldKeyUp(\"{keys}\")\n"
             ));
             continue;
         }
@@ -309,7 +366,7 @@ fn generate_profile_block(
                 let poll_key = escape_ahk_string(&poll_key);
                 let repeat_exe = if global_game { String::new() } else { exe_esc.clone() };
                 lines.push_str(&format!(
-                    "{ahk_key}:: {{\n    repeatDown[\"{poll_key}\"] := true\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{repeat_exe}\", {hold}, \"{id}\")\n}}\n"
+                    "{ahk_key}:: {{\n    repeatDown[\"{poll_key}\"] := true\n{notify}    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{repeat_exe}\", {hold}, \"{id}\")\n}}\n"
                 ));
                 // One global key-up hotkey per physical key clears the repeat flag. `~` lets the
                 // native key-up through so normal typing of the key still works; keyed by the bare
@@ -324,10 +381,11 @@ fn generate_profile_block(
         }
 
         let behavior = escape_ahk_string(&hk.behavior);
-        // Run the behavior first, then notify the overlay: the overlay ping is a blocking
-        // localhost request, so doing it after keeps a busy backend from delaying the output.
+        // Run the behavior first, then notify the overlay (when a state_id makes the ping
+        // meaningful): the ping is a blocking localhost request, so doing it after keeps a
+        // busy backend from delaying the output.
         lines.push_str(&format!(
-            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\")\n    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n}}\n"
+            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\")\n{notify}}}\n"
         ));
     }
 
