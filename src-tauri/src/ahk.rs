@@ -677,6 +677,10 @@ fn trigger_to_key(trigger: &str) -> String {
     let mut mods = String::new();
     let mut key = String::new();
     let mut modifier_key = String::new();
+    // On AltGr layouts RAlt always comes with a synthetic LCtrl held, which would
+    // block a non-wildcard ralt hotkey from ever firing; `*` tolerates it (AHK
+    // still prefers a non-wildcard hotkey when one matches exactly).
+    let mut altgr = false;
 
     for part in trigger.split_whitespace() {
         match part {
@@ -688,7 +692,7 @@ fn trigger_to_key(trigger: &str) -> String {
             "rshift" => { mods.push_str(">+"); modifier_key = "RShift".to_string(); }
             "alt"   => { mods.push('!'); modifier_key = "Alt".to_string(); }
             "lalt" => { mods.push_str("<!"); modifier_key = "LAlt".to_string(); }
-            "ralt" => { mods.push_str(">!"); modifier_key = "RAlt".to_string(); }
+            "ralt" => { mods.push_str(">!"); modifier_key = "RAlt".to_string(); altgr = true; }
             "win" => { mods.push('#'); modifier_key = "LWin".to_string(); }
             "lwin" => { mods.push_str("<#"); modifier_key = "LWin".to_string(); }
             "rwin" => { mods.push_str(">#"); modifier_key = "RWin".to_string(); }
@@ -696,8 +700,12 @@ fn trigger_to_key(trigger: &str) -> String {
         }
     }
 
+    let wild = if altgr { "*" } else { "" };
     if key.is_empty() {
-        return modifier_key;
+        if modifier_key.is_empty() {
+            return modifier_key;
+        }
+        return format!("{wild}{modifier_key}");
     }
 
     if let Some(rest) = key.strip_prefix('f') {
@@ -710,7 +718,7 @@ fn trigger_to_key(trigger: &str) -> String {
         key = sc.to_string();
     }
 
-    format!("${mods}{key}")
+    format!("${wild}{mods}{key}")
 }
 
 const BEHAVIOR_ENGINE: &str = r###"; Map single-character key names to their US-QWERTY scancodes so sends target the
