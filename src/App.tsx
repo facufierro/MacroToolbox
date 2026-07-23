@@ -1674,13 +1674,31 @@ function ProfileEditor({ folder, profile, showStates, onExitStates, onContext, o
 
 // ── Settings view ─────────────────────────────────────────────────────────────
 
-function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void }) {
+function SettingsView({ db, onDb, onCheckUpdates }: {
+  db: Database;
+  onDb: (db: Database) => void;
+  onCheckUpdates: () => Promise<string | null>;
+}) {
   const [ahkExe, setAhkExe] = useState(db.settings.ahk_exe);
   const [pythonExe, setPythonExe] = useState(db.settings.python_exe ?? "");
   const [openToTray, setOpenToTray] = useState(db.settings.open_to_tray);
   const [closeToTray, setCloseToTray] = useState(db.settings.close_to_tray);
   const [launchOnStartup, setLaunchOnStartup] = useState(db.settings.launch_on_startup);
   const [saved, setSaved] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+
+  async function checkForUpdates() {
+    setChecking(true);
+    setUpdateStatus(null);
+    try {
+      const latest = await onCheckUpdates();
+      setUpdateStatus(latest ? `Update ${latest} is available.` : "You're up to date.");
+    } catch {
+      setUpdateStatus("Could not check for updates.");
+    }
+    setChecking(false);
+  }
 
   async function browse() {
     const selected = await openDialog({
@@ -1744,6 +1762,12 @@ function SettingsView({ db, onDb }: { db: Database; onDb: (db: Database) => void
         <button className="btn btn--primary" onClick={save}>Save</button>
         {saved && <span style={{ color: "var(--success)", fontSize: "0.88rem" }}>✓ Saved</span>}
       </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button className="btn btn--ghost" onClick={checkForUpdates} disabled={checking}>
+          {checking ? "Checking…" : "Check for Updates"}
+        </button>
+        {updateStatus && <span style={{ fontSize: "0.88rem" }}>{updateStatus}</span>}
+      </div>
     </div>
   );
 }
@@ -1783,6 +1807,40 @@ export default function App() {
     setDb(data);
   }, []);
 
+  // Check for updates against the latest GitHub release. Returns the new version (and shows
+  // the banner) if one is available, null when up to date; throws on network failure. A
+  // manual check (the Settings button) ignores a previous dismissal.
+  const checkUpdate = useCallback(async (manual = false): Promise<string | null> => {
+    const current = await api.getAppVersion();
+    const data = await (await fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")).json();
+    const latest: string = data.tag_name ?? "";
+    if (!latest || !semverGt(latest, current) || (!manual && dismissedUpdate.current === latest)) return null;
+    const asset = (data.assets as { name: string; browser_download_url: string }[])
+      ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
+    setUpdateInfo({
+      version: latest,
+      downloadUrl: asset?.browser_download_url ?? null,
+      notesUrl: data.html_url,
+    });
+    // The app usually sits in the tray, so also announce the update with a system
+    // notification — the in-app banner is invisible until the window is opened. A manual
+    // check skips the toast: the user is already looking at the banner.
+    if (!manual && notifiedUpdate.current !== latest) {
+      notifiedUpdate.current = latest;
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === "granted";
+        if (granted) {
+          sendNotification({
+            title: "MacroToolbox update available",
+            body: `Version ${latest} is ready. Open MacroToolbox to install it.`,
+          });
+        }
+      } catch { /* ignore */ }
+    }
+    return latest;
+  }, []);
+
   useEffect(() => {
     loadDb();
     const poll = async () => {
@@ -1793,41 +1851,17 @@ export default function App() {
 
     // Check for updates on launch and periodically after: the app autostarts and lives in the
     // tray for days, so a one-shot check would miss any release published while it stays open.
-    const checkUpdate = async () => {
-      try {
-        const current = await api.getAppVersion();
-        const data = await (await fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")).json();
-        const latest: string = data.tag_name ?? "";
-        if (!latest || !semverGt(latest, current) || dismissedUpdate.current === latest) return;
-        const asset = (data.assets as { name: string; browser_download_url: string }[])
-          ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
-        setUpdateInfo({
-          version: latest,
-          downloadUrl: asset?.browser_download_url ?? null,
-          notesUrl: data.html_url,
-        });
-        // The app usually sits in the tray, so also announce the update with a system
-        // notification — the in-app banner is invisible until the window is opened.
-        if (notifiedUpdate.current !== latest) {
-          notifiedUpdate.current = latest;
-          try {
-            let granted = await isPermissionGranted();
-            if (!granted) granted = (await requestPermission()) === "granted";
-            if (granted) {
-              sendNotification({
-                title: "MacroToolbox update available",
-                body: `Version ${latest} is ready. Open MacroToolbox to install it.`,
-              });
-            }
-          } catch { /* ignore */ }
-        }
-      } catch { /* ignore */ }
-    };
-    checkUpdate();
-    const updateId = setInterval(checkUpdate, 30 * 60 * 1000);
+    const backgroundCheck = () => { checkUpdate().catch(() => {}); };
+    backgroundCheck();
+    const updateId = setInterval(backgroundCheck, 30 * 60 * 1000);
+    // WebView2 throttles timers while the window is hidden in the tray, so the periodic
+    // check can lag by an hour or more. Re-check whenever the window becomes visible so
+    // opening the app always reflects the latest release.
+    const onVisible = () => { if (!document.hidden) backgroundCheck(); };
+    document.addEventListener("visibilitychange", onVisible);
 
-    return () => { clearInterval(id); clearInterval(updateId); };
-  }, [loadDb]);
+    return () => { clearInterval(id); clearInterval(updateId); document.removeEventListener("visibilitychange", onVisible); };
+  }, [loadDb, checkUpdate]);
 
   // Suppress the browser's native right-click menu (this is a desktop app), but keep it in
   // text fields so paste still works.
@@ -2111,7 +2145,7 @@ export default function App() {
         <Resizer onPointerDown={onResize} />
         <div className="detail">
           {selection.kind === "settings" && (
-            <div className="detail__scroll"><SettingsView db={db} onDb={handleDb} /></div>
+            <div className="detail__scroll"><SettingsView db={db} onDb={handleDb} onCheckUpdates={() => checkUpdate(true)} /></div>
           )}
           {selProfile && selFolder && (
             <ProfileEditor key={selProfile.id} folder={selFolder} profile={selProfile}
