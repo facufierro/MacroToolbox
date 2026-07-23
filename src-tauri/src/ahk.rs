@@ -643,16 +643,44 @@ fn trigger_bare_key(trigger: &str) -> String {
             key = format!("F{rest}");
         }
     }
-    if let Some(sc) = us_scancode(&key) {
-        key = sc.to_string();
+    if let Some(sc) = layout_scancode(&key).or_else(|| us_scancode(&key).map(String::from)) {
+        key = sc;
     }
     key
 }
 
+/// Scancode of the key that produces this character on the user's active keyboard
+/// layout, so a trigger binds the key the user means by that character — on QWERTZ
+/// "z" is a different physical key than on QWERTY. Letters/digits only: that is the
+/// set the recorder stores as characters. Punctuation is stored by physical position
+/// (e.code), so resolving it as a character would bind the wrong key (on German, "["
+/// lives on AltGr+8 — not the Ü key the user actually pressed). None when the
+/// character doesn't exist on the layout (e.g. Cyrillic); us_scancode is the fallback.
+fn layout_scancode(key: &str) -> Option<String> {
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || !c.is_ascii_alphanumeric() {
+        return None;
+    }
+    use winapi::um::winuser::{GetKeyboardLayout, MapVirtualKeyExW, VkKeyScanExW, MAPVK_VK_TO_VSC};
+    unsafe {
+        let hkl = GetKeyboardLayout(0);
+        let vk = VkKeyScanExW(c as u16, hkl);
+        if vk == -1 {
+            return None;
+        }
+        let sc = MapVirtualKeyExW((vk & 0xFF) as u32, MAPVK_VK_TO_VSC, hkl);
+        if sc == 0 {
+            return None;
+        }
+        Some(format!("SC{sc:03X}"))
+    }
+}
+
 /// Scancode names (US-QWERTY positions) for keys whose single-character AHK names
-/// resolve through the ACTIVE keyboard layout. Binding by scancode keeps hotkeys on
-/// the same physical keys under any layout — a name like "q" doesn't exist on e.g. a
-/// Cyrillic layout, so the hotkey would never fire there.
+/// resolve through the ACTIVE keyboard layout. Fallback when the character isn't on
+/// the active layout — a name like "q" doesn't exist on e.g. a Cyrillic layout, so
+/// the hotkey would never fire there; the US position is the best guess.
 fn us_scancode(key: &str) -> Option<&'static str> {
     Some(match key {
         "a" => "SC01E", "b" => "SC030", "c" => "SC02E", "d" => "SC020",
@@ -714,8 +742,8 @@ fn trigger_to_key(trigger: &str) -> String {
         }
     }
 
-    if let Some(sc) = us_scancode(&key) {
-        key = sc.to_string();
+    if let Some(sc) = layout_scancode(&key).or_else(|| us_scancode(&key).map(String::from)) {
+        key = sc;
     }
 
     format!("${wild}{mods}{key}")
