@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPoi
 import { createPortal } from "react-dom";
 import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { api } from "./api";
 import type {
   Database,
@@ -1772,6 +1773,9 @@ export default function App() {
   const [updating, setUpdating] = useState(false);
   // The version the user dismissed, so the periodic re-check doesn't keep re-surfacing it.
   const dismissedUpdate = useRef<string | null>(null);
+  // The version already announced via system notification, so the periodic re-check
+  // doesn't toast the same release every 30 minutes.
+  const notifiedUpdate = useRef<string | null>(null);
   const { w: libW, onPointerDown: onResize } = useLibraryWidth();
 
   const loadDb = useCallback(async () => {
@@ -1802,6 +1806,21 @@ export default function App() {
           downloadUrl: asset?.browser_download_url ?? null,
           notesUrl: data.html_url,
         });
+        // The app usually sits in the tray, so also announce the update with a system
+        // notification — the in-app banner is invisible until the window is opened.
+        if (notifiedUpdate.current !== latest) {
+          notifiedUpdate.current = latest;
+          try {
+            let granted = await isPermissionGranted();
+            if (!granted) granted = (await requestPermission()) === "granted";
+            if (granted) {
+              sendNotification({
+                title: "MacroToolbox update available",
+                body: `Version ${latest} is ready. Open MacroToolbox to install it.`,
+              });
+            }
+          } catch { /* ignore */ }
+        }
       } catch { /* ignore */ }
     };
     checkUpdate();
