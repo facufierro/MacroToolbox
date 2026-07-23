@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -1860,11 +1861,19 @@ export default function App() {
     const updateId = setInterval(backgroundCheck, 30 * 60 * 1000);
     // WebView2 throttles timers while the window is hidden in the tray, so the periodic
     // check can lag by an hour or more. Re-check whenever the window becomes visible so
-    // opening the app always reflects the latest release.
+    // opening the app always reflects the latest release. visibilitychange alone is not
+    // enough: WebView2 doesn't reliably fire it for native show()/hide(), so the backend
+    // also emits main-window-shown whenever it restores the window.
     const onVisible = () => { if (!document.hidden) backgroundCheck(); };
     document.addEventListener("visibilitychange", onVisible);
+    const unlistenShown = listen("main-window-shown", backgroundCheck);
 
-    return () => { clearInterval(id); clearInterval(updateId); document.removeEventListener("visibilitychange", onVisible); };
+    return () => {
+      clearInterval(id);
+      clearInterval(updateId);
+      document.removeEventListener("visibilitychange", onVisible);
+      unlistenShown.then(f => f());
+    };
   }, [loadDb, checkUpdate]);
 
   // Suppress the browser's native right-click menu (this is a desktop app), but keep it in

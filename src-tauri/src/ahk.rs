@@ -721,9 +721,11 @@ fn trigger_to_key(trigger: &str) -> String {
     format!("${wild}{mods}{key}")
 }
 
-const BEHAVIOR_ENGINE: &str = r###"; Map single-character key names to their US-QWERTY scancodes so sends target the
-; physical key regardless of the active keyboard layout (a name like "q" resolves
-; through the active layout and doesn't exist on e.g. a Cyrillic layout).
+const BEHAVIOR_ENGINE: &str = r###"; Resolve a single-character key name for sending. When the character exists on the
+; active layout, keep the name: AHK then picks that layout's key (and shift state), so
+; "y" types y on QWERTZ too — a fixed US scancode would press the wrong key there.
+; The US-QWERTY scancode is only a fallback for layouts where the character doesn't
+; exist at all (e.g. Cyrillic), where the name would fail to resolve.
 PhysKey(key) {
     static sc := Map(
         "a", "SC01E", "b", "SC030", "c", "SC02E", "d", "SC020",
@@ -739,7 +741,14 @@ PhysKey(key) {
         "-", "SC00C", "=", "SC00D", "[", "SC01A", "]", "SC01B",
         "\", "SC02B", ";", "SC027", "'", "SC028", "``", "SC029",
         ",", "SC033", ".", "SC034", "/", "SC035")
-    return sc.Has(key) ? sc[key] : key
+    if sc.Has(key) {
+        try {
+            if (GetKeySC(key))
+                return key
+        }
+        return sc[key]
+    }
+    return key
 }
 
 ExecuteBehavior(str) {
