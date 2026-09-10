@@ -2135,7 +2135,7 @@ TriggerPhysicallyDown(triggerKey, useWindowsState) {
 mod tests {
     use super::{
         generate_combined_script, repeat_output_uses_trigger, trigger_chord_keys,
-        trigger_modifier_symbols, ArmedProfile,
+        trigger_modifier_symbols, trigger_to_key, ArmedProfile,
     };
     use crate::config::{BehaviorEvent, Hotkey, Profile, Script};
 

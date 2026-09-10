@@ -5,6 +5,7 @@ import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { api } from "./api";
+import { CloudSettings } from "./CloudSettings";
 import type {
   Database,
   Scope,
@@ -612,12 +613,15 @@ function Resizer({ onPointerDown }: { onPointerDown: (e: ReactPointerEvent) => v
   );
 }
 
-function useLibraryWidth() {
+function useLibraryWidth(savedWidth?: number | null) {
   const [w, setW] = useState(() => {
     const s = Number(localStorage.getItem("libW"));
     return s >= 240 && s <= 520 ? s : 300;
   });
   const wRef = useRef(w); wRef.current = w;
+  useEffect(() => {
+    if (savedWidth != null) setW(Math.min(520, Math.max(240, savedWidth)));
+  }, [savedWidth]);
   const onPointerDown = (e: ReactPointerEvent) => {
     e.preventDefault();
     const x0 = e.clientX, w0 = w;
@@ -625,7 +629,7 @@ function useLibraryWidth() {
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      localStorage.setItem("libW", String(wRef.current));
+      void api.setLibraryWidth(Math.round(wRef.current)).catch(e => alert(`Could not save sidebar width: ${e}`));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1976,6 +1980,13 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
   const [saved, setSaved] = useState(false);
   const [checking, setChecking] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  useEffect(() => {
+    setAhkExe(db.settings.ahk_exe);
+    setPythonExe(db.settings.python_exe ?? "");
+    setOpenToTray(db.settings.open_to_tray);
+    setCloseToTray(db.settings.close_to_tray);
+    setLaunchOnStartup(db.settings.launch_on_startup);
+  }, [db.settings.ahk_exe, db.settings.python_exe, db.settings.open_to_tray, db.settings.close_to_tray, db.settings.launch_on_startup]);
 
   async function checkForUpdates() {
     setChecking(true);
@@ -2012,6 +2023,7 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
   async function save() {
     try {
       const updated = await api.saveSettings({
+        ...db.settings,
         ahk_exe: ahkExe,
         python_exe: pythonExe,
         open_to_tray: openToTray,
@@ -2057,6 +2069,7 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
         </button>
         {updateStatus && <span style={{ fontSize: "0.88rem" }}>{updateStatus}</span>}
       </div>
+      <CloudSettings />
     </div>
   );
 }
@@ -2090,12 +2103,26 @@ export default function App() {
   // doesn't toast the same release every 30 minutes.
   const notifiedUpdate = useRef<string | null>(null);
   const launchUpdateCheckStarted = useRef(false);
-  const { w: libW, onPointerDown: onResize } = useLibraryWidth();
+  const { w: libW, onPointerDown: onResize } = useLibraryWidth(db?.settings.library_width);
 
   const loadDb = useCallback(async () => {
     const data = await api.getDatabase();
+    const legacyWidth = Number(localStorage.getItem("libW"));
+    if (data.settings.library_width == null && legacyWidth >= 240 && legacyWidth <= 520) {
+      await api.setLibraryWidth(Math.round(legacyWidth));
+      data.settings.library_width = Math.round(legacyWidth);
+    }
+    localStorage.removeItem("libW");
     setDb(data);
   }, []);
+
+  useEffect(() => {
+    const subscription = listen("firebase-restored", () => {
+      setModal(null); setCtx(null); setStatesFor(null); setSelection({ kind: "empty" });
+      void loadDb().catch(e => alert(`Could not refresh restored settings: ${e}`));
+    });
+    return () => { void subscription.then(unlisten => unlisten()); };
+  }, [loadDb]);
 
   // Check for updates against the latest GitHub release. Returns the new version (and shows
   // the banner) if one is available, null when up to date; throws on network failure. A

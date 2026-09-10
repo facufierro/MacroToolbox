@@ -114,6 +114,7 @@ export interface Scope {
 }
 
 export interface Settings {
+  library_width?: number | null;
   ahk_exe: string;
   python_exe: string;
   open_to_tray: boolean;
@@ -125,4 +126,14 @@ export interface Database {
   version: number;
   scopes: Scope[];
   settings: Settings;
+}
+
+export interface CloudStatus {
+  configured: boolean;
+  projectId: string | null;
+  account: string | null;
+  phase: string;
+  message: string;
+  savedAt: number | null;
+  revision: string | null;
 }
