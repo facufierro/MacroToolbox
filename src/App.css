@@ -577,3 +577,10 @@ textarea { resize: vertical; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text2); }
+.cloud-settings { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.cloud-settings h3, .cloud-settings p { margin: 0; }
+.cloud-settings small { opacity: .75; line-height: 1.5; }
+.cloud-settings__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cloud-settings__setup { display: flex; flex-direction: column; gap: 12px; }
+.cloud-settings__setup label { display: flex; flex-direction: column; gap: 6px; }
+.cloud-settings__error { color: var(--danger, #ef7777); }
