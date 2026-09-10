@@ -6,6 +6,7 @@ use tauri::{Emitter, Manager, State};
 
 mod ahk;
 mod config;
+mod firebase;
 mod scripts;
 
 use config::{Database, Game, Profile, Script, Settings};
@@ -42,6 +43,7 @@ struct WindowClientBounds {
 }
 
 pub struct AppState {
+    pub db_access: Mutex<()>,
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     /// The single always-on AutoHotkey process holding the Copilot remap and every armed
@@ -232,7 +234,14 @@ fn get_window_title(hwnd: winapi::shared::windef::HWND) -> String {
 
 #[tauri::command]
 fn get_database(state: State<AppState>) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     config::load_db(&state.db_path)
+}
+
+fn save_database(app: &tauri::AppHandle, state: &AppState, db: &Database) -> Result<(), String> {
+    config::save_db(&state.db_path, db)?;
+    app.state::<firebase::Firebase>().mark_pending(app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -241,7 +250,8 @@ fn debug_overlay_log(message: String) {
 }
 
 #[tauri::command]
-fn upsert_game(state: State<AppState>, game: Game) -> Result<Database, String> {
+fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     let mut game = game;
     if game.id == config::GLOBAL_FOLDER_ID {
         game.exe = GLOBAL_GAME_EXE.to_string();
@@ -251,26 +261,28 @@ fn upsert_game(state: State<AppState>, game: Game) -> Result<Database, String> {
         Some(existing) => *existing = game,
         None => db.games.push(game),
     }
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     Ok(db)
 }
 
 #[tauri::command]
-fn delete_game(state: State<AppState>, id: String) -> Result<Database, String> {
+fn delete_game(app: tauri::AppHandle, state: State<AppState>, id: String) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     // The Global folder is a permanent fixture and can never be deleted.
     if id == config::GLOBAL_FOLDER_ID {
         return Err("The Global folder can't be deleted.".to_string());
     }
     let mut db = config::load_db(&state.db_path)?;
     db.games.retain(|g| g.id != id);
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     Ok(db)
 }
 
 #[tauri::command]
-fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
@@ -279,18 +291,19 @@ fn upsert_profile(state: State<AppState>, game_id: String, profile: Profile) -> 
         Some(existing) => *existing = profile,
         None => game.profiles.push(profile),
     }
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     Ok(db)
 }
 
 #[tauri::command]
-fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
+fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     Ok(db)
 }
@@ -299,6 +312,7 @@ fn delete_profile(state: State<AppState>, game_id: String, profile_id: String) -
 /// folder's app is focused; multiple profiles can be armed at once.
 #[tauri::command]
 fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: String, armed: bool) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     let mut found = false;
     for game in &mut db.games {
@@ -311,7 +325,7 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
     if !found {
         return Err("Profile not found".to_string());
     }
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     if !armed {
         // Stop the profile's running scripts and, if it owns the visible overlay, drop it.
@@ -1553,12 +1567,23 @@ fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
 }
 
 #[tauri::command]
-fn save_settings(app: tauri::AppHandle, state: State<AppState>, settings: Settings) -> Result<Database, String> {
+fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Settings) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
+    settings.library_width = db.settings.library_width;
     db.settings = settings;
-    config::save_db(&state.db_path, &db)?;
+    save_database(&app, &state, &db)?;
     sync_autostart(&app, db.settings.launch_on_startup);
     Ok(db)
+}
+
+#[tauri::command]
+fn set_library_width(app: tauri::AppHandle, state: State<AppState>, width: u16) -> Result<(), String> {
+    if !(240..=520).contains(&width) { return Err("Invalid sidebar width.".into()); }
+    let _lock = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    db.settings.library_width = Some(width);
+    save_database(&app, &state, &db)
 }
 
 /// Download the given release installer and launch it, then quit so the installer can
@@ -1794,6 +1819,7 @@ pub fn run() {
             let resource_dir = app.path().resource_dir().ok();
 
             app.manage(AppState {
+                db_access: Mutex::new(()),
                 db_path: db_path.clone(),
                 scripts_path: scripts_dir,
                 hotkeys_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
@@ -1803,6 +1829,8 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 window_transforms: Mutex::new(HashMap::new()),
             });
+            app.manage(firebase::Firebase::new(data_dir).map_err(std::io::Error::other)?);
+            firebase::Firebase::start(app.handle().clone());
 
             // Launch the combined Copilot remap and profile hotkeys script at startup.
             {
@@ -1923,6 +1951,14 @@ pub fn run() {
             set_profile_armed,
             get_ahk_status,
             save_settings,
+            set_library_width,
+            firebase::firebase_status,
+            firebase::firebase_configure,
+            firebase::firebase_export_config,
+            firebase::firebase_login,
+            firebase::firebase_cancel_login,
+            firebase::firebase_logout,
+            firebase::firebase_sync,
             get_app_version,
             reveal_main_window,
             download_and_install_update,

@@ -47,3 +47,11 @@ desktop.ini
 .env
 .env.*
 !.env.example
+
+# Firebase connection files and installers containing the old embedded connection
+/firebase/client.json
+/firebase/client.local.json
+/MacroToolbox-Firebase.json
+client_secret_*.json
+/private-artifacts/
+/releases/v4.3.0/

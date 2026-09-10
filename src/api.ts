@@ -1,7 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Database, Scope, Profile, Settings } from "./types";
+import type { CloudStatus, Database, Scope, Profile, Settings } from "./types";
 
 export const api = {
+  cloudStatus: () => invoke<CloudStatus>("firebase_status"),
+  cloudConfigure: (apiKey: string, desktopJson: string) => invoke<CloudStatus>("firebase_configure", { apiKey, desktopJson }),
+  cloudExportConfig: () => invoke<string>("firebase_export_config"),
+  cloudLogin: () => invoke<CloudStatus>("firebase_login"),
+  cloudCancelLogin: () => invoke<void>("firebase_cancel_login"),
+  cloudLogout: () => invoke<CloudStatus>("firebase_logout"),
+  cloudSync: (choice: "local" | "cloud" | null = null, expectedRevision: string | null = null) => invoke<CloudStatus>("firebase_sync", { choice, expectedRevision }),
+  setLibraryWidth: (width: number) => invoke<void>("set_library_width", { width }),
   getDatabase: () =>
     invoke<Database>("get_database"),
 

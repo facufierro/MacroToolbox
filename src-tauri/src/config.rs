@@ -276,6 +276,8 @@ pub struct BehaviorEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
+    #[serde(default)]
+    pub library_width: Option<u16>,
     pub ahk_exe: String,
     /// Python interpreter used to run scripts. Empty falls back to `python` then the
     /// Windows `py` launcher.
