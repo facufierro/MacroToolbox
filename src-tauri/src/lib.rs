@@ -18,20 +18,9 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 const GLOBAL_GAME_EXE: &str = "*";
 
 #[cfg(target_os = "windows")]
-struct WindowTransformState {
-    hwnd: isize,
-    style: i32,
-    ex_style: i32,
-    placement: winapi::um::winuser::WINDOWPLACEMENT,
-    borderless: bool,
-    stretched: bool,
-}
-
+mod window_transform;
 #[cfg(target_os = "windows")]
-enum WindowTransform {
-    Borderless,
-    Stretch,
-}
+use window_transform::{WindowTransform, WindowTransformState};
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy)]
@@ -782,6 +771,14 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             },
                             None => ("400 Bad Request", b"Missing executable".to_vec()),
                         }
+                    } else if route == "/fit" {
+                        match get_query_param(action, "exe").filter(|value| !value.is_empty()) {
+                            Some(exe) => match toggle_fit(handle.state(), exe) {
+                                Ok(enabled) => ("200 OK", enabled.to_string().into_bytes()),
+                                Err(err) => ("404 Not Found", err.into_bytes()),
+                            },
+                            None => ("400 Bad Request", b"Missing executable".to_vec()),
+                        }
                     } else if route == "/stretch" {
                         match get_query_param(action, "exe").filter(|value| !value.is_empty()) {
                             Some(exe) => match toggle_stretch(handle.state(), exe) {
@@ -1168,6 +1165,14 @@ fn toggle_stretch(state: State<AppState>, exe: String) -> Result<bool, String> {
     Err("Not supported on this platform".to_string())
 }
 
+#[tauri::command]
+fn toggle_fit(state: State<AppState>, exe: String) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    return toggle_window_transform(&state, &exe, WindowTransform::Fit);
+    #[cfg(not(target_os = "windows"))]
+    Err("Not supported on this platform".to_string())
+}
+
 #[cfg(target_os = "windows")]
 fn toggle_window_transform(
     state: &AppState,
@@ -1175,178 +1180,32 @@ fn toggle_window_transform(
     transform: WindowTransform,
 ) -> Result<bool, String> {
     let key = exe.to_lowercase();
-    let hwnd = find_window_by_exe(exe)
-        .ok_or_else(|| format!("Game window not found for '{exe}'"))?;
-    let hwnd_value = hwnd as isize;
     let mut transforms = state.window_transforms.lock().unwrap();
-
-    if transforms.get(&key).is_some_and(|saved| saved.hwnd != hwnd_value) {
+    if transforms.get(&key).is_some_and(|saved| !saved.is_current()) {
         transforms.remove(&key);
     }
-
-    let newly_captured = !transforms.contains_key(&key);
-    if newly_captured {
-        transforms.insert(key.clone(), capture_window_transform(hwnd)?);
+    // Keep the selected window for the whole transform session; a foreground dialog belonging
+    // to the same executable must not replace its parent's original size and placement.
+    if !transforms.contains_key(&key) {
+        let hwnd = find_window_by_exe(exe)
+            .ok_or_else(|| format!("Game window not found for '{exe}'"))?;
+        transforms.insert(key.clone(), WindowTransformState::capture(hwnd)?);
     }
-
-    let (enabled, remove_state, error) = {
-        let saved = transforms.get_mut(&key).unwrap();
-        let previous = (saved.borderless, saved.stretched);
-        let enabled = match transform {
-            WindowTransform::Borderless => {
-                saved.borderless = !saved.borderless;
-                saved.borderless
-            }
-            WindowTransform::Stretch => {
-                saved.stretched = !saved.stretched;
-                saved.stretched
-            }
-        };
-
-        match unsafe { apply_window_transform(hwnd, saved) } {
-            Ok(()) => (enabled, !saved.borderless && !saved.stretched, None),
-            Err(error) => {
-                saved.borderless = previous.0;
-                saved.stretched = previous.1;
-                let _ = unsafe { apply_window_transform(hwnd, saved) };
-                (enabled, newly_captured, Some(error))
-            }
-        }
-    };
-
-    if remove_state {
+    let saved = transforms.get_mut(&key).unwrap();
+    let enabled = saved.toggle(transform)?;
+    if !saved.is_active() {
         transforms.remove(&key);
     }
-    match error {
-        Some(error) => Err(error),
-        None => Ok(enabled),
-    }
+    Ok(enabled)
 }
 
 #[cfg(target_os = "windows")]
-fn capture_window_transform(
-    hwnd: winapi::shared::windef::HWND,
-) -> Result<WindowTransformState, String> {
-    use winapi::um::winuser::{GetWindowLongW, GetWindowPlacement, GWL_EXSTYLE, GWL_STYLE, WINDOWPLACEMENT};
-
-    unsafe {
-        let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
-        placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-        if GetWindowPlacement(hwnd, &mut placement) == 0 {
-            return Err("Failed to read current window placement".to_string());
+fn restore_window_transforms(state: &AppState) {
+    for (_, mut saved) in state.window_transforms.lock().unwrap().drain() {
+        if let Err(error) = saved.restore() {
+            eprintln!("[window] {error}");
         }
-        Ok(WindowTransformState {
-            hwnd: hwnd as isize,
-            style: GetWindowLongW(hwnd, GWL_STYLE),
-            ex_style: GetWindowLongW(hwnd, GWL_EXSTYLE),
-            placement,
-            borderless: false,
-            stretched: false,
-        })
     }
-}
-
-#[cfg(target_os = "windows")]
-unsafe fn apply_window_transform(
-    hwnd: winapi::shared::windef::HWND,
-    saved: &WindowTransformState,
-) -> Result<(), String> {
-    use winapi::um::winuser::*;
-
-    let style = if saved.borderless {
-        saved.style & !(WS_OVERLAPPEDWINDOW as i32)
-    } else {
-        saved.style
-    };
-    let ex_style = if saved.borderless {
-        saved.ex_style
-            & !((WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE) as i32)
-    } else {
-        saved.ex_style
-    };
-    SetWindowLongW(hwnd, GWL_STYLE, style);
-    SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style);
-
-    if saved.stretched {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut monitor_info: MONITORINFO = std::mem::zeroed();
-        monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(monitor, &mut monitor_info) == 0 {
-            return Err("Failed to read monitor bounds".to_string());
-        }
-
-        let bounds = monitor_info.rcMonitor;
-        let mut outer = winapi::shared::windef::RECT {
-            left: 0,
-            top: 0,
-            right: bounds.right - bounds.left,
-            bottom: bounds.bottom - bounds.top,
-        };
-        if AdjustWindowRectEx(
-            &mut outer,
-            style as u32,
-            (!GetMenu(hwnd).is_null()) as i32,
-            ex_style as u32,
-        ) == 0
-        {
-            return Err("Failed to calculate the stretched window frame".to_string());
-        }
-
-        // Keep the window frame, but bypass its normal WM_WINDOWPOSCHANGING size constraints so
-        // fixed-size games cannot replace the requested monitor bounds with their preferred size.
-        if SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            bounds.left + outer.left,
-            bounds.top + outer.top,
-            outer.right - outer.left,
-            outer.bottom - outer.top,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
-        ) == 0 {
-            return Err("Failed to stretch the window".to_string());
-        }
-
-        let mut actual: winapi::shared::windef::RECT = std::mem::zeroed();
-        if GetClientRect(hwnd, &mut actual) == 0 {
-            return Err("Failed to verify the stretched client bounds".to_string());
-        }
-        let mut client_origin = winapi::shared::windef::POINT { x: 0, y: 0 };
-        if ClientToScreen(hwnd, &mut client_origin) == 0 {
-            return Err("Failed to verify the stretched client position".to_string());
-        }
-        let requested_width = bounds.right - bounds.left;
-        let requested_height = bounds.bottom - bounds.top;
-        let actual_width = actual.right - actual.left;
-        let actual_height = actual.bottom - actual.top;
-        if client_origin.x != bounds.left
-            || client_origin.y != bounds.top
-            || actual_width != requested_width
-            || actual_height != requested_height
-        {
-            return Err(format!(
-                "The target window refused the stretch (requested {requested_width}x{requested_height}, got {actual_width}x{actual_height})",
-            ));
-        }
-        return Ok(());
-    }
-
-    let mut placement = saved.placement;
-    placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-    if SetWindowPlacement(hwnd, &placement) == 0 {
-        return Err("Failed to restore previous window placement".to_string());
-    }
-    if SetWindowPos(
-        hwnd,
-        std::ptr::null_mut(),
-        0,
-        0,
-        0,
-        0,
-        SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE,
-    ) == 0 {
-        return Err("Failed to update the window frame".to_string());
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1941,6 +1800,7 @@ pub fn run() {
             list_open_executables,
             toggle_borderless,
             toggle_stretch,
+            toggle_fit,
             write_text_file,
             read_text_file,
             read_image_as_data_url,
@@ -1963,6 +1823,12 @@ pub fn run() {
             reveal_main_window,
             download_and_install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                #[cfg(target_os = "windows")]
+                restore_window_transforms(&app.state::<AppState>());
+            }
+        });
 }

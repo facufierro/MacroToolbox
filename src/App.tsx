@@ -887,7 +887,7 @@ type Step =
   | { type: "state"; stateId: string }
   | { type: "sleep"; ms: string }
   | { type: "send"; text: string }
-  | { type: "borderless" | "killprocess" | "lock" | "savecursor" | "restorecursor" | "stretch" };
+  | { type: "borderless" | "fit" | "killprocess" | "lock" | "savecursor" | "restorecursor" | "stretch" };
 
 function parseSteps(behavior: string): Step[] {
   if (!behavior.trim()) return [];
@@ -901,6 +901,7 @@ function parseSteps(behavior: string): Step[] {
     if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
     if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
     if (s === "borderless") return [{ type: "borderless" as const }];
+    if (s === "fit") return [{ type: "fit" as const }];
     if (s === "killprocess") return [{ type: "killprocess" as const }];
     if (s === "stretch") return [{ type: "stretch" as const }];
     if (s === "lock") return [{ type: "lock" as const }];
@@ -1054,6 +1055,7 @@ function BehaviorStepsEditor({ steps, gameExe, states, onChange }: {
       </div>
       <div className="step-add-btns">
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "borderless" })}>+ borderless</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "fit" })}>+ fit</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "goto", x: "", y: "" })}>+ goto</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "hold", key: "" })}>+ hold</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "killprocess" })}>+ killprocess</button>

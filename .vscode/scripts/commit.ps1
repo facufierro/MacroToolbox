@@ -21,5 +21,14 @@ if (-not $codexPath) {
     throw 'Codex CLI not found. Install or enable the OpenAI Codex VS Code extension, or add codex to PATH.'
 }
 
-& $codexPath exec --ephemeral --model gpt-5.6-terra --config 'model_reasoning_effort="medium"' --approve-for-me '$commit'
+$commitPrompt = @'
+$commit
+
+Include every current non-sensitive working-tree change in logical commits.
+The Windows sandbox helper currently fails before shell startup with setup refresh had errors.
+For the required repository inspections, skill reads, and Git metadata writes, request exec_command with sandbox_permissions=require_escalated from the first attempt. Automatic approval review is enabled.
+Keep each Git mutation separate. Do not retry that helper failure in the normal sandbox, disable sandboxing, or push.
+'@
+
+& $codexPath exec --ephemeral --skip-git-repo-check --model gpt-5.6-terra --config 'model_reasoning_effort="medium"' --approve-for-me $commitPrompt
 exit $LASTEXITCODE
