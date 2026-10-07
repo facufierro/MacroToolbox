@@ -7,6 +7,7 @@ global syntheticDown := Map(), chordHolds := Map(), heldOutputCounts := Map(), m
 global repeatDown := Map(), repeatChord := Map(), enabled := Map()
 global behaviorClipboardBackup := "", behaviorClipboardPending := false, behaviorClipboardSequence := 0
 global testEvents := [], testOnSend := 0, testReleaseTime := 0
+global testCommands := false
 OnError(TestUnhandledError)
 
 RunTest("release precedes trailing delay and press", TestSequence)
@@ -16,7 +17,8 @@ RunTest("another owner retains its held output", TestSharedOutput)
 RunTest("standalone combined holds still release together", TestStandaloneHold)
 RunTest("failed hold send releases owned input", TestFailedSend)
 RunTest("partial hold failure preserves another owner", TestPartialFailure)
-FileAppend("All 7 behavior tests passed.`n", "*")
+RunTest("window behaviors keep their configured target", TestWindowCommands)
+FileAppend("All 8 behavior tests passed.`n", "*")
 ExitApp 0
 
 RunTest(name, test) {
@@ -127,6 +129,18 @@ TestPartialFailure() {
     HoldChordUp("other")
 }
 
+TestWindowCommands() {
+    global testCommands
+    testCommands := []
+    ExecuteBehavior("borderless;stretch;fit", "", "Game & App.exe")
+    Assert(testCommands.Length = 3, "window command was skipped")
+    for index, command in ["borderless", "stretch", "fit"]
+        Assert(testCommands[index] = command "?exe=[encoded:Game & App.exe]", "window command lost its configured target")
+    Assert(testEvents.Length = 0, "window behavior sent keyboard or mouse input")
+    ExecuteBehavior("fit", "", "")
+    Assert(testCommands.Length = 3, "empty target sent a window command")
+}
+
 FailMouseDown(keys) {
     if InStr(keys, "{xbutton2 downr}")
         throw Error("simulated send failure")
@@ -156,14 +170,17 @@ TestUnhandledError(failure, *) {
     ExitApp 1
 }
 
-SendOverlayCommand(*) {
-    throw Error("unexpected backend command")
+SendOverlayCommand(command) {
+    global testCommands
+    if !IsObject(testCommands)
+        throw Error("unexpected backend command")
+    testCommands.Push(command)
 }
 SendAppEvent(*) {
     throw Error("unexpected backend event")
 }
-UriEncode(*) {
-    throw Error("unexpected URI encoding")
+UriEncode(value) {
+    return "[encoded:" value "]"
 }
 CheckRepeatReleases(*) {
     throw Error("unexpected repeat timer")

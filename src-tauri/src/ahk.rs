@@ -1429,6 +1429,8 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
                 SendBehaviorCommand("killprocess", configuredExe)
             } else if (token = "stretch") {
                 SendBehaviorCommand("stretch", configuredExe)
+            } else if (token = "fit") {
+                SendBehaviorCommand("fit", configuredExe)
             } else if RegExMatch(token, "i)^goto\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)$", &m) {
                 SendMode "Event"
                 SetMouseDelay -1
@@ -2194,7 +2196,7 @@ mod tests {
 
     #[test]
     fn behavior_commands_receive_the_profile_target() {
-        let profile = profile_with_hotkey("f11", "borderless;stretch;killprocess");
+        let profile = profile_with_hotkey("f11", "borderless;stretch;fit;killprocess");
         let armed = [ArmedProfile {
             siblings: std::slice::from_ref(&profile),
             profile: &profile,
@@ -2203,11 +2205,12 @@ mod tests {
         let script = generate_combined_script(&armed);
 
         assert!(script.contains(
-            "ExecuteBehavior(\"borderless;stretch;killprocess\", \"\", \"Game.exe\")"
+            "ExecuteBehavior(\"borderless;stretch;fit;killprocess\", \"\", \"Game.exe\")"
         ));
         assert!(script.contains("SendBehaviorCommand(\"borderless\", configuredExe)"));
         assert!(script.contains("SendBehaviorCommand(\"killprocess\", configuredExe)"));
         assert!(script.contains("SendBehaviorCommand(\"stretch\", configuredExe)"));
+        assert!(script.contains("SendBehaviorCommand(\"fit\", configuredExe)"));
         assert!(script.contains("targetExe := WinGetProcessName(\"A\")"));
     }
 

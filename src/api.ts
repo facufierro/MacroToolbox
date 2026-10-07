@@ -39,6 +39,9 @@ export const api = {
   toggleStretch: (exe: string) =>
     invoke<boolean>("toggle_stretch", { exe }),
 
+  toggleFit: (exe: string) =>
+    invoke<boolean>("toggle_fit", { exe }),
+
   upsertGame: (game: Scope) =>
     invoke<Database>("upsert_game", { game }),
 
