@@ -2,6 +2,15 @@
 
 These instructions apply to the entire repository.
 
+## Preserve the app's UI style
+
+- When adding or changing features, do not add tutorial labels, explanatory descriptions,
+  helper text, compatibility notices, or instructional tooltips unless the user explicitly
+  requests them.
+- Match the app's existing visual style, control patterns, layout density, spacing, typography,
+  and colors. Keep new UI as concise as comparable existing controls; do not redesign adjacent UI
+  unless requested.
+
 ## Copilot key remap invariants
 
 The Copilot key is not a standalone key: on the target Windows hardware it arrives as the
