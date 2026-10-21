@@ -342,14 +342,19 @@ fn generate_profile_block(
         if !keyset.insert(binding_id) { continue; }
         let trigger = escape_ahk_string(&hk.trigger);
         let trigger_modifiers = trigger_modifier_symbols(&hk.trigger);
-        // Unmodified held remaps must still activate while an unrelated modifier is held.
-        // Keep explicit modifier chords exact so shifted and unshifted shortcuts stay distinct.
-        let ahk_key = if trigger_modifiers.is_empty()
-            && (parse_pure_hold(&hk.behavior).is_some() || has_compound_hold(&hk.behavior))
-        {
-            format!("$*{}", ahk_key.trim_start_matches('$'))
+        // Missing options retain legacy matching; an explicit choice controls whether
+        // extra held modifiers may activate this binding and pass through to its output.
+        let ahk_key = if hk.allow_extra_modifiers.unwrap_or(trigger_modifiers.is_empty()) {
+            format!("$*{}", ahk_key.trim_start_matches(&['$', '*'][..]))
         } else {
             ahk_key
+        };
+        // AltGr needs its native wildcard to tolerate Windows' synthesized LCtrl.
+        // An explicit exact-match choice must still reject other held modifiers.
+        let modifier_condition = if hk.allow_extra_modifiers == Some(false) && ahk_key.contains('*') {
+            format!("TriggerModifiersAllowed(\"{trigger}\")")
+        } else {
+            String::new()
         };
         // The overlay only reacts to a hotkey_triggered ping for a binding that carries a
         // state_id (it drives overlay state flags/timers). For every other hotkey the ping is
@@ -376,6 +381,7 @@ fn generate_profile_block(
                 &mut combo_blocks,
                 &enabled_condition,
                 &prerequisite_keys,
+                &modifier_condition,
                 &binding,
             );
             for trigger_key in physical_chord_keys {
@@ -400,6 +406,7 @@ fn generate_profile_block(
                 &mut combo_blocks,
                 &enabled_condition,
                 &prerequisite_keys,
+                &modifier_condition,
                 &binding,
             );
             for trigger_key in physical_chord_keys {
@@ -430,6 +437,7 @@ fn generate_profile_block(
                     &mut combo_blocks,
                     &enabled_condition,
                     &prerequisite_keys,
+                    &modifier_condition,
                     &binding,
                 );
                 // One global key-up hotkey per physical key clears the repeat flag. `~` lets the
@@ -453,6 +461,7 @@ fn generate_profile_block(
             &mut combo_blocks,
             &enabled_condition,
             &prerequisite_keys,
+            &modifier_condition,
             &binding,
         );
     }
@@ -470,6 +479,7 @@ fn generate_profile_block(
             &mut combo_blocks,
             &enabled_condition,
             &prerequisite_keys,
+            "",
             &format!("{ahk_key}:: RunScript(\"{sid}\")\n"),
         );
     }
@@ -498,6 +508,7 @@ fn generate_profile_block(
             &mut toggle_combo_blocks,
             &focus_condition,
             &prerequisite_keys,
+            "",
             &format!("{key}:: ToggleEnabled(\"{id}\")\n"),
         );
     }
@@ -522,18 +533,25 @@ fn push_trigger_binding(
     combo_blocks: &mut String,
     base_condition: &str,
     prerequisite_keys: &str,
+    modifier_condition: &str,
     binding: &str,
 ) {
-    if prerequisite_keys.is_empty() {
+    if prerequisite_keys.is_empty() && modifier_condition.is_empty() {
         simple_lines.push_str(binding);
         return;
     }
-    let prerequisite_keys = escape_ahk_string(prerequisite_keys);
-    let condition = if base_condition.is_empty() {
-        format!("TriggerChordHeld(\"{prerequisite_keys}\")")
-    } else {
-        format!("{base_condition} && TriggerChordHeld(\"{prerequisite_keys}\")")
-    };
+    let mut conditions = Vec::new();
+    if !base_condition.is_empty() {
+        conditions.push(base_condition.to_string());
+    }
+    if !prerequisite_keys.is_empty() {
+        let prerequisite_keys = escape_ahk_string(prerequisite_keys);
+        conditions.push(format!("TriggerChordHeld(\"{prerequisite_keys}\")"));
+    }
+    if !modifier_condition.is_empty() {
+        conditions.push(modifier_condition.to_string());
+    }
+    let condition = conditions.join(" && ");
     combo_blocks.push_str(&format!("#HotIf {condition}\n{binding}#HotIf\n"));
 }
 
@@ -668,9 +686,9 @@ global syntheticDown := Map()
 global chordHolds := Map()
 global heldOutputCounts := Map()
 global mirroredMouseDown := Map()
-global copilotState := "idle"
+global copilotState := {{phase: GetKeyState("LWin", "P") ? "win_held" : "idle", input: "",
+    shiftHeld: GetKeyState("LShift", "P"), shiftHeldBefore: false, winHeldBefore: false}}
 global copilotShiftSuppressed := false
-global copilotShiftForwarded := false
 global copilotCtrlHeld := false
 global copilotCtrlReleasePending := false
 global behaviorClipboardBackup := ""
@@ -889,156 +907,7 @@ ReleaseStaleCopilotModifiers()
 ; removes that hook, so its RCtrl cannot act as a modifier for this script's own RCtrl hotkeys.
 ; SendEvent at level 1 keeps the remapped key visible to the level-0 profile bindings and lets
 ; the same hook forget Copilot's built-in LWin/LShift before matching the user's next key.
-SendCopilotKeys(keys) {{
-    previousSendLevel := SendLevel(1)
-    try SendEvent(keys)
-    finally SendLevel(previousSendLevel)
-}}
-
-ReleaseStaleCopilotModifiers() {{
-    if !GetKeyState("RCtrl", "P")
-        SendCopilotKeys("{{Blind}}{{RCtrl up}}")
-    if !GetKeyState("LWin", "P")
-        SendInput "{{Blind}}{{LWin up}}"
-    if !GetKeyState("LShift", "P")
-        SendInput "{{Blind}}{{LShift up}}"
-}}
-
-ReleaseCopilotCtrl() {{
-    global copilotCtrlHeld, copilotCtrlReleasePending
-    if !copilotCtrlHeld
-        return
-    copilotCtrlHeld := false
-    ; Do not cancel a real Right Ctrl which happens to be held at the same time. Keep the
-    ; poll alive and clear our synthetic DownR immediately after the physical key is released.
-    if GetKeyState("RCtrl", "P") {{
-        copilotCtrlReleasePending := true
-        SetTimer CheckCopilotRelease, 10
-    }} else {{
-        copilotCtrlReleasePending := false
-        SetTimer CheckCopilotRelease, 0
-        SendCopilotKeys("{{Blind}}{{RCtrl up}}")
-    }}
-}}
-
-ReleaseCopilotHeld(*) {{
-    global copilotCtrlReleasePending, copilotShiftForwarded
-    ReleaseCopilotCtrl()
-    if copilotCtrlReleasePending && !GetKeyState("RCtrl", "P")
-        SendCopilotKeys("{{Blind}}{{RCtrl up}}")
-    copilotCtrlReleasePending := false
-    copilotShiftForwarded := false
-    if !GetKeyState("LWin", "P")
-        SendInput "{{Blind}}{{LWin up}}"
-    if !GetKeyState("LShift", "P")
-        SendInput "{{Blind}}{{LShift up}}"
-}}
-
-CheckCopilotRelease(*) {{
-    global copilotCtrlReleasePending
-    if !copilotCtrlReleasePending {{
-        SetTimer CheckCopilotRelease, 0
-        return
-    }}
-    if copilotCtrlReleasePending && !GetKeyState("RCtrl", "P") {{
-        copilotCtrlReleasePending := false
-        SetTimer CheckCopilotRelease, 0
-        SendCopilotKeys("{{Blind}}{{RCtrl up}}")
-    }}
-}}
-
-CopilotShiftPhysicallyDown() {{
-    return (DllCall("GetAsyncKeyState", "Int", 0xA0, "Short") & 0x8000) != 0
-}}
-
-CheckCopilotShiftRelease(*) {{
-    global copilotShiftSuppressed, copilotShiftForwarded
-    shiftDown := CopilotShiftPhysicallyDown()
-    if copilotShiftSuppressed && !shiftDown
-        copilotShiftSuppressed := false
-    if copilotShiftForwarded && !shiftDown {{
-        copilotShiftForwarded := false
-        SendInput "{{Blind}}{{LShift up}}"
-    }}
-    if !copilotShiftSuppressed && !copilotShiftForwarded
-        SetTimer CheckCopilotShiftRelease, 0
-}}
-
-PassCopilotKeys() {{
-    global copilotState, copilotShiftSuppressed, copilotShiftForwarded
-    if copilotState != "waiting"
-        return
-    copilotState := "lwin_passed"
-    if copilotShiftSuppressed && CopilotShiftPhysicallyDown() {{
-        copilotShiftSuppressed := false
-        copilotShiftForwarded := true
-        SendInput "{{Blind}}{{LWin down}}{{LShift down}}"
-    }} else {{
-        copilotShiftSuppressed := false
-        SendInput "{{Blind}}{{LWin down}}"
-    }}
-}}
-
-$*LWin::{{
-    global copilotState
-    copilotState := "waiting"
-    SetTimer PassCopilotKeys, -30
-}}
-
-$*LWin up::{{
-    global copilotState, copilotShiftSuppressed, copilotShiftForwarded
-    if copilotState = "waiting" {{
-        SetTimer PassCopilotKeys, 0
-        copilotState := "idle"
-        if copilotShiftSuppressed && CopilotShiftPhysicallyDown() {{
-            copilotShiftSuppressed := false
-            copilotShiftForwarded := true
-            SendInput "{{Blind}}{{LWin down}}{{LShift down}}{{LWin up}}"
-        }} else {{
-            copilotShiftSuppressed := false
-            SendInput "{{Blind}}{{LWin down}}{{LWin up}}"
-        }}
-    }} else if copilotState = "lwin_passed" {{
-        copilotState := "idle"
-        SendInput "{{Blind}}{{LWin up}}"
-    }}
-}}
-
-; Only the Shift which immediately follows an intercepted LWin can belong to the Copilot
-; chord. Every ordinary Shift press bypasses MacroToolbox and reaches games physically.
-#HotIf copilotState = "waiting"
-$*LShift::{{
-    global copilotShiftSuppressed
-    copilotShiftSuppressed := true
-    SetTimer CheckCopilotShiftRelease, 5
-}}
-#HotIf
-
-$*SC06E::{{
-    global copilotState, copilotShiftSuppressed, copilotShiftForwarded
-    global copilotCtrlHeld, copilotCtrlReleasePending
-    SetTimer PassCopilotKeys, 0
-    copilotState := "copilot"
-    copilotShiftSuppressed := false
-    SetTimer CheckCopilotShiftRelease, 0
-    copilotShiftForwarded := false
-    if copilotCtrlHeld
-        return
-    copilotCtrlHeld := true
-    copilotCtrlReleasePending := false
-    SetTimer CheckCopilotRelease, 0
-    ; Copilot's own chord must not count as the user's Shift/Win modifiers. Clearing them and
-    ; pressing RCtrl in one hook-visible batch makes Copilot+O match RCtrl+O, while a real Shift
-    ; pressed afterward still makes Copilot+Shift+O match RCtrl+Shift+O.
-    SendCopilotKeys("{{Blind}}{{LShift up}}{{LWin up}}{{RCtrl downR}}")
-}}
-
-$*SC06E up::{{
-    global copilotState
-    if copilotState = "copilot"
-        copilotState := "idle"
-    ReleaseCopilotCtrl()
-}}
+{COPILOT_ENGINE}
 
 {release_up_lines}
 {blocks}
@@ -1348,6 +1217,189 @@ fn trigger_to_key(trigger: &str) -> String {
     format!("${wild}{mods}{key}")
 }
 
+const COPILOT_ENGINE: &str = r###"SendCopilotKeys(keys) {
+    previousSendLevel := SendLevel(1)
+    try SendEvent(keys)
+    finally SendLevel(previousSendLevel)
+}
+
+ReleaseStaleCopilotModifiers() {
+    if !GetKeyState("RCtrl", "P")
+        SendCopilotKeys("{Blind}{RCtrl up}")
+    if !GetKeyState("LWin", "P")
+        SendCopilotKeys("{Blind}{LWin up}")
+    if !GetKeyState("LShift", "P")
+        SendCopilotKeys("{Blind}{LShift up}")
+}
+
+ReleaseCopilotCtrl() {
+    global copilotCtrlHeld, copilotCtrlReleasePending
+    if !copilotCtrlHeld
+        return
+    copilotCtrlHeld := false
+    ; A physical Right Ctrl owns its hold until its own release; clear our DownR afterward.
+    if GetKeyState("RCtrl", "P") {
+        copilotCtrlReleasePending := true
+        SetTimer CheckCopilotRelease, 10
+    } else {
+        copilotCtrlReleasePending := false
+        SetTimer CheckCopilotRelease, 0
+        SendCopilotKeys("{Blind}{RCtrl up}")
+    }
+}
+
+ReleaseCopilotHeld(*) {
+    global copilotCtrlReleasePending
+    SetTimer PassCopilotKeys, 0
+    StopCopilotPrefix()
+    ReleaseCopilotCtrl()
+    if copilotCtrlReleasePending && !GetKeyState("RCtrl", "P")
+        SendCopilotKeys("{Blind}{RCtrl up}")
+    copilotCtrlReleasePending := false
+    if !GetKeyState("LWin", "P")
+        SendCopilotKeys("{Blind}{LWin up}")
+    if !GetKeyState("LShift", "P")
+        SendCopilotKeys("{Blind}{LShift up}")
+}
+
+CheckCopilotRelease(*) {
+    global copilotCtrlReleasePending
+    if !copilotCtrlReleasePending {
+        SetTimer CheckCopilotRelease, 0
+        return
+    }
+    if !GetKeyState("RCtrl", "P") {
+        copilotCtrlReleasePending := false
+        SetTimer CheckCopilotRelease, 0
+        SendCopilotKeys("{Blind}{RCtrl up}")
+    }
+}
+
+StopCopilotPrefix() {
+    global copilotState
+    if IsObject(copilotState.input)
+        copilotState.input.Stop()
+    copilotState.input := ""
+}
+
+CopilotPrefixKey(direction, input, vk, sc) {
+    global copilotState
+    ; The first non-chord key proves this is an ordinary Win shortcut. Its event was blocked
+    ; until this callback, so Win always reaches Windows before that key, even within 30 ms.
+    if IsObject(copilotState.input) && copilotState.input == input
+        PassCopilotKeys()
+    SendCopilotKeys(Format("{Blind}{vk{:02X}sc{:03X} " direction "}", vk, sc))
+}
+
+PassCopilotKeys() {
+    global copilotState, copilotShiftSuppressed
+    if copilotState.phase != "waiting"
+        return
+    copilotState.phase := "win_held"
+    SetTimer PassCopilotKeys, 0
+    StopCopilotPrefix()
+    keys := "{Blind}{LWin downR}"
+    if copilotShiftSuppressed && GetKeyState("LShift", "P") {
+        copilotState.shiftHeld := true
+        keys .= "{LShift downR}"
+    }
+    copilotShiftSuppressed := false
+    SendCopilotKeys(keys)
+}
+
+CopilotWinDown() {
+    global copilotState
+    copilotState.winHeldBefore := copilotState.phase = "win_held"
+    copilotState.shiftHeldBefore := copilotState.shiftHeld
+    copilotState.phase := "waiting"
+    StopCopilotPrefix()
+    input := InputHook("V")
+    input.MinSendLevel := 101
+    input.KeyOpt("{All}", "SN")
+    input.KeyOpt("{LWin}{LShift}{F23}{SC06E}", "-SN+V")
+    input.OnKeyDown := CopilotPrefixKey.Bind("down")
+    input.OnKeyUp := CopilotPrefixKey.Bind("up")
+    copilotState.input := input
+    input.Start()
+    SetTimer PassCopilotKeys, -30
+}
+
+CopilotWinUp() {
+    global copilotState
+    if copilotState.phase = "copilot" && copilotState.winHeldBefore && !GetKeyState("LWin", "P") {
+        copilotState.winHeldBefore := false
+        SendCopilotKeys("{Blind}{LWin up}")
+    }
+    if copilotState.phase = "waiting"
+        PassCopilotKeys()
+    if copilotState.phase = "win_held" {
+        copilotState.phase := "idle"
+        SendCopilotKeys("{Blind}{LWin up}")
+    }
+}
+
+CopilotShiftDown() {
+    global copilotShiftSuppressed
+    copilotShiftSuppressed := true
+}
+
+ObserveCopilotShiftDown() {
+    global copilotState
+    copilotState.shiftHeld := true
+}
+
+ObserveCopilotShiftUp() {
+    global copilotState, copilotShiftSuppressed
+    copilotState.shiftHeld := false
+    copilotShiftSuppressed := false
+}
+
+CopilotDown() {
+    global copilotState, copilotShiftSuppressed
+    global copilotCtrlHeld, copilotCtrlReleasePending
+    if copilotCtrlHeld
+        return
+    copilotState.winHeldBefore := copilotState.winHeldBefore || copilotState.phase = "win_held"
+    copilotState.shiftHeldBefore := copilotState.shiftHeldBefore || copilotState.shiftHeld
+    SetTimer PassCopilotKeys, 0
+    StopCopilotPrefix()
+    copilotState.phase := "copilot"
+    copilotShiftSuppressed := false
+    copilotCtrlHeld := true
+    copilotCtrlReleasePending := false
+    SetTimer CheckCopilotRelease, 0
+    keys := "{Blind}"
+    if !copilotState.winHeldBefore
+        keys .= "{vkE8}"
+    if !copilotState.shiftHeldBefore
+        keys .= "{LShift up}"
+    if !copilotState.winHeldBefore
+        keys .= "{LWin up}"
+    SendCopilotKeys(keys "{RCtrl downR}")
+}
+
+CopilotUp() {
+    global copilotState
+    if copilotState.phase = "copilot"
+        copilotState.phase := copilotState.winHeldBefore ? "win_held" : "idle"
+    ReleaseCopilotCtrl()
+}
+
+; Our level-1 sends must reach Windows and level-0 profile hotkeys without retriggering the
+; modifier filters. Physical Shift outside the Copilot prefix always passes through.
+#InputLevel 1
+$*LWin::CopilotWinDown()
+$*LWin up::CopilotWinUp()
+#HotIf copilotState.phase = "waiting"
+$*LShift::CopilotShiftDown()
+#HotIf
+~$*LShift::ObserveCopilotShiftDown()
+~$*LShift up::ObserveCopilotShiftUp()
+#InputLevel 0
+$*SC06E::CopilotDown()
+$*SC06E up::CopilotUp()
+"###;
+
 const BEHAVIOR_ENGINE: &str = r###"; Resolve a single-character key name for sending. When the character exists on the
 ; active layout, keep the name: AHK then picks that layout's key (and shift state), so
 ; "y" types y on QWERTZ too — a fixed US scancode would press the wrong key there.
@@ -1378,6 +1430,22 @@ PhysKey(key) {
     return key
 }
 
+; AltGr's synthesized LCtrl is part of RAlt, but other undeclared modifiers are not.
+TriggerModifiersAllowed(trigger) {
+    static keys := Map("ctrl", "LCtrl RCtrl", "lctrl", "LCtrl", "rctrl", "RCtrl",
+        "shift", "LShift RShift", "lshift", "LShift", "rshift", "RShift",
+        "alt", "LAlt RAlt", "lalt", "LAlt", "ralt", "LCtrl RAlt",
+        "win", "LWin RWin", "lwin", "LWin", "rwin", "RWin")
+    allowed := " "
+    for part in StrSplit(RegExReplace(StrLower(Trim(trigger)), "\s+", " "), " ")
+        if keys.Has(part)
+            allowed .= keys[part] " "
+    for key in ["LCtrl", "RCtrl", "LShift", "RShift", "LAlt", "RAlt", "LWin", "RWin"]
+        if GetKeyState(key) && !InStr(allowed, " " key " ")
+            return false
+    return true
+}
+
 ; Exclude only trigger modifiers which are absent from the output. AutoHotkey releases those
 ; modifiers around this send and restores them immediately afterward, so holding a trigger
 ; modifier continues to work for subsequent keypresses.
@@ -1388,7 +1456,7 @@ BlindFor(triggerModifiers, outputModifiers := "") {
     return "{Blind" triggerModifiers "}"
 }
 
-SendBehaviorCommand(command, configuredExe) {
+SendBehaviorCommand(command, configuredExe, parameters := "") {
     targetExe := configuredExe
     if (targetExe = "*") {
         try {
@@ -1398,7 +1466,7 @@ SendBehaviorCommand(command, configuredExe) {
         }
     }
     if (targetExe != "")
-        SendOverlayCommand(command "?exe=" UriEncode(targetExe))
+        SendOverlayCommand(command "?exe=" UriEncode(targetExe) parameters)
 }
 
 ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "", preserveHooks := false) {
@@ -1431,6 +1499,8 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
                 SendBehaviorCommand("stretch", configuredExe)
             } else if (token = "fit") {
                 SendBehaviorCommand("fit", configuredExe)
+            } else if RegExMatch(token, "i)^resolution\((\d+)\s*,\s*(\d+)\)$", &m) {
+                SendBehaviorCommand("resolution", configuredExe, "&width=" m[1] "&height=" m[2])
             } else if RegExMatch(token, "i)^goto\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)$", &m) {
                 SendMode "Event"
                 SetMouseDelay -1
@@ -1439,6 +1509,9 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
             } else if RegExMatch(token, "i)^press\((.+)\)$", &m) {
                 for k in StrSplit(m[1], ",")
                     DoPress(Trim(k), 30, false, preserveHooks, triggerModifiers)
+                Sleep 30
+            } else if RegExMatch(token, "i)^(?:mousepress|pressalt)\((.+)\)$", &m) {
+                DoMousePress(Trim(m[1]), configuredExe)
                 Sleep 30
             } else if RegExMatch(token, "i)^repeat\((.+?),\s*(\d+)(?:,\s*\d+)?\)$", &m) {
                 DoPress(Trim(m[1]), 30, false, preserveHooks, triggerModifiers)
@@ -1461,6 +1534,62 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
         if locked
             BlockInput "MouseMoveOff"
     }
+}
+
+DoMousePress(keyName, configuredExe := "") {
+    global heldOutputCounts
+    static buttons := Map("lbutton", "Left", "rbutton", "Right", "mbutton", "Middle",
+        "xbutton1", "X1", "xbutton2", "X2")
+    keyName := StrLower(keyName)
+    if (keyName = "m1")
+        keyName := "lbutton"
+    else if (keyName = "m2")
+        keyName := "rbutton"
+    if !buttons.Has(keyName)
+        throw ValueError("mousepress requires a mouse button.")
+    target := WinExist(configuredExe = "" || configuredExe = "*" ? "A" : "ahk_exe " configuredExe)
+    if !target
+        throw TargetError("Target window not found for mousepress.")
+    MouseGetPos &screenX, &screenY
+    WinGetClientPos &clientX, &clientY,,, target
+    position := "X" (screenX - clientX) " Y" (screenY - clientY)
+    previousDelay := A_ControlDelay
+    SetControlDelay -1
+    try {
+        if !(GetKeyState(keyName, "P") || heldOutputCounts.Has(keyName)) {
+            ControlClick(position, target,, buttons[keyName], 1, "NA Pos")
+            return
+        }
+        ; A second down is not a new press while the app already sees this button held.
+        ; Release first and give the app time to observe it before sending the click.
+        finish := FinishMousePress.Bind(position, target, buttons[keyName], keyName)
+        OnExit finish
+        previousCritical := Critical()
+        try {
+            ControlClick(position, target,, buttons[keyName], 1, "NA Pos U")
+            Sleep 30
+            ControlClick(position, target,, buttons[keyName], 1, "NA Pos")
+        } finally {
+            try finish.Call()
+            finally {
+                OnExit finish, 0
+                Critical previousCritical
+            }
+        }
+    }
+    finally SetControlDelay previousDelay
+}
+
+FinishMousePress(position, target, button, keyName, exitReason := "", *) {
+    global heldOutputCounts
+    ; Reasserting a physical hold here starts another press on the clicked UI, so a
+    ; later restorecursor drags it. Only an explicit hold behavior owns a remaining down.
+    ; Exit cleanup has already released those behavior-owned holds.
+    held := exitReason = "" && heldOutputCounts.Has(keyName)
+    previousDelay := A_ControlDelay
+    SetControlDelay -1
+    try ControlClick(position, target,, button, 1, held ? "NA Pos D" : "NA Pos U")
+    finally SetControlDelay previousDelay
 }
 
 SendBehaviorText(text) {
@@ -2137,7 +2266,7 @@ TriggerPhysicallyDown(triggerKey, useWindowsState) {
 mod tests {
     use super::{
         generate_combined_script, repeat_output_uses_trigger, trigger_chord_keys,
-        trigger_modifier_symbols, trigger_to_key, ArmedProfile,
+        trigger_modifier_symbols, trigger_to_key, ArmedProfile, COPILOT_ENGINE,
     };
     use crate::config::{BehaviorEvent, Hotkey, Profile, Script};
 
@@ -2152,6 +2281,7 @@ mod tests {
                 name: String::new(),
                 trigger: trigger.to_string(),
                 behavior: behavior.to_string(),
+                allow_extra_modifiers: None,
                 state_id: None,
             }],
             events: Vec::new(),
@@ -2173,6 +2303,7 @@ mod tests {
             name: String::new(),
             trigger: "ralt right".to_string(),
             behavior: "press(End)".to_string(),
+            allow_extra_modifiers: None,
             state_id: None,
         });
         let armed = [ArmedProfile {
@@ -2196,7 +2327,7 @@ mod tests {
 
     #[test]
     fn behavior_commands_receive_the_profile_target() {
-        let profile = profile_with_hotkey("f11", "borderless;stretch;fit;killprocess");
+        let profile = profile_with_hotkey("f11", "borderless;stretch;fit;killprocess;resolution(1280,720)");
         let armed = [ArmedProfile {
             siblings: std::slice::from_ref(&profile),
             profile: &profile,
@@ -2205,12 +2336,13 @@ mod tests {
         let script = generate_combined_script(&armed);
 
         assert!(script.contains(
-            "ExecuteBehavior(\"borderless;stretch;fit;killprocess\", \"\", \"Game.exe\")"
+            "ExecuteBehavior(\"borderless;stretch;fit;killprocess;resolution(1280,720)\", \"\", \"Game.exe\")"
         ));
         assert!(script.contains("SendBehaviorCommand(\"borderless\", configuredExe)"));
         assert!(script.contains("SendBehaviorCommand(\"killprocess\", configuredExe)"));
         assert!(script.contains("SendBehaviorCommand(\"stretch\", configuredExe)"));
         assert!(script.contains("SendBehaviorCommand(\"fit\", configuredExe)"));
+        assert!(script.contains("SendBehaviorCommand(\"resolution\", configuredExe, \"&width=\" m[1] \"&height=\" m[2])"));
         assert!(script.contains("targetExe := WinGetProcessName(\"A\")"));
     }
 
@@ -2221,6 +2353,7 @@ mod tests {
             name: String::new(),
             trigger: "XButton1 y".to_string(),
             behavior: "press(End)".to_string(),
+            allow_extra_modifiers: None,
             state_id: None,
         });
         let armed = [ArmedProfile {
@@ -2233,10 +2366,10 @@ mod tests {
         let y = &trigger_chord_keys("y")[0];
 
         assert!(script.contains(&format!(
-            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"{x}\")\n${y}::"
+            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"{x}\")\n$*{y}::"
         )));
         assert!(script.contains(&format!(
-            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"xbutton1\")\n${y}::"
+            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"xbutton1\")\n$*{y}::"
         )));
         assert!(script.contains("TriggerChordHeld(chordKeys)"));
     }
@@ -2248,6 +2381,7 @@ mod tests {
             name: String::new(),
             trigger: "XButton1 f4".to_string(),
             behavior: "repeat(f5, 100, 6)".to_string(),
+            allow_extra_modifiers: None,
             state_id: None,
         });
         let armed = [ArmedProfile {
@@ -2263,16 +2397,108 @@ mod tests {
             "HoldChordDown(\"test-profile:x y\", \"rctrl\", \"{x} {y}\", \"\")"
         )));
         assert!(script.contains(&format!(
-            "~*{x} up:: {{\n    ReleaseTriggerHolds(\"{x}\")"
+            "~*{x} up:: {{\n    if GetKeyState(\"{x}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{x}\")"
         )));
         assert!(script.contains(&format!(
-            "~*{y} up:: {{\n    ReleaseTriggerHolds(\"{y}\")"
+            "~*{y} up:: {{\n    if GetKeyState(\"{y}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{y}\")"
         )));
         assert!(script.contains("repeatChord[\"F4\"] := \"xbutton1 F4\""));
         assert!(script.contains(
             "RepeatHold(\"f5\", 100, \"F4\", \"xbutton1 F4\", \"\", 6, \"test-profile\", true, \"\")"
         ));
         assert!(script.contains("TriggerChordPhysicallyDown(triggerChord, useWindowsState)"));
+    }
+
+    #[test]
+    fn unmodified_press_and_repeat_hotkeys_accept_extra_modifiers() {
+        for (behavior, handler) in [
+            ("press(y)", "ExecuteBehavior"),
+            ("press(y);sleep(50);press(z)", "ExecuteBehavior"),
+            ("repeat(y,100,6)", "repeatDown"),
+        ] {
+            let mut profile = profile_with_hotkey("x", behavior);
+            profile.hotkeys.push(Hotkey {
+                name: String::new(),
+                trigger: "shift x".to_string(),
+                behavior: "press(z)".to_string(),
+                allow_extra_modifiers: None,
+                state_id: None,
+            });
+            let armed = [ArmedProfile {
+                siblings: std::slice::from_ref(&profile),
+                profile: &profile,
+                exe: "*",
+            }];
+            let script = generate_combined_script(&armed);
+            let key = &trigger_chord_keys("x")[0];
+
+            assert!(script.contains(&format!("$*{key}:: {{\n    {handler}")));
+            assert!(script.contains(&format!(
+                "$+{key}:: {{\n    ExecuteBehavior(\"press(z)\", \"+\", \"*\")"
+            )));
+            assert!(!script.contains(&format!("$*+{key}::")));
+            if handler == "ExecuteBehavior" {
+                assert!(script.contains(&format!(
+                    "ExecuteBehavior(\"{behavior}\", \"\", \"*\")"
+                )));
+            } else {
+                assert!(script.contains(&format!(
+                    "RepeatHold(\"y\", 100, \"{}\", \"{}\", \"\", 6, \"test-profile\", true, \"\")",
+                    super::trigger_bare_key("x"), key
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn extra_modifiers_option_controls_every_behavior_binding() {
+        for trigger in ["1", "ctrl 1", "rctrl 1", "x 1"] {
+            for behavior in ["press(2)", "hold(2)", "repeat(2,100,6)", "press(p);hold(2)"] {
+                for allow in [false, true] {
+                    let mut profile = profile_with_hotkey(trigger, behavior);
+                    profile.hotkeys[0].allow_extra_modifiers = Some(allow);
+                    let armed = [ArmedProfile {
+                        siblings: std::slice::from_ref(&profile),
+                        profile: &profile,
+                        exe: "*",
+                    }];
+                    let script = generate_combined_script(&armed);
+                    let exact = trigger_to_key(trigger);
+                    let wildcard = format!("$*{}", exact.trim_start_matches('$'));
+                    let (expected, other) = if allow { (&wildcard, &exact) } else { (&exact, &wildcard) };
+                    assert!(script.contains(&format!("{expected}:: {{")), "{trigger}: {behavior}, allow={allow}");
+                    assert!(!script.contains(&format!("{other}:: {{")), "{trigger}: {behavior}, allow={allow}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn altgr_extra_modifier_option_keeps_native_wildcard_and_gates_exact_matching() {
+        for allow in [None, Some(false), Some(true)] {
+            for trigger in ["ralt left", "ralt x left"] {
+                for behavior in ["press(Home)", "hold(Home)", "repeat(Home,100,6)", "press(p);hold(Home)"] {
+                    let mut profile = profile_with_hotkey(trigger, behavior);
+                    profile.hotkeys[0].allow_extra_modifiers = allow;
+                    let armed = [ArmedProfile {
+                        siblings: std::slice::from_ref(&profile),
+                        profile: &profile,
+                        exe: "*",
+                    }];
+                    let script = generate_combined_script(&armed);
+                    let mut condition = "#HotIf enabled[\"test-profile\"]".to_string();
+                    if trigger.contains(" x ") {
+                        condition.push_str(&format!(" && TriggerChordHeld(\"{}\")", trigger_chord_keys("x")[0]));
+                    }
+                    if allow == Some(false) {
+                        condition.push_str(&format!(" && TriggerModifiersAllowed(\"{trigger}\")"));
+                    }
+                    assert!(script.contains(&format!("{condition}\n$*>!left:: {{")), "{trigger}: {behavior}, allow={allow:?}");
+                    assert_eq!(script.contains(&format!("TriggerModifiersAllowed(\"{trigger}\")")), allow == Some(false));
+                    assert!(!script.contains("$**"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -2284,6 +2510,7 @@ mod tests {
                     name: String::new(),
                     trigger: trigger.to_string(),
                     behavior: "hold(F5)".to_string(),
+                    allow_extra_modifiers: None,
                     state_id: None,
                 });
             }
@@ -2317,6 +2544,7 @@ mod tests {
             name: String::new(),
             trigger: "z".to_string(),
             behavior: "hold(XButton1 RButton)".to_string(),
+            allow_extra_modifiers: None,
             state_id: None,
         });
         let armed = [ArmedProfile {
@@ -2342,10 +2570,10 @@ mod tests {
             "HoldChordDown(\"test-profile:z\", \"XButton1 RButton\", \"{z}\", \"\")"
         )));
         assert!(script.contains(&format!(
-            "~*{x} up:: {{\n    ReleaseTriggerHolds(\"{x}\")"
+            "~*{x} up:: {{\n    if GetKeyState(\"{x}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{x}\")"
         )));
         assert!(script.contains(&format!(
-            "~*{z} up:: {{\n    ReleaseTriggerHolds(\"{z}\")"
+            "~*{z} up:: {{\n    if GetKeyState(\"{z}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{z}\")"
         )));
         assert!(hold_key_list.contains("held.Push(PhysKey(part))"));
         assert!(!hold_key_list.contains("key := part"));
@@ -2450,10 +2678,8 @@ mod tests {
     fn combined_script_keeps_copilot_recovery_without_profiles() {
         let script = generate_combined_script(&[]);
 
-        assert!(script.contains("$*SC06E::"));
-        assert!(script.contains(
-            "SendCopilotKeys(\"{Blind}{LShift up}{LWin up}{RCtrl downR}\")"
-        ));
+        assert!(script.contains("$*SC06E::CopilotDown()"));
+        assert!(script.contains("SendCopilotKeys(keys \"{RCtrl downR}\")"));
         assert!(!script.contains("SendCopilotKeys(\"{Blind}{LCtrl downR}\")"));
         assert!(script.contains(
             "previousSendLevel := SendLevel(1)\n    try SendEvent(keys)\n    finally SendLevel(previousSendLevel)"
@@ -2469,9 +2695,15 @@ mod tests {
         assert!(script.contains(
             "InstallMouseHook true, true\n    ; If the old hook missed Copilot's key-up"
         ));
-        assert!(script.contains("#HotIf copilotState = \"waiting\"\n$*LShift::"));
-        assert_eq!(script.matches("$*LShift::").count(), 1);
-        assert!(!script.contains("$*LShift up::"));
+        assert!(script.contains(
+            "#InputLevel 1\n$*LWin::CopilotWinDown()\n$*LWin up::CopilotWinUp()\n#HotIf copilotState.phase = \"waiting\"\n$*LShift::CopilotShiftDown()"
+        ));
+        assert!(script.contains("~$*LShift::ObserveCopilotShiftDown()\n~$*LShift up::ObserveCopilotShiftUp()\n#InputLevel 0"));
+        assert_eq!(script.matches("$*LShift::").count(), 2);
+        assert!(!COPILOT_ENGINE.contains("SendInput"));
+        assert!(COPILOT_ENGINE.contains("input.MinSendLevel := 101"));
+        assert!(COPILOT_ENGINE.contains("input.OnKeyDown := CopilotPrefixKey.Bind(\"down\")"));
+        assert!(!COPILOT_ENGINE.contains("GetAsyncKeyState"));
         assert!(script.contains(
             "AcquireModifier(modKey, preserveHooks := false, blind := \"{Blind}\")"
         ));
@@ -2484,6 +2716,34 @@ mod tests {
         assert!(script.contains("behaviorClipboardBackup := ClipboardAll()"));
         assert!(script.contains("SetTimer RestoreBehaviorClipboard, -500"));
         assert!(script.contains("OnExit RestoreBehaviorClipboard"));
+    }
+
+    #[test]
+    fn copilot_remap_and_distinct_right_ctrl_accent_bindings_share_the_hook() {
+        let mut profile = profile_with_hotkey("rctrl o", "send(ø)");
+        profile.hotkeys.push(Hotkey {
+            name: String::new(),
+            trigger: "rctrl shift o".to_string(),
+            behavior: "send(Ø)".to_string(),
+            allow_extra_modifiers: None,
+            state_id: None,
+        });
+        let armed = [ArmedProfile {
+            siblings: std::slice::from_ref(&profile),
+            profile: &profile,
+            exe: "*",
+        }];
+        let script = generate_combined_script(&armed);
+        let key = &trigger_chord_keys("o")[0];
+
+        assert!(script.contains(&format!(
+            "$>^{key}:: {{\n    ExecuteBehavior(\"send(ø)\", \"^\", \"*\")"
+        )));
+        assert!(script.contains(&format!(
+            "$>^+{key}:: {{\n    ExecuteBehavior(\"send(Ø)\", \"^+\", \"*\")"
+        )));
+        assert!(script.contains("#InputLevel 0\n$*SC06E::CopilotDown()"));
+        assert!(COPILOT_ENGINE.contains("previousSendLevel := SendLevel(1)\n    try SendEvent(keys)"));
     }
 
     #[test]
@@ -2523,7 +2783,7 @@ mod tests {
         ));
         assert!(script.contains("syntheticDown[keyName] := true"));
         assert!(script.contains("if !GetKeyState(keyName, \"P\")\n            SendEvent"));
-        assert!(script.contains("AcquireHeldOutput(k, blind)"));
+        assert!(script.contains("AcquireHeldOutput(keyName, blind)"));
         assert!(script.contains("ReleaseHeldOutputsTogether(keys, blind)"));
         assert!(script.contains("global mirroredMouseDown := Map()"));
         assert!(script.contains("MirrorPhysicalMouseDown(phys, preserveHooks)"));

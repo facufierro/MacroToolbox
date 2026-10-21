@@ -1,35 +1,38 @@
 # Window transform checks
 
-After building, use a windowed target with a different aspect ratio from its monitor
-(for example, an 800×600 client on a 1920×1080 monitor).
+Use a windowed game at 1280×600 on a 1920×1080 monitor.
 
-1. Toggle `fit`: the client should become 1440×1080, centered, with black side bars.
-   Check that bar pixels are solid `#000000` with light and dark Windows themes.
-   Combine it with `borderless` to remove the frame. The original aspect ratio must
-   be retained regardless of which of those two behaviors runs first.
-2. Switch `fit` → `stretch` → `fit`, then toggle `fit` off: stretch should fill the
-   monitor, fit should recover the original aspect ratio, and toggling off should
-   restore the original placement. Repeat with borderless enabled; sizing changes
-   must retain borderless until it is toggled off separately.
-3. Alt-Tab, minimize, restore, and open an owned dialog: bars should hide when the
-   target loses focus or is minimized, return on focus, and leave the target frame
-   and dialog usable. Toggling from a dialog must still affect the saved target.
-4. Repeat on a secondary monitor, including negative desktop coordinates and a
-   different Windows DPI scale. Try a portrait monitor for top/bottom bars.
-5. Quit MacroToolbox with fit enabled: the bars should disappear and the original
-   window should return. Close and reopen the target instead: the next toggle must
-   capture the new window without trying to restore the closed one.
-6. Verify normal mouse input, configured percentage-based `goto` actions, and the
-   MacroToolbox overlay against the fitted client area.
+1. Toggle `fit`: the displayed image should enlarge to 1920×900, centered with
+   90-pixel bars above and below. The game's selected resolution and native client
+   must remain 1280×600. An 800×600 source should display at 1440×1080 with side bars.
+   Check that bar pixels stay `#000000` with light and dark Windows themes, including
+   all four monitor edges and corners; no desktop pixels or window border should show.
+2. Combine `fit` with `borderless` in both orders. Fit scales the image; borderless
+   removes the source window's frame without enlarging its client. Switch fit →
+   stretch → fit, then toggle fit off: stretch resizes the client, fit restores the
+   original client size and scales its pixels, and toggling off restores placement.
+3. Check the game's camera, menus, ordinary mouse clicks, mouse wheel, percentage
+   `goto` actions, and the MacroToolbox overlay. Native input stays in the original
+   client coordinates; the scaler displays the corresponding cursor. A game's
+   tighter mouse lock must remain intact when entering or leaving a menu.
+4. Alt-Tab, Win+R, minimize, restore, and open an owned dialog. The scaled view must
+   hide and release its mouse restriction while the game is unfocused or showing
+   a separate dialog, then return when the game regains focus.
+5. Repeat on a secondary monitor with negative coordinates and a different DPI
+   scale. Quit MacroToolbox while fit is active: the scaled view must disappear,
+   mouse input must recover, and the original window must return. Closing and
+   reopening the game must discard the closed window's presentation.
 
-These behaviors resize the native window. They do not scale a fixed render surface
-or change the display mode. Check actual rendered content in the target game;
-successful native client resizing alone cannot prove that the game scales its
-content. Exclusive fullscreen, protected apps, and higher-integrity processes may
-reject window changes. A rejected change should restore the preceding transform
-state and return an error through the command API.
+Fit uses Windows' native image magnification control; it does not enlarge the
+render surface or change the display mode. Verify The Isle's selected resolution
+and rendered image in-game; native API tests cannot prove a particular game's
+capture behavior. Exclusive fullscreen and protected content may not be captured.
 
-Automated coverage lives in `window_transform.rs` and `window_transform/bars.rs`
-(geometry and mode transitions), and `tests/ahk/behavior.test.ahk` (behavior routing).
-Run the Rust tests with `cargo test --manifest-path src-tauri/Cargo.toml --lib` and
-the interpreter tests with `powershell -NoProfile -File scripts/test-ahk-behavior.ps1`.
+Automated coverage lives in `window_transform.rs` and
+`window_transform/presentation.rs` (source preservation, fitted image geometry,
+native scaler configuration and black pixels), and `tests/ahk/behavior.test.ahk`
+(behavior routing). Run:
+
+`cargo test --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1`
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ahk-behavior.ps1`
