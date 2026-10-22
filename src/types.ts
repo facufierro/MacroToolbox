@@ -2,6 +2,7 @@ export interface Hotkey {
   name: string;
   trigger: string;
   behavior: string;
+  allow_extra_modifiers?: boolean | null;
   state_id: string | null;
 }
 

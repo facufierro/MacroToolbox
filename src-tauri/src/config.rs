@@ -264,6 +264,10 @@ pub struct Hotkey {
     pub name: String,
     pub trigger: String,
     pub behavior: String,
+    /// Missing values preserve legacy matching: unmodified keys accept held modifiers,
+    /// while triggers with explicit modifiers require their existing modifier combination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_extra_modifiers: Option<bool>,
     #[serde(default)]
     pub state_id: Option<String>,
 }
@@ -741,6 +745,24 @@ pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a P
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn hotkey_extra_modifier_option_is_optional_and_round_trips() {
+        let legacy = serde_json::json!({ "trigger": "1", "behavior": "press(2)" });
+        let old: Hotkey = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(old.allow_extra_modifiers, None);
+        assert!(serde_json::to_value(&old).unwrap().get("allow_extra_modifiers").is_none());
+        for allow in [false, true] {
+            let mut value = legacy.clone();
+            value["allow_extra_modifiers"] = serde_json::json!(allow);
+            let hotkey: Hotkey = serde_json::from_value(value).unwrap();
+            assert_eq!(hotkey.allow_extra_modifiers, Some(allow));
+            let saved = serde_json::to_value(&hotkey).unwrap();
+            assert_eq!(saved["allow_extra_modifiers"], serde_json::json!(allow));
+            let copied: Hotkey = serde_json::from_value(saved).unwrap();
+            assert_eq!(copied.allow_extra_modifiers, Some(allow));
+        }
+    }
 
     #[test]
     fn v3_database_adds_empty_events_and_advances_the_schema() {

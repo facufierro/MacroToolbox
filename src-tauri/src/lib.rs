@@ -18,6 +18,8 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 const GLOBAL_GAME_EXE: &str = "*";
 
 #[cfg(target_os = "windows")]
+mod display_resolution;
+#[cfg(target_os = "windows")]
 mod window_transform;
 #[cfg(target_os = "windows")]
 use window_transform::{WindowTransform, WindowTransformState};
@@ -795,6 +797,21 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             },
                             None => ("400 Bad Request", b"Missing executable".to_vec()),
                         }
+                    } else if route == "/resolution" {
+                        let exe = get_query_param(action, "exe").filter(|value| !value.is_empty());
+                        let dimension = |key| get_query_param(action, key)
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .filter(|value| *value > 0);
+                        match (exe, dimension("width"), dimension("height")) {
+                            (Some(exe), Some(width), Some(height)) => match set_display_resolution(&exe, width, height) {
+                                Ok(()) => ("200 OK", Vec::new()),
+                                Err(err) => {
+                                    eprintln!("[display] {err}");
+                                    ("422 Unprocessable Entity", err.into_bytes())
+                                }
+                            },
+                            _ => ("400 Bad Request", b"Missing executable or invalid resolution".to_vec()),
+                        }
                     } else if route == "/focus" {
                         // The AHK script reports which armed profile's app just became focused
                         // (or none). Push that profile's overlay config, or clear it.
@@ -1205,6 +1222,20 @@ fn restore_window_transforms(state: &AppState) {
         if let Err(error) = saved.restore() {
             eprintln!("[window] {error}");
         }
+    }
+}
+
+fn set_display_resolution(exe: &str, width: u32, height: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = find_window_by_exe(exe)
+            .ok_or_else(|| format!("Window not found for '{exe}'"))?;
+        display_resolution::set_resolution(hwnd, width, height)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (exe, width, height);
+        Err("Not supported on this platform".to_string())
     }
 }
 

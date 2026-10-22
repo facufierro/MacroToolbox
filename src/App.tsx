@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { api } from "./api";
 import { CloudSettings } from "./CloudSettings";
+import { allowsExtraModifiers } from "./hotkeyModifiers";
 import type {
   Database,
   Scope,
@@ -882,8 +883,10 @@ function ProfileSettingsModal({ initial, onSave, onClose }: {
 
 type Step =
   | { type: "press" | "hold"; key: string }
+  | { type: "mousepress"; key: string }
   | { type: "repeat"; key: string; interval: string; hold: string }
   | { type: "goto"; x: string; y: string }
+  | { type: "resolution"; width: string; height: string }
   | { type: "state"; stateId: string }
   | { type: "sleep"; ms: string }
   | { type: "send"; text: string }
@@ -894,9 +897,11 @@ function parseSteps(behavior: string): Step[] {
   return behavior.split(";").map(s => s.trim()).filter(Boolean).flatMap((s): Step[] => {
     let m: RegExpMatchArray | null;
     if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
+    if ((m = s.match(/^(?:mousepress|pressalt)\((.+)\)$/))) return [{ type: "mousepress" as const, key: m[1] }];
     if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
     if ((m = s.match(/^repeat\((.+?),\s*(\d+)(?:,\s*(\d+))?\)$/))) return [{ type: "repeat" as const, key: m[1].trim(), interval: m[2], hold: m[3] ?? "6" }];
     if ((m = s.match(/^goto\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
+    if ((m = s.match(/^resolution\((\d+)\s*,\s*(\d+)\)$/))) return [{ type: "resolution" as const, width: m[1], height: m[2] }];
     if ((m = s.match(/^state\((.+)\)$/))) return [{ type: "state" as const, stateId: m[1] }];
     if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
     if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
@@ -915,15 +920,22 @@ function stepsToString(steps: Step[]): string {
   return steps.map(s => {
     switch (s.type) {
       case "press": return `press(${s.key})`;
+      case "mousepress": return `mousepress(${s.key})`;
       case "hold":  return `hold(${s.key})`;
       case "repeat": return `repeat(${s.key},${s.interval},${s.hold || "6"})`;
       case "goto":  return `goto(${s.x},${s.y})`;
+      case "resolution": return `resolution(${s.width},${s.height})`;
       case "state": return `state(${s.stateId})`;
       case "sleep": return `sleep(${s.ms})`;
       case "send":  return `send(${s.text})`;
       default:      return s.type;
     }
   }).join(";");
+}
+
+function areResolutionStepsValid(steps: Step[]): boolean {
+  return steps.every(step => step.type !== "resolution" || [step.width, step.height].every(value =>
+    /^\d+$/.test(value) && Number(value) > 0 && Number(value) <= 0xffffffff));
 }
 
 const BEHAVIOR_EVENTS: Array<{ value: BehaviorEventKind; label: string }> = [
@@ -987,6 +999,15 @@ function StepRow({ step, index, total, gameExe, states, onChange, onDelete, onMo
             allowChord={step.type === "hold"}
           />
         )}
+        {step.type === "mousepress" && (
+          <select value={step.key} onChange={e => onChange({ ...step, key: e.target.value })} aria-label="Mouse button">
+            <option value="LButton">Left mouse</option>
+            <option value="RButton">Right mouse</option>
+            <option value="MButton">Middle mouse</option>
+            <option value="XButton1">Mouse 4</option>
+            <option value="XButton2">Mouse 5</option>
+          </select>
+        )}
         {step.type === "repeat" && (
           <>
             <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} />
@@ -998,6 +1019,14 @@ function StepRow({ step, index, total, gameExe, states, onChange, onDelete, onMo
         )}
         {step.type === "goto" && (
           <GotoInput x={step.x} y={step.y} gameExe={gameExe} onChange={(x, y) => onChange({ ...step, x, y })} />
+        )}
+        {step.type === "resolution" && (
+          <>
+            <input type="number" min={1} step={1} value={step.width} placeholder="width" aria-label="Resolution width"
+              onChange={e => onChange({ ...step, width: e.target.value })} style={{ width: 90 }} />
+            <input type="number" min={1} step={1} value={step.height} placeholder="height" aria-label="Resolution height"
+              onChange={e => onChange({ ...step, height: e.target.value })} style={{ width: 90 }} />
+          </>
         )}
         {step.type === "state" && (
           <select value={step.stateId} onChange={e => onChange({ ...step, stateId: e.target.value })}>
@@ -1061,7 +1090,9 @@ function BehaviorStepsEditor({ steps, gameExe, states, onChange }: {
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "killprocess" })}>+ killprocess</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "lock" })}>+ lock</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "press", key: "" })}>+ press</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "mousepress", key: "LButton" })}>+ mousepress</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "repeat", key: "", interval: "100", hold: "6" })}>+ repeat</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "resolution", width: "", height: "" })}>+ resolution</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "restorecursor" })}>+ restorecursor</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "savecursor" })}>+ savecursor</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "send", text: "" })}>+ send</button>
@@ -1082,6 +1113,7 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
 }) {
   const [name, setName] = useState(initial.name);
   const [trigger, setTrigger] = useState(initial.trigger);
+  const [allowExtraModifiers, setAllowExtraModifiers] = useState(() => allowsExtraModifiers(initial));
   const [recordingTrigger, setRecordingTrigger] = useState(false);
   const [steps, setSteps] = useState<Step[]>(() => {
     const parsed = parseSteps(initial.behavior);
@@ -1113,12 +1145,18 @@ function HotkeyModal({ initial, gameExe, states, onSave, onClose }: {
           </button>
         </div>
 
+        <label className="checkbox-row">
+          <input type="checkbox" checked={allowExtraModifiers} onChange={e => setAllowExtraModifiers(e.target.checked)} />
+          <span>Allow extra modifiers</span>
+        </label>
+
         <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} onChange={setSteps} />
 
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
           <button className="btn btn--primary"
-            onClick={() => trigger.trim() && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), state_id: null })}>
+            disabled={!areResolutionStepsValid(steps)}
+            onClick={() => trigger.trim() && areResolutionStepsValid(steps) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })}>
             Save
           </button>
         </div>
@@ -1151,8 +1189,8 @@ function EventModal({ initial, eventKinds, gameExe, states, onSave, onClose }: {
         <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} onChange={setSteps} />
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" disabled={!behavior}
-            onClick={() => behavior && onSave({ event, behavior })}>Save</button>
+          <button className="btn btn--primary" disabled={!behavior || !areResolutionStepsValid(steps)}
+            onClick={() => behavior && areResolutionStepsValid(steps) && onSave({ event, behavior })}>Save</button>
         </div>
       </div>
     </div>
@@ -1835,7 +1873,7 @@ function ProfileEditor({ folder, profile, showStates, onExitStates, onContext, o
             <div className="section-head">
               <h3>Hotkeys</h3>
               <button className="btn btn--primary btn--sm"
-                onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", state_id: null }, gameExe: profileExe, states: stateOptions })}>
+                onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", allow_extra_modifiers: false, state_id: null }, gameExe: profileExe, states: stateOptions })}>
                 + Hotkey
               </button>
             </div>
@@ -2398,7 +2436,7 @@ export default function App() {
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
-        ? { ...hotkey, name: copyName(hotkey.name, hotkey.trigger || "Behavior"), trigger: "" }
+        ? { ...hotkey, name: copyName(hotkey.name, hotkey.trigger || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
         : { ...hotkey };
       const updated = await api.upsertProfile(targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] });
       handleDb(updated);
