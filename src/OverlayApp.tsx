@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { OverlayConfig, OverlayItem, ProfileState } from "./types";
+import { getOverlayItemPosition, toLogicalOverlayBounds } from "./overlayPosition";
 import "./overlay.css";
 
 type OverlayRuntimeEvent = {
@@ -16,13 +17,6 @@ type OverlayRuntimeState = {
 };
 
 const EMPTY_RUNTIME: OverlayRuntimeState = { flags: {}, timers: {} };
-
-function resolveCoord(value: number, size: number) {
-  if (Math.abs(value) <= 100) {
-    return (value / 100) * size;
-  }
-  return value;
-}
 
 function pruneRuntime(state: OverlayRuntimeState, now: number): OverlayRuntimeState {
   const timers = Object.fromEntries(
@@ -121,12 +115,7 @@ export default function OverlayApp() {
   const lastDebug = useRef("");
   const configRef = useRef(config);
   const scale = window.devicePixelRatio || 1;
-  const logicalOrigin: [number, number, number, number] = [
-    origin[0] / scale,
-    origin[1] / scale,
-    origin[2] / scale,
-    origin[3] / scale,
-  ];
+  const logicalOrigin = toLogicalOverlayBounds(origin, scale);
   const visibleItems = config.items.filter(item => isItemVisible(item, runtime, now) && !hiddenIds.has(item.id));
 
   useEffect(() => {
@@ -206,8 +195,7 @@ export default function OverlayApp() {
 
   useEffect(() => {
     const first = visibleItems[0];
-    const firstLeft = first ? logicalOrigin[0] + resolveCoord(first.x, logicalOrigin[2]) : null;
-    const firstTop = first ? logicalOrigin[1] + resolveCoord(first.y, logicalOrigin[3]) : null;
+    const firstPosition = first ? getOverlayItemPosition(first, logicalOrigin) : null;
     const message = JSON.stringify({
       origin,
       logicalOrigin,
@@ -217,7 +205,7 @@ export default function OverlayApp() {
       hotkeyStateCount: config.hotkeys.filter(binding => binding.state_id).length,
       runtime,
       firstItem: first
-        ? { id: first.id, type: first.type, x: first.x, y: first.y, left: firstLeft, top: firstTop }
+        ? { id: first.id, type: first.type, x: first.x, y: first.y, ...firstPosition }
         : null,
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
@@ -248,8 +236,7 @@ function OverlayItemView({ item, origin, remainingMs, onMount }: { item: Overlay
   // Inner components get an empty style so they don't double-apply the offset.
   const pos: React.CSSProperties = {
     position: "absolute",
-    left: origin[0] + resolveCoord(item.x, origin[2]),
-    top: origin[1] + resolveCoord(item.y, origin[3]),
+    ...getOverlayItemPosition(item, origin),
   };
   switch (item.type) {
     case "timer": return <div ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;

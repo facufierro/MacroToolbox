@@ -52,9 +52,9 @@ function blankGame(): Scope {
 }
 
 /** A profile owns the behaviors that run against its folder's app target. */
-function blankProfile(): Profile {
+function blankProfile(kind: ProfileKind): Profile {
   return {
-    id: uid(), name: "", kind: "hotkeys", armed: false, parent_id: null,
+    id: uid(), name: kind.charAt(0).toUpperCase() + kind.slice(1), kind, armed: false, parent_id: null,
     hotkeys: [], events: [], states: [], overlay_items: [], overlay_triggers: [], overlay_groups: [],
     scripts: [], overlay_disabled: false, toggle_hotkeys_key: null, toggle_overlay_key: null,
   };
@@ -662,7 +662,7 @@ function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfile
   onFolderContext: (e: ReactMouseEvent, folder: Scope) => void;
   onModal: (m: Modal) => void;
 }) {
-  const newProfile = (kind: ProfileKind) => onModal({ type: "profileSettings", gameId: folder.id, profile: { ...blankProfile(), kind }, isNew: true });
+  const newProfile = (kind: ProfileKind) => onModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
   const typeItems = [
     { label: "Hotkeys profile", onClick: () => newProfile("hotkeys") },
     ...(hasSpecificAppTarget(folder.exe) ? [{ label: "Events profile", onClick: () => newProfile("events") }] : []),
@@ -830,8 +830,9 @@ function FolderModal({ initial, onSave, onClose }: {
 }
 
 /** Edit profile-owned options. The application target is owned by the containing folder. */
-function ProfileSettingsModal({ initial, onSave, onClose }: {
+function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
   initial: Profile;
+  isNew: boolean;
   onSave: (p: Profile) => void;
   onClose: () => void;
 }) {
@@ -856,7 +857,7 @@ function ProfileSettingsModal({ initial, onSave, onClose }: {
   return (
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>{initial.name ? `${kindLabel} Profile` : `New ${kindLabel} Profile`}</h2>
+        <h2>{isNew ? `New ${kindLabel} Profile` : `${kindLabel} Profile`}</h2>
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Profile name" autoFocus />
         {kind === "overlay" && (
           <label className="checkbox-row">
@@ -2324,7 +2325,7 @@ export default function App() {
   }
 
   function folderMenu(folder: Scope): CtxItem[] {
-    const newProfile = (kind: ProfileKind) => setModal({ type: "profileSettings", gameId: folder.id, profile: { ...blankProfile(), kind }, isNew: true });
+    const newProfile = (kind: ProfileKind) => setModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
     const armAll = async (target: boolean) => {
       try { let db: Database | null = null; for (const p of folder.profiles) db = await api.setProfileArmed(p.id, target); if (db) handleDb(db); }
       catch (e) { alert(String(e)); }
@@ -2573,7 +2574,7 @@ export default function App() {
       )}
       {modal?.type === "profileSettings" && (() => {
         const { gameId, profile, isNew } = modal;
-        return <ProfileSettingsModal initial={profile}
+        return <ProfileSettingsModal initial={profile} isNew={isNew}
           onSave={p => handleProfileSettingsSave(gameId, p, isNew)} onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editHotkey" && (() => {
