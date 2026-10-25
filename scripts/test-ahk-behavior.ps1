@@ -17,7 +17,7 @@ $isolatedEngine = [regex]::Replace($engineSource.Groups[1].Value, '\bSend(Input|
 $isolatedEngine = [regex]::Replace($isolatedEngine, '\bGetKeyState\b', 'TestGetKeyState')
 if ($Engine -eq 'behavior') {
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bWinGetProcessName\b', 'TestWinGetProcessName')
-    foreach ($native in @('ControlClick', 'MouseGetPos', 'WinGetClientPos', 'WinExist')) {
+    foreach ($native in @('ControlClick', 'MouseGetPos', 'WinGetClientPos', 'WinExist', 'WinActive', 'KeyWait', 'BlockInput')) {
         $isolatedEngine = [regex]::Replace($isolatedEngine, '\b' + $native + '\b', 'Test' + $native)
     }
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*)MouseMove\b', '${1}TestMouseMove')

@@ -158,8 +158,10 @@ impl Drop for JobObject {
 #[derive(Debug, Clone, Serialize)]
 struct OverlayEventPayload {
     event: String,
+    profile_id: Option<String>,
     hotkey_trigger: Option<String>,
     state_id: Option<String>,
+    item_id: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -358,21 +360,25 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
     save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     if !armed {
-        // Stop the profile's running scripts and, if it owns the visible overlay, drop it.
         kill_profile_scripts(&state, &profile_id);
-        clear_overlay(&app);
-        set_overlay_visible(&app, false);
+        emit_overlay_event(&app, "profile_deactivated", None, None, None, Some(profile_id.clone()));
+        let owns_overlay = state.overlay_config.lock().unwrap().profile_id.as_deref() == Some(profile_id.as_str());
+        if owns_overlay {
+            clear_overlay(&app);
+            set_overlay_visible(&app, false);
+        }
     }
     Ok(db)
 }
 
 fn build_overlay_config(profiles: &[Profile], profile: &Profile) -> config::OverlayConfig {
     config::OverlayConfig {
+        profile_id: Some(profile.id.clone()),
         items: config::resolve_profile_overlay_items(profiles, profile)
             .into_iter()
             .cloned()
             .collect(),
-        states: config::resolve_profile_states(profiles, profile)
+        states: config::available_profile_states(profiles, profile)
             .into_iter()
             .cloned()
             .collect(),
@@ -406,14 +412,16 @@ fn clear_overlay(app: &tauri::AppHandle) {
     }
 }
 
-fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>) {
+fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>, item_id: Option<String>, profile_id: Option<String>) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.emit(
             "overlay-event",
             OverlayEventPayload {
                 event: event.to_string(),
+                profile_id,
                 hotkey_trigger,
                 state_id,
+                item_id,
             },
         );
     }
@@ -617,14 +625,12 @@ fn push_overlay_for_focus(handle: &tauri::AppHandle, profile_id: Option<String>)
     };
     if let Some(id) = profile_id {
         if let Some((siblings, profile)) = find_profile(&db, &id) {
-            if profile.kind == "overlay" && !profile.overlay_disabled {
+            if profile.armed && profile.kind == "overlay" && !profile.overlay_disabled {
                 send_overlay(handle, siblings, profile, true);
-                emit_overlay_event(handle, "profile_activated", None, None);
                 return;
             }
         }
     }
-    emit_overlay_event(handle, "profile_deactivated", None, None);
     clear_overlay(handle);
     set_overlay_visible(handle, false);
 }
@@ -775,7 +781,9 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             .filter(|value| !value.is_empty());
                         let state_id = get_query_param(action, "state_id")
                             .filter(|value| !value.is_empty());
-                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id);
+                        let item_id = get_query_param(action, "item_id")
+                            .filter(|value| !value.is_empty());
+                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id, item_id, None);
                         ("200 OK", Vec::new())
                     } else if route == "/script" {
                         if let Some(id) = get_query_param(action, "id").filter(|v| !v.is_empty()) {
