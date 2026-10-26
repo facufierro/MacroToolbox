@@ -112,6 +112,8 @@ pub struct OverlayGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OverlayConfig {
     #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
     pub items: Vec<OverlayItem>,
     #[serde(default)]
     pub states: Vec<ProfileState>,
@@ -166,6 +168,10 @@ pub enum OverlayItem {
         group_id: Option<String>,
         #[serde(default)]
         timer_state_id: Option<String>,
+        #[serde(default)]
+        start_with_overlay: bool,
+        #[serde(default)]
+        show_only_running: bool,
         #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
@@ -731,6 +737,20 @@ pub fn resolve_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile)
     )
 }
 
+/// Other profiles in the same folder can reference a state without copying its definition.
+pub fn available_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a ProfileState> {
+    let mut states = resolve_profile_states(profiles, profile);
+    let mut ids: HashSet<String> = states.iter().map(|state| state.id.clone()).collect();
+    for owner in profiles {
+        for state in &owner.states {
+            if ids.insert(state.id.clone()) {
+                states.push(state);
+            }
+        }
+    }
+    states
+}
+
 pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a OverlayItem> {
     let mut visited = HashSet::new();
     resolve_profile_entries(
@@ -745,6 +765,65 @@ pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a P
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn timer_start_with_overlay_defaults_off_and_round_trips() {
+        let mut value = serde_json::json!({
+            "type": "timer", "id": "timer", "x": 0, "y": 0, "duration_ms": 10000
+        });
+        let legacy: super::OverlayItem = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["start_with_overlay"], false);
+        value["start_with_overlay"] = serde_json::json!(true);
+        let enabled: super::OverlayItem = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(enabled).unwrap();
+        assert_eq!(saved["start_with_overlay"], true);
+        let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
+        assert_eq!(serde_json::to_value(reloaded).unwrap()["start_with_overlay"], true);
+    }
+
+    #[test]
+    fn running_only_timer_visibility_preserves_legacy_defaults_and_round_trips() {
+        let mut value = serde_json::json!({
+            "type": "timer", "id": "timer", "x": 0, "y": 0, "duration_ms": 10000
+        });
+        let legacy: super::OverlayItem = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["show_only_running"], false);
+        value["show_only_running"] = serde_json::json!(true);
+        let enabled: super::OverlayItem = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(enabled).unwrap();
+        let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
+        assert_eq!(serde_json::to_value(reloaded).unwrap()["show_only_running"], true);
+    }
+
+    #[test]
+    fn available_states_share_folder_definitions_and_preserve_overrides() {
+        let profiles: Vec<Profile> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "owner", "name": "Hotkeys", "kind": "hotkeys",
+                "states": [{ "id": "buff", "name": "Buff active", "duration_ms": 10000 }]
+            },
+            {
+                "id": "overlay", "name": "Overlay", "kind": "overlay"
+            },
+            {
+                "id": "override", "name": "Override", "kind": "overlay", "parent_id": "owner",
+                "states": [{ "id": "buff", "name": "Buff override", "duration_ms": 5000 }]
+            }
+        ])).unwrap();
+
+        let shared = super::available_profile_states(&profiles, &profiles[1]);
+        assert_eq!(shared.len(), 1);
+        assert!(std::ptr::eq(shared[0], &profiles[0].states[0]));
+        assert!(profiles[1].states.is_empty());
+
+        let overridden = super::available_profile_states(&profiles, &profiles[2]);
+        assert_eq!(overridden.len(), 1);
+        assert_eq!(overridden[0].duration_ms, Some(5000));
+        assert!(std::ptr::eq(overridden[0], &profiles[2].states[0]));
+
+        let isolated = super::available_profile_states(&profiles[1..2], &profiles[1]);
+        assert!(isolated.is_empty());
+    }
 
     #[test]
     fn hotkey_extra_modifier_option_is_optional_and_round_trips() {

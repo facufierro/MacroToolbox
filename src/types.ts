@@ -38,6 +38,7 @@ export interface OverlayTrigger {
 }
 
 export interface OverlayConfig {
+  profile_id: string | null;
   items: OverlayItem[];
   states: ProfileState[];
   hotkeys: OverlayHotkeyStateBinding[];
@@ -59,11 +60,12 @@ interface OverlayItemBase {
 }
 
 export type OverlayItem =
-  | (OverlayItemBase & { type: "timer"; duration_ms: number; color: string; font_size: number; timer_state_id: string | null; timer_key?: string | null })
+  | (OverlayItemBase & { type: "timer"; duration_ms: number; color: string; font_size: number; timer_state_id: string | null; timer_key?: string | null; start_with_overlay?: boolean; show_only_running?: boolean })
   | (OverlayItemBase & { type: "icon"; w: number; h: number; src: string | null })
   | (OverlayItemBase & { type: "bar"; w: number; h: number; color: string; max_value: number })
   | (OverlayItemBase & { type: "text"; font_size: number; color: string; content: string });
 
+/** Retained for saved configurations and exports from before state-based dismissal. */
 export interface OverlayGroup {
   id: string;
   name: string;

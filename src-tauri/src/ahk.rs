@@ -341,6 +341,8 @@ fn generate_profile_block(
         let binding_id = format!("{ahk_key}|{prerequisite_keys}");
         if !keyset.insert(binding_id) { continue; }
         let trigger = escape_ahk_string(&hk.trigger);
+        let waits_for_input = hk.behavior.split(';')
+            .any(|step| step.trim().to_ascii_lowercase().starts_with("waitfor("));
         let trigger_modifiers = trigger_modifier_symbols(&hk.trigger);
         // Missing options retain legacy matching; an explicit choice controls whether
         // extra held modifiers may activate this binding and pass through to its output.
@@ -398,8 +400,9 @@ fn generate_profile_block(
             let owner = escape_ahk_string(&format!("{}:{}", p.id, hk.trigger));
             let chord = escape_ahk_string(&physical_chord_keys.join(" "));
             let behavior_exe = escape_ahk_string(exe);
+            let wait_context = if waits_for_input { format!(", \"{id}\"") } else { String::new() };
             let binding = format!(
-                "{ahk_key}:: {{\n    HoldBehaviorDown(\"{owner}\", \"{behavior}\", \"{chord}\", \"{trigger_modifiers}\", \"{behavior_exe}\")\n{notify}}}\n"
+                "{ahk_key}:: {{\n    HoldBehaviorDown(\"{owner}\", \"{behavior}\", \"{chord}\", \"{trigger_modifiers}\", \"{behavior_exe}\"{wait_context})\n{notify}}}\n"
             );
             push_trigger_binding(
                 &mut lines,
@@ -450,11 +453,12 @@ fn generate_profile_block(
 
         let behavior = escape_ahk_string(&hk.behavior);
         let behavior_exe = escape_ahk_string(exe);
+        let wait_context = if waits_for_input { format!(", \"\", true, \"{id}\"") } else { String::new() };
         // Run the behavior first, then notify the overlay (when a state_id makes the ping
         // meaningful): the ping is a blocking localhost request, so doing it after keeps a
         // busy backend from delaying the output.
         let binding = format!(
-            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\", \"{trigger_modifiers}\", \"{behavior_exe}\")\n{notify}}}\n"
+            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\", \"{trigger_modifiers}\", \"{behavior_exe}\"{wait_context})\n{notify}}}\n"
         );
         push_trigger_binding(
             &mut lines,
@@ -723,12 +727,14 @@ UriEncode(str) {{
     return result
 }}
 
-SendAppEvent(eventType, hotkeyTrigger := "", stateId := "") {{
+SendAppEvent(eventType, hotkeyTrigger := "", stateId := "", itemId := "") {{
     path := "event?type=" UriEncode(eventType)
     if (hotkeyTrigger != "")
         path .= "&hotkey_trigger=" UriEncode(hotkeyTrigger)
     if (stateId != "")
         path .= "&state_id=" UriEncode(stateId)
+    if (itemId != "")
+        path .= "&item_id=" UriEncode(itemId)
     SendOverlayCommand(path)
 }}
 
@@ -736,9 +742,9 @@ RunScript(id) {{
     SendOverlayCommand("script?id=" UriEncode(id))
 }}
 
-QueueBehaviorEvent(behavior, targetExe) {{
+QueueBehaviorEvent(behavior, targetExe, profileId) {{
     global behaviorEventQueue
-    behaviorEventQueue.Push(Map("behavior", behavior, "target", targetExe))
+    behaviorEventQueue.Push(Map("behavior", behavior, "target", targetExe, "profile", profileId))
     SetTimer DrainBehaviorEvents, -1
 }}
 
@@ -750,7 +756,8 @@ DrainBehaviorEvents(*) {{
     try {{
         while behaviorEventQueue.Length > 0 {{
             queued := behaviorEventQueue.RemoveAt(1)
-            ExecuteBehavior(queued["behavior"], "", queued["target"])
+            preserveHooks := RegExMatch(queued["behavior"], "i)(?:^|;)\s*waitfor\(") != 0
+            ExecuteBehavior(queued["behavior"], "", queued["target"], "", preserveHooks, queued["profile"])
         }}
     }} finally {{
         behaviorEventDraining := false
@@ -770,7 +777,7 @@ DispatchTargetEvent(exe, eventName) {{
         }}
         events := profile["events"]
         if events.Has(eventName)
-            QueueBehaviorEvent(events[eventName], profile["target"])
+            QueueBehaviorEvent(events[eventName], profile["target"], profile["id"])
     }}
 }}
 
@@ -1469,7 +1476,138 @@ SendBehaviorCommand(command, configuredExe, parameters := "") {
         SendOverlayCommand(command "?exe=" UriEncode(targetExe) parameters)
 }
 
-ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "", preserveHooks := false) {
+BehaviorContextActive(configuredExe, enabledKey) {
+    global enabled
+    if (enabledKey != "" && (!enabled.Has(enabledKey) || !enabled[enabledKey]))
+        return false
+    return configuredExe = "" || configuredExe = "*" || WinActive("ahk_exe " configuredExe)
+}
+
+; Latch physical transitions instead of sampling a held state: a quick click or a hotkey
+; interrupting this thread can otherwise finish before KeyWait sees it. Raw input observes
+; the same hardware without consuming it or replacing the shared AutoHotkey keyboard hook.
+class BehaviorInputWait {
+    __New(keyStr, configuredExe, enabledKey) {
+        if Trim(keyStr) = ""
+            throw ValueError("waitfor requires a key or mouse button.")
+        this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "\s+", " "))
+        this.key := this.keys.Pop()
+        this.vk := GetKeyVK(this.key)
+        this.sc := GetKeySC(this.key)
+        if !this.vk && !this.sc
+            throw ValueError("Invalid waitfor key: " this.key)
+        this.released := !GetKeyState(this.key, "P")
+        this.completed := false
+        this.error := 0
+        this.configuredExe := configuredExe
+        this.enabledKey := enabledKey
+    }
+
+    Observe(down) {
+        if !down {
+            this.released := true
+            return
+        }
+        if !this.released || this.completed
+            return
+        this.released := false
+        if !BehaviorContextActive(this.configuredExe, this.enabledKey)
+            return
+        for prerequisite in this.keys {
+            mode := RegExMatch(prerequisite, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") ? "" : "P"
+            if !GetKeyState(prerequisite, mode)
+                return
+        }
+        this.completed := true
+    }
+
+    OnInput(wParam, lParam, msg, hwnd) {
+        if this.completed || IsObject(this.error)
+            return
+        try this.ReadInput(lParam)
+        catch Error as err
+            this.error := err
+        ; Leave WM_INPUT unhandled so DefWindowProc performs Windows' required cleanup.
+    }
+
+    ReadInput(lParam) {
+        raw := ReadBehaviorInput(lParam)
+        headerSize := 8 + 2 * A_PtrSize
+        inputType := NumGet(raw, 0, "UInt")
+        if inputType = 0 {
+            static buttons := Map("lbutton", 1, "rbutton", 4, "mbutton", 16, "xbutton1", 64, "xbutton2", 256)
+            key := StrLower(this.key)
+            if !buttons.Has(key)
+                return
+            flags := NumGet(raw, headerSize + 4, "UShort")
+            if flags & buttons[key]
+                this.Observe(true)
+            if flags & (buttons[key] << 1)
+                this.Observe(false)
+        } else if inputType = 1 {
+            flags := NumGet(raw, headerSize + 2, "UShort")
+            sc := NumGet(raw, headerSize, "UShort") | (flags & 2 ? 0x100 : 0)
+            vk := NumGet(raw, headerSize + 6, "UShort")
+            matches := this.sc ? sc = this.sc : vk = this.vk
+            if RegExMatch(this.key, "i)^(Ctrl|Shift|Alt)$")
+                matches := vk = this.vk
+            if matches
+                this.Observe(!(flags & 1))
+        }
+    }
+}
+
+; Native behavior input boundary. Device delivery belongs to the AHK process, always to
+; A_ScriptHwnd, so concurrent waits cannot unregister each other's devices. Each wait owns
+; only its message callback; Windows releases the device registration with the process.
+StartBehaviorInput(callback) {
+    deviceSize := 8 + A_PtrSize
+    devices := Buffer(2 * deviceSize, 0)
+    for index, usage in [2, 6] {
+        offset := (index - 1) * deviceSize
+        NumPut("UShort", 1, "UShort", usage, "UInt", 0x100, "Ptr", A_ScriptHwnd, devices, offset)
+    }
+    if !DllCall("RegisterRawInputDevices", "Ptr", devices, "UInt", 2, "UInt", deviceSize)
+        throw OSError()
+    OnMessage 0xFF, callback
+}
+
+StopBehaviorInput(callback) {
+    OnMessage 0xFF, callback, 0
+}
+
+ReadBehaviorInput(handle) {
+    size := 0
+    headerSize := 8 + 2 * A_PtrSize
+    if DllCall("GetRawInputData", "Ptr", handle, "UInt", 0x10000003, "Ptr", 0, "UInt*", &size, "UInt", headerSize, "UInt") = 0xFFFFFFFF
+        throw OSError()
+    raw := Buffer(size)
+    if DllCall("GetRawInputData", "Ptr", handle, "UInt", 0x10000003, "Ptr", raw, "UInt*", &size, "UInt", headerSize, "UInt") = 0xFFFFFFFF
+        throw OSError()
+    return raw
+}
+; End native behavior input boundary.
+
+WaitForTrigger(keyStr, configuredExe := "", enabledKey := "") {
+    input := BehaviorInputWait(keyStr, configuredExe, enabledKey)
+    callback := input.OnInput.Bind(input)
+    try {
+        StartBehaviorInput(callback)
+        loop {
+            if IsObject(input.error)
+                throw input.error
+            if !BehaviorContextActive(configuredExe, enabledKey)
+                return false
+            if input.completed
+                return true
+            Sleep 10
+        }
+    } finally {
+        StopBehaviorInput(callback)
+    }
+}
+
+ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "", preserveHooks := false, enabledKey := "") {
     global chordHolds
     MouseGetPos &savedX, &savedY
     locked := false
@@ -1524,8 +1662,15 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
                 }
             } else if RegExMatch(token, "i)^state\((.+)\)$", &m) {
                 SendAppEvent("state_triggered", "", Trim(m[1]))
+            } else if RegExMatch(token, "i)^startoverlay\((.+)\)$", &m) {
+                SendAppEvent("overlay_started", "", "", Trim(m[1]))
+            } else if RegExMatch(token, "i)^restartoverlay\((.+)\)$", &m) {
+                SendAppEvent("overlay_restarted", "", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
                 Sleep Integer(m[1])
+            } else if RegExMatch(token, "i)^waitfor\((.*)\)$", &m) {
+                if !WaitForTrigger(Trim(m[1]), configuredExe, enabledKey)
+                    return
             } else if RegExMatch(token, "i)^send\((.+)\)$", &m) {
                 SendBehaviorText(m[1])
             }
@@ -2066,7 +2211,7 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "") {
 
 ; Register before the first step so a release during the prefix also ends ownership. Only
 ; registration is critical: the release hotkey must be able to interrupt a waiting hold step.
-HoldBehaviorDown(owner, behavior, chordKeys, triggerModifiers := "", configuredExe := "") {
+HoldBehaviorDown(owner, behavior, chordKeys, triggerModifiers := "", configuredExe := "", enabledKey := "") {
     global chordHolds
     previousCritical := Critical()
     try {
@@ -2084,7 +2229,7 @@ HoldBehaviorDown(owner, behavior, chordKeys, triggerModifiers := "", configuredE
         ; Keep both input hooks installed while a preceding press(...) is emitted. SendEvent at
         ; the hotkey's default input level cannot retrigger this script's hook hotkeys, and the
         ; hook retains the trigger's physical-down state until its real release.
-        ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true)
+        ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true, enabledKey)
     } finally {
         HoldChordUp(owner)
     }
@@ -2294,6 +2439,41 @@ mod tests {
             toggle_hotkeys_key: None,
             toggle_overlay_key: None,
         }
+    }
+
+    #[test]
+    fn startoverlay_behavior_uses_the_shared_runtime_event_route() {
+        let profile = profile_with_hotkey("f1", "startoverlay(timer-item)");
+        let armed = [ArmedProfile {
+            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
+        }];
+        let script = generate_combined_script(&armed);
+        assert!(script.contains("ExecuteBehavior(\"startoverlay(timer-item)\""));
+        assert!(script.contains("SendAppEvent(eventType, hotkeyTrigger := \"\", stateId := \"\", itemId := \"\")"));
+        assert!(script.contains("path .= \"&item_id=\" UriEncode(itemId)"));
+        assert!(script.contains("SendAppEvent(\"overlay_started\", \"\", \"\", Trim(m[1]))"));
+    }
+
+    #[test]
+    fn waiting_chains_preserve_the_hook_and_carry_their_profile_context() {
+        let profile = profile_with_hotkey("q", "press(x);waitfor(LButton);press(y)");
+        let armed = [ArmedProfile {
+            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
+        }];
+        let script = generate_combined_script(&armed);
+        assert!(script.contains(
+            "ExecuteBehavior(\"press(x);waitfor(LButton);press(y)\", \"\", \"Game.exe\", \"\", true, \"test-profile\")"
+        ));
+
+        let profile = profile_with_hotkey("q", "hold(x);waitfor(LButton);press(y)");
+        let armed = [ArmedProfile {
+            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
+        }];
+        let script = generate_combined_script(&armed);
+        let chord = trigger_chord_keys("q").join(" ");
+        assert!(script.contains(&format!(
+            "HoldBehaviorDown(\"test-profile:q\", \"hold(x);waitfor(LButton);press(y)\", \"{chord}\", \"\", \"Game.exe\", \"test-profile\")"
+        )));
     }
 
     #[test]
@@ -2619,7 +2799,7 @@ mod tests {
             "if chordHolds.Has(owner)\n            return\n        chordHolds[owner] := Map("
         ));
         assert!(script.contains(
-            "ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true)"
+            "ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true, enabledKey)"
         ));
         assert!(script.contains(
             "DoPress(Trim(k), 30, false, preserveHooks, triggerModifiers)"
@@ -2670,7 +2850,7 @@ mod tests {
         assert!(script.contains("\"launchScripts\", [\"launch-script\"]"));
         assert!(script.contains("if !state[\"initialized\"] {\n            state[\"initialized\"] := true"));
         assert!(script.contains("DispatchTargetEvent(exe, \"app_started\")"));
-        assert!(script.contains("QueueBehaviorEvent(events[eventName], profile[\"target\"])"));
+        assert!(script.contains("QueueBehaviorEvent(events[eventName], profile[\"target\"], profile[\"id\"])"));
         assert!(script.contains("SetTimer SyncRuntime, 200\nSyncRuntime()"));
     }
 

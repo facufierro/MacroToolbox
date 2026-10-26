@@ -33,6 +33,45 @@ struct WindowClientBounds {
     height: i32,
 }
 
+#[cfg(target_os = "windows")]
+impl WindowClientBounds {
+    /// Physical pixels relative to the overlay client; the webview applies its own DPI scale.
+    fn overlay_origin(self, position: tauri::PhysicalPosition<i32>) -> (i32, i32, i32, i32) {
+        (self.left - position.x, self.top - position.y, self.width, self.height)
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod overlay_position_tests {
+    use super::WindowClientBounds;
+    use tauri::PhysicalPosition;
+
+    #[test]
+    fn global_origin_is_local_to_the_overlay_on_negative_desktops() {
+        for (left, top, width, height) in [
+            (0, 0, 1920, 1080),
+            (-1920, 0, 3840, 1080),
+            (-2560, -1440, 4480, 2520),
+        ] {
+            let bounds = WindowClientBounds { left, top, width, height };
+            assert_eq!(bounds.overlay_origin(PhysicalPosition::new(left, top)), (0, 0, width, height));
+        }
+    }
+
+    #[test]
+    fn app_origin_preserves_physical_pixels_relative_to_the_actual_overlay() {
+        let bounds = WindowClientBounds { left: -2240, top: -1260, width: 1920, height: 1080 };
+        assert_eq!(
+            bounds.overlay_origin(PhysicalPosition::new(-2560, -1440)),
+            (320, 180, 1920, 1080),
+        );
+        assert_eq!(
+            bounds.overlay_origin(PhysicalPosition::new(-2400, -1300)),
+            (160, 40, 1920, 1080),
+        );
+    }
+}
+
 pub struct AppState {
     pub db_access: Mutex<()>,
     pub db_path: std::path::PathBuf,
@@ -119,8 +158,10 @@ impl Drop for JobObject {
 #[derive(Debug, Clone, Serialize)]
 struct OverlayEventPayload {
     event: String,
+    profile_id: Option<String>,
     hotkey_trigger: Option<String>,
     state_id: Option<String>,
+    item_id: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -319,21 +360,25 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
     save_database(&app, &state, &db)?;
     sync_hotkeys(&state, &db);
     if !armed {
-        // Stop the profile's running scripts and, if it owns the visible overlay, drop it.
         kill_profile_scripts(&state, &profile_id);
-        clear_overlay(&app);
-        set_overlay_visible(&app, false);
+        emit_overlay_event(&app, "profile_deactivated", None, None, None, Some(profile_id.clone()));
+        let owns_overlay = state.overlay_config.lock().unwrap().profile_id.as_deref() == Some(profile_id.as_str());
+        if owns_overlay {
+            clear_overlay(&app);
+            set_overlay_visible(&app, false);
+        }
     }
     Ok(db)
 }
 
 fn build_overlay_config(profiles: &[Profile], profile: &Profile) -> config::OverlayConfig {
     config::OverlayConfig {
+        profile_id: Some(profile.id.clone()),
         items: config::resolve_profile_overlay_items(profiles, profile)
             .into_iter()
             .cloned()
             .collect(),
-        states: config::resolve_profile_states(profiles, profile)
+        states: config::available_profile_states(profiles, profile)
             .into_iter()
             .cloned()
             .collect(),
@@ -367,14 +412,16 @@ fn clear_overlay(app: &tauri::AppHandle) {
     }
 }
 
-fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>) {
+fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>, item_id: Option<String>, profile_id: Option<String>) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.emit(
             "overlay-event",
             OverlayEventPayload {
                 event: event.to_string(),
+                profile_id,
                 hotkey_trigger,
                 state_id,
+                item_id,
             },
         );
     }
@@ -578,14 +625,12 @@ fn push_overlay_for_focus(handle: &tauri::AppHandle, profile_id: Option<String>)
     };
     if let Some(id) = profile_id {
         if let Some((siblings, profile)) = find_profile(&db, &id) {
-            if profile.kind == "overlay" && !profile.overlay_disabled {
+            if profile.armed && profile.kind == "overlay" && !profile.overlay_disabled {
                 send_overlay(handle, siblings, profile, true);
-                emit_overlay_event(handle, "profile_activated", None, None);
                 return;
             }
         }
     }
-    emit_overlay_event(handle, "profile_deactivated", None, None);
     clear_overlay(handle);
     set_overlay_visible(handle, false);
 }
@@ -599,20 +644,6 @@ fn foreground_exe() -> Option<String> {
         return None;
     }
     get_window_process_name(hwnd)
-}
-
-#[cfg(target_os = "windows")]
-fn get_global_overlay_origin() -> (i32, i32, i32, i32) {
-    use winapi::um::winuser::GetDesktopWindow;
-
-    let (physical_left, physical_top, physical_width, physical_height) = get_virtual_screen_bounds();
-    let scale = get_window_scale_factor(unsafe { GetDesktopWindow() });
-    (
-        physical_to_logical(physical_left, scale),
-        physical_to_logical(physical_top, scale),
-        physical_to_logical(physical_width, scale),
-        physical_to_logical(physical_height, scale),
-    )
 }
 
 #[cfg(target_os = "windows")]
@@ -649,7 +680,7 @@ fn overlay_target_exe(db: &Database) -> Option<String> {
 }
 
 #[tauri::command]
-fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
+fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
     #[cfg(target_os = "windows")]
     {
         let db = config::load_db(&state.db_path)?;
@@ -657,26 +688,18 @@ fn get_overlay_origin(state: State<AppState>) -> Result<(i32, i32, i32, i32), St
             Some(exe) => exe,
             None => return Ok((0, 0, 0, 0)),
         };
-        if is_global_game_exe(&target) {
-            return Ok(get_global_overlay_origin());
-        }
-        let hwnd = find_window_by_exe(&target)
-            .ok_or_else(|| format!("Window not found for '{target}'"))?;
-        let scale = get_window_scale_factor(hwnd);
-        let bounds = get_game_client_bounds(&target)?;
-        let (virtual_left, virtual_top, _, _) = get_virtual_screen_bounds();
-        let origin = (
-            physical_to_logical(bounds.left - virtual_left, scale),
-            physical_to_logical(bounds.top - virtual_top, scale),
-            physical_to_logical(bounds.width, scale),
-            physical_to_logical(bounds.height, scale),
-        );
-        Ok(origin)
+        let bounds = if is_global_game_exe(&target) {
+            get_global_viewport()
+        } else {
+            get_game_client_bounds(&target)?
+        };
+        let position = window.inner_position().map_err(|e| e.to_string())?;
+        Ok(bounds.overlay_origin(position))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = state;
+        let _ = (window, state);
         Ok((0, 0, 0, 0))
     }
 }
@@ -758,7 +781,9 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             .filter(|value| !value.is_empty());
                         let state_id = get_query_param(action, "state_id")
                             .filter(|value| !value.is_empty());
-                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id);
+                        let item_id = get_query_param(action, "item_id")
+                            .filter(|value| !value.is_empty());
+                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id, item_id, None);
                         ("200 OK", Vec::new())
                     } else if route == "/script" {
                         if let Some(id) = get_query_param(action, "id").filter(|v| !v.is_empty()) {
@@ -956,25 +981,6 @@ fn get_window_client_area(hwnd: winapi::shared::windef::HWND) -> i64 {
         let height = (rect.bottom - rect.top).max(0);
         i64::from(width) * i64::from(height)
     }
-}
-
-#[cfg(target_os = "windows")]
-fn get_window_scale_factor(hwnd: winapi::shared::windef::HWND) -> f64 {
-    use winapi::um::winuser::GetDpiForWindow;
-
-    unsafe {
-        let dpi = GetDpiForWindow(hwnd);
-        if dpi == 0 {
-            1.0
-        } else {
-            dpi as f64 / 96.0
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn physical_to_logical(value: i32, scale: f64) -> i32 {
-    ((value as f64) / scale).round() as i32
 }
 
 #[cfg(target_os = "windows")]
@@ -1762,18 +1768,7 @@ pub fn run() {
             }
 
             #[cfg(target_os = "windows")]
-            let (overlay_left, overlay_top, overlay_width, overlay_height) = {
-                use winapi::um::winuser::GetDesktopWindow;
-
-                let (physical_left, physical_top, physical_width, physical_height) = get_virtual_screen_bounds();
-                let scale = get_window_scale_factor(unsafe { GetDesktopWindow() });
-                (
-                    physical_to_logical(physical_left, scale),
-                    physical_to_logical(physical_top, scale),
-                    physical_to_logical(physical_width, scale),
-                    physical_to_logical(physical_height, scale),
-                )
-            };
+            let (overlay_left, overlay_top, overlay_width, overlay_height) = get_virtual_screen_bounds();
 
             #[cfg(not(target_os = "windows"))]
             let (overlay_left, overlay_top, overlay_width, overlay_height) = (0, 0, 3840, 2160);
@@ -1794,12 +1789,19 @@ pub fn run() {
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
-            .inner_size(overlay_width as f64, overlay_height as f64)
-            .position(overlay_left as f64, overlay_top as f64)
             .visible(false)
             .build()
             {
-                Ok(overlay) => { let _ = overlay.set_ignore_cursor_events(true); }
+                Ok(overlay) => {
+                    // Builder coordinates are logical; size the virtual desktop in physical pixels.
+                    let result = overlay.set_position(tauri::PhysicalPosition::new(overlay_left, overlay_top))
+                        .and_then(|()| overlay.set_size(tauri::PhysicalSize::new(overlay_width as u32, overlay_height as u32)))
+                        .and_then(|()| overlay.set_ignore_cursor_events(true));
+                    if let Err(e) = result {
+                        eprintln!("[overlay] failed to configure overlay window: {e}");
+                        let _ = overlay.close();
+                    }
+                }
                 Err(e) => eprintln!("[overlay] failed to create overlay window: {e}"),
             }
 

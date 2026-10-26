@@ -1,149 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { OverlayConfig, OverlayItem, ProfileState } from "./types";
+import type { OverlayConfig, OverlayItem } from "./types";
+import { getOverlayItemPosition, toLogicalOverlayBounds } from "./overlayPosition";
+import {
+  applyOverlaySessionConfig, applyOverlaySessionEvent, dismissOverlaySessionItem, EMPTY_OVERLAY_SESSIONS,
+  EMPTY_RUNTIME, getActiveOverlaySession, getTimerRemaining, isItemVisible,
+  type OverlayRuntimeEvent,
+} from "./overlayRuntime";
 import "./overlay.css";
 
-type OverlayRuntimeEvent = {
-  event: string;
-  hotkey_trigger?: string | null;
-  state_id?: string | null;
-};
-
-type OverlayRuntimeState = {
-  flags: Record<string, boolean>;
-  timers: Record<string, number>;
-};
-
-const EMPTY_RUNTIME: OverlayRuntimeState = { flags: {}, timers: {} };
-
-function resolveCoord(value: number, size: number) {
-  if (Math.abs(value) <= 100) {
-    return (value / 100) * size;
-  }
-  return value;
-}
-
-function pruneRuntime(state: OverlayRuntimeState, now: number): OverlayRuntimeState {
-  const timers = Object.fromEntries(
-    Object.entries(state.timers).filter(([, expiresAt]) => expiresAt > now),
-  );
-  return { flags: { ...state.flags }, timers };
-}
-
-function normalizeHotkey(value: string | null | undefined) {
-  return (value ?? "").trim().toLowerCase();
-}
-
-function getState(config: OverlayConfig, stateId: string | null | undefined): ProfileState | null {
-  if (!stateId) return null;
-  return config.states.find(state => state.id === stateId) ?? null;
-}
-
-function applyHotkeyStateEvent(config: OverlayConfig, state: OverlayRuntimeState, event: OverlayRuntimeEvent, now: number) {
-  if (event.event !== "hotkey_triggered") {
-    return state;
-  }
-
-  const next = pruneRuntime(state, now);
-  const trigger = normalizeHotkey(event.hotkey_trigger);
-  for (const binding of config.hotkeys) {
-    if (!binding.state_id || normalizeHotkey(binding.trigger) !== trigger) continue;
-    const profileState = getState(config, binding.state_id);
-    if (!profileState) continue;
-
-    if ((profileState.duration_ms ?? 0) > 0) {
-      next.timers[profileState.id] = now + (profileState.duration_ms ?? 0);
-      delete next.flags[profileState.id];
-      continue;
-    }
-
-    next.flags[profileState.id] = !next.flags[profileState.id];
-  }
-
-  return next;
-}
-
-function applyStateToggle(state: OverlayRuntimeState, profileState: ProfileState, now: number) {
-  const next = pruneRuntime(state, now);
-  if ((profileState.duration_ms ?? 0) > 0) {
-    next.timers[profileState.id] = now + (profileState.duration_ms ?? 0);
-    delete next.flags[profileState.id];
-    return next;
-  }
-
-  next.flags[profileState.id] = !next.flags[profileState.id];
-  return next;
-}
-
-function applyRuntimeEvent(config: OverlayConfig, state: OverlayRuntimeState, event: OverlayRuntimeEvent, now: number) {
-  let next = event.event === "profile_activated" || event.event === "profile_deactivated"
-    ? { ...EMPTY_RUNTIME, flags: {}, timers: {} }
-    : pruneRuntime(state, now);
-
-  if (event.event === "state_triggered" && event.state_id) {
-    const profileState = getState(config, event.state_id);
-    if (profileState) {
-      next = applyStateToggle(next, profileState, now);
-    }
-  }
-
-  next = applyHotkeyStateEvent(config, next, event, now);
-  return pruneRuntime(next, now);
-}
-
-function isStateActive(state: OverlayRuntimeState, stateId: string | null | undefined, now: number) {
-  if (!stateId) return true;
-  return state.flags[stateId] === true || (state.timers[stateId] ?? 0) > now;
-}
-
-function isItemVisible(item: OverlayItem, state: OverlayRuntimeState, now: number) {
-  return isStateActive(state, item.state_id, now);
-}
-
-function getTimerRemaining(config: OverlayConfig, item: OverlayItem & { type: "timer" }, state: OverlayRuntimeState, now: number) {
-  const linkedState = getState(config, item.timer_state_id);
-  if (linkedState && item.timer_state_id) {
-    const expiresAt = state.timers[item.timer_state_id] ?? 0;
-    const fallback = linkedState.duration_ms ?? item.duration_ms;
-    return expiresAt > 0 ? Math.max(0, expiresAt - now) : fallback;
-  }
-  return item.duration_ms;
-}
+const EMPTY_CONFIG: OverlayConfig = { profile_id: null, items: [], states: [], hotkeys: [] };
 
 export default function OverlayApp() {
-  const [config, setConfig] = useState<OverlayConfig>({ items: [], states: [], hotkeys: [] });
+  const [sessions, setSessions] = useState(EMPTY_OVERLAY_SESSIONS);
   const [origin, setOrigin] = useState<[number, number, number, number]>([0, 0, 0, 0]);
-  const [runtime, setRuntime] = useState<OverlayRuntimeState>(EMPTY_RUNTIME);
   const [now, setNow] = useState(() => Date.now());
-  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   const itemEls = useRef<Map<string, HTMLElement>>(new Map());
   const lastDebug = useRef("");
-  const configRef = useRef(config);
+  const active = getActiveOverlaySession(sessions);
+  const config = active?.config ?? EMPTY_CONFIG;
+  const runtime = active?.runtime ?? EMPTY_RUNTIME;
   const scale = window.devicePixelRatio || 1;
-  const logicalOrigin: [number, number, number, number] = [
-    origin[0] / scale,
-    origin[1] / scale,
-    origin[2] / scale,
-    origin[3] / scale,
-  ];
-  const visibleItems = config.items.filter(item => isItemVisible(item, runtime, now) && !hiddenIds.has(item.id));
-
-  useEffect(() => {
-    configRef.current = config;
-  }, [config]);
+  const logicalOrigin = toLogicalOverlayBounds(origin, scale);
+  const visibleItems = config.items.filter(item => isItemVisible(config, item, runtime, now));
 
   useEffect(() => {
     console.log("[overlay] OverlayApp mounted");
     invoke<OverlayConfig>("get_overlay_config")
       .then(payload => {
         console.log("[overlay] get_overlay_config:", payload);
-        setConfig(payload);
-        if (payload.items.length > 0 || payload.states.length > 0 || payload.hotkeys.length > 0) {
-          const eventTime = Date.now();
-          setNow(eventTime);
-          setRuntime(applyRuntimeEvent(payload, EMPTY_RUNTIME, { event: "profile_activated" }, eventTime));
-        }
+        const eventTime = Date.now();
+        setNow(eventTime);
+        setSessions(prev => applyOverlaySessionConfig(prev, payload, eventTime));
       })
       .catch(e => console.error("[overlay] get_overlay_config error:", e));
 
@@ -172,28 +61,22 @@ export default function OverlayApp() {
         const rect = el.getBoundingClientRect();
         console.log("[overlay] item", id, "rect=", rect.left, rect.top, rect.right, rect.bottom);
         if (cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom) {
-          // Hide the whole group if the item belongs to one, otherwise hide just this item
-          const hitItem = configRef.current.items.find(i => i.id === id);
-          const groupId = hitItem?.group_id;
-          if (groupId) {
-            const groupIds = new Set(configRef.current.items.filter(i => i.group_id === groupId).map(i => i.id));
-            setHiddenIds(prev => new Set([...prev, ...groupIds]));
-          } else {
-            setHiddenIds(prev => new Set([...prev, id]));
-          }
+          setSessions(prev => dismissOverlaySessionItem(prev, id));
           break;
         }
       }
     }).then(fn => { unlistenRightClick = fn; });
     listen<OverlayConfig>("overlay-config", e => {
       console.log("[overlay] overlay-config event:", e.payload);
-      setConfig(e.payload);
+      const eventTime = Date.now();
+      setNow(eventTime);
+      setSessions(prev => applyOverlaySessionConfig(prev, e.payload, eventTime));
     }).then(fn => { unlistenConfig = fn; });
     listen<OverlayRuntimeEvent>("overlay-event", e => {
       console.log("[overlay] overlay-event:", e.payload);
       const eventTime = Date.now();
       setNow(eventTime);
-      setRuntime(prev => applyRuntimeEvent(configRef.current, prev, e.payload, eventTime));
+      setSessions(prev => applyOverlaySessionEvent(prev, e.payload, eventTime));
     }).then(fn => { unlistenEvent = fn; });
     return () => {
       window.clearInterval(interval);
@@ -206,8 +89,7 @@ export default function OverlayApp() {
 
   useEffect(() => {
     const first = visibleItems[0];
-    const firstLeft = first ? logicalOrigin[0] + resolveCoord(first.x, logicalOrigin[2]) : null;
-    const firstTop = first ? logicalOrigin[1] + resolveCoord(first.y, logicalOrigin[3]) : null;
+    const firstPosition = first ? getOverlayItemPosition(first, logicalOrigin) : null;
     const message = JSON.stringify({
       origin,
       logicalOrigin,
@@ -217,7 +99,7 @@ export default function OverlayApp() {
       hotkeyStateCount: config.hotkeys.filter(binding => binding.state_id).length,
       runtime,
       firstItem: first
-        ? { id: first.id, type: first.type, x: first.x, y: first.y, left: firstLeft, top: firstTop }
+        ? { id: first.id, type: first.type, x: first.x, y: first.y, ...firstPosition }
         : null,
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
@@ -248,8 +130,7 @@ function OverlayItemView({ item, origin, remainingMs, onMount }: { item: Overlay
   // Inner components get an empty style so they don't double-apply the offset.
   const pos: React.CSSProperties = {
     position: "absolute",
-    left: origin[0] + resolveCoord(item.x, origin[2]),
-    top: origin[1] + resolveCoord(item.y, origin[3]),
+    ...getOverlayItemPosition(item, origin),
   };
   switch (item.type) {
     case "timer": return <div ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;
