@@ -60,7 +60,7 @@ interface OverlayItemBase {
 }
 
 export type OverlayItem =
-  | (OverlayItemBase & { type: "timer"; duration_ms: number; color: string; font_size: number; timer_state_id: string | null; timer_key?: string | null; start_with_overlay?: boolean })
+  | (OverlayItemBase & { type: "timer"; duration_ms: number; color: string; font_size: number; timer_state_id: string | null; timer_key?: string | null; start_with_overlay?: boolean; show_only_running?: boolean })
   | (OverlayItemBase & { type: "icon"; w: number; h: number; src: string | null })
   | (OverlayItemBase & { type: "bar"; w: number; h: number; color: string; max_value: number })
   | (OverlayItemBase & { type: "text"; font_size: number; color: string; content: string });

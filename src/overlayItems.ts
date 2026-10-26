@@ -13,11 +13,11 @@ export function availableOverlayItems(profiles: Profile[], localItems: OverlayIt
 
 export function mapOverlayActions(behavior: string, mapId: (id: string) => string | null) {
   return behavior.split(";").flatMap(action => {
-    const match = action.trim().match(/^startoverlay\((.+)\)$/);
+    const match = action.trim().match(/^(startoverlay|restartoverlay)\((.+)\)$/);
     if (!match) return [action];
-    const id = match[1].trim();
+    const id = match[2].trim();
     const mapped = mapId(id);
-    return mapped === null ? [] : [mapped === id ? action : `startoverlay(${mapped})`];
+    return mapped === null ? [] : [mapped === id ? action : `${match[1]}(${mapped})`];
   }).join(";");
 }
 

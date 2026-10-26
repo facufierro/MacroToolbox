@@ -10,6 +10,7 @@ global testEvents := [], testOnSend := 0, testReleaseTime := 0
 global testCommands := false
 global testAppEvents := false
 global testWaitQueue := [], testFocusActive := true, testLogicalKeys := Map(), testBlockModes := []
+global testInputCallbacks := Map(), testRawPacket := 0
 global testActiveExe := "Active & App.exe"
 global testHeldKeys := Map()
 global testClicks := [], testClickFailure := false, testWindowId := 42, testWindowCriteria := ""
@@ -40,6 +41,12 @@ RunTest("waitfor cancels when its profile is disabled", TestWaitForDisabledProfi
 RunTest("waitfor rechecks focus on the activating press", TestWaitForFocusRace)
 RunTest("cancelled waitfor releases mouse movement locking", TestWaitForLockCleanup)
 RunTest("waitfor rejects an empty trigger", TestWaitForEmpty)
+RunTest("waitfor latches a complete quick click for every mouse button", TestWaitForQuickClicks)
+RunTest("waitfor matches keyboard scan codes and ignores other keys", TestWaitForScanCode)
+RunTest("waitfor observers retain independent completed transitions", TestIndependentWaits)
+RunTest("waitfor unregisters its callback after input failure", TestWaitInputFailure)
+RunTest("raw input registers both devices to the script window", TestNativeInputRegistration)
+RunTest("the saved cast chain restarts its selected overlay after the click", TestCastChain)
 RunTest("press preserves unrelated held modifiers", TestPressModifiers)
 RunTest("explicit trigger modifiers stay separate from unrelated modifiers", TestTriggerModifiers)
 RunTest("press reuses an already held output modifier", TestHeldOutputModifier)
@@ -57,7 +64,7 @@ RunTest("mousepress exit cleanup leaves the window button released", TestMousePr
 RunTest("saved pressalt actions remain compatible", TestMousePressLegacyAlias)
 RunTest("mousepress finishes a pickup before restoring the cursor", TestMousePressPickup)
 RunTest("built-in ControlClick delivers a down/up pair to an isolated window", TestMousePressNativeWindow)
-FileAppend("All 38 behavior tests passed.`n", "*")
+FileAppend("All 44 behavior tests passed.`n", "*")
 ExitApp 0
 
 RunTest(name, test) {
@@ -90,6 +97,7 @@ RunTest(name, test) {
     testClient := {x: 100, y: 50}
     test.Call()
     Assert(testWaitQueue.Length = 0, name " left a queued wait transition")
+    Assert(testInputCallbacks.Count = 0, name " left an input callback registered")
     Assert(!syntheticDown.Count && !chordHolds.Count && !heldOutputCounts.Count, name " left input owned")
     Assert(!A_IsCritical, name " left the thread critical")
     FileAppend("PASS: " name "`n", "*")
@@ -192,15 +200,31 @@ TestPartialFailure() {
     HoldChordUp("other")
 }
 
-WaitStep(key, down, result, callback := 0) {
-    return Map("key", StrLower(key), "down", down, "result", result, "callback", callback)
+InputEvent(key, down, before := 0) {
+    headerSize := 8 + 2 * A_PtrSize
+    raw := Buffer(headerSize + 24, 0)
+    buttons := Map("lbutton", 1, "rbutton", 4, "mbutton", 16, "xbutton1", 64, "xbutton2", 256)
+    if buttons.Has(StrLower(key)) {
+        flags := buttons[StrLower(key)] << (down ? 0 : 1)
+        NumPut("UShort", flags, raw, headerSize + 4)
+    } else {
+        NumPut("UInt", 1, raw)
+        sc := GetKeySC(key)
+        flags := (down ? 0 : 1) | (sc & 0x100 ? 2 : 0)
+        NumPut("UShort", sc & 0xFF, "UShort", flags, raw, headerSize)
+        NumPut("UShort", GetKeyVK(key), raw, headerSize + 6)
+    }
+    return Map("raw", raw, "before", before)
+}
+
+InputBatch(events, after := 0) {
+    return Map("events", events, "after", after)
 }
 
 TestWaitForMouse() {
     global testWaitQueue, testHeldKeys
     testWaitQueue := [
-        WaitStep("LButton", true, false, () => testHeldKeys.Set("rbutton", true)),
-        WaitStep("LButton", true, true)
+        InputBatch([InputEvent("RButton", true), InputEvent("RButton", false), InputEvent("LButton", true)])
     ]
     ExecuteBehavior("press(x);waitfor(LButton);press(y)", "", "Game.exe")
     AssertKeys(["{blind}{x down}", "{blind}{x up}", "{blind}{y down}", "{blind}{y up}"])
@@ -209,14 +233,14 @@ TestWaitForMouse() {
 TestWaitForHeldButton() {
     global testWaitQueue, testHeldKeys
     testHeldKeys["lbutton"] := true
-    testWaitQueue := [WaitStep("LButton", false, false), WaitStep("LButton", false, true), WaitStep("LButton", true, true)]
+    testWaitQueue := [InputBatch([InputEvent("LButton", true), InputEvent("LButton", false), InputEvent("LButton", true)])]
     ExecuteBehavior("press(x);waitfor(LButton);press(y)")
     AssertKeys(["{blind}{x down}", "{blind}{x up}", "{blind}{y down}", "{blind}{y up}"])
 }
 
 TestWaitForStages() {
     global testWaitQueue
-    testWaitQueue := [WaitStep("SC025", true, true), WaitStep("LButton", true, false), WaitStep("LButton", true, true)]
+    testWaitQueue := [InputBatch([InputEvent("SC025", true)]), InputBatch([InputEvent("LButton", true)])]
     ExecuteBehavior("press(x);waitfor(SC025);press(y);waitfor(LButton);press(z)")
     AssertKeys(["{blind}{x down}", "{blind}{x up}", "{blind}{y down}", "{blind}{y up}", "{blind}{z down}", "{blind}{z up}"])
 }
@@ -224,9 +248,8 @@ TestWaitForStages() {
 TestWaitForModifiers() {
     global testWaitQueue, testLogicalKeys
     testWaitQueue := [
-        WaitStep("LButton", true, true),
-        WaitStep("LButton", false, true),
-        WaitStep("LButton", true, true, () => testLogicalKeys.Set("RCtrl", true))
+        InputBatch([InputEvent("LButton", true), InputEvent("LButton", false),
+            InputEvent("LButton", true, () => testLogicalKeys.Set("RCtrl", true))])
     ]
     ExecuteBehavior("waitfor(rctrl LButton);press(y)")
     AssertKeys(["{blind}{y down}", "{blind}{y up}"])
@@ -234,7 +257,7 @@ TestWaitForModifiers() {
 
 TestWaitForReleasedTrigger() {
     global testWaitQueue
-    testWaitQueue := [WaitStep("LButton", true, true, () => ReleaseTriggerHolds("q"))]
+    testWaitQueue := [InputBatch([InputEvent("LButton", true, () => ReleaseTriggerHolds("q"))])]
     HoldBehaviorDown("test", "press(x);waitfor(LButton);hold(XButton2);press(y)", "q")
     AssertKeys(["{blind}{x down}", "{blind}{x up}", "{blind}{y down}", "{blind}{y up}"])
 }
@@ -246,7 +269,7 @@ LoseWaitFocus() {
 
 TestWaitForFocusLoss() {
     global testWaitQueue
-    testWaitQueue := [WaitStep("LButton", true, false, LoseWaitFocus)]
+    testWaitQueue := [InputBatch([], LoseWaitFocus)]
     ExecuteBehavior("press(x);waitfor(LButton);press(y)", "", "Game.exe")
     AssertKeys(["{blind}{x down}", "{blind}{x up}"])
 }
@@ -254,21 +277,21 @@ TestWaitForFocusLoss() {
 TestWaitForDisabledProfile() {
     global testWaitQueue, enabled
     enabled["profile"] := true
-    testWaitQueue := [WaitStep("LButton", true, false, () => enabled.Set("profile", false))]
+    testWaitQueue := [InputBatch([], () => enabled.Set("profile", false))]
     ExecuteBehavior("press(x);waitfor(LButton);press(y)", "", "Game.exe", "", true, "profile")
     AssertKeys(["{blind}{x down}", "{blind}{x up}"])
 }
 
 TestWaitForFocusRace() {
     global testWaitQueue
-    testWaitQueue := [WaitStep("LButton", true, true, LoseWaitFocus)]
+    testWaitQueue := [InputBatch([InputEvent("LButton", true)], LoseWaitFocus)]
     ExecuteBehavior("waitfor(LButton);press(y)", "", "Game.exe")
     AssertKeys([])
 }
 
 TestWaitForLockCleanup() {
     global testWaitQueue, testBlockModes
-    testWaitQueue := [WaitStep("LButton", true, false, LoseWaitFocus)]
+    testWaitQueue := [InputBatch([], LoseWaitFocus)]
     ExecuteBehavior("lock;waitfor(LButton);press(y)", "", "Game.exe")
     Assert(testBlockModes.Length = 2 && testBlockModes[1] = "MouseMove" && testBlockModes[2] = "MouseMoveOff", "cancelled chain left mouse movement blocked")
     AssertKeys([])
@@ -282,6 +305,104 @@ TestWaitForEmpty() {
     }
     Assert(failed, "empty wait trigger was accepted")
     AssertKeys([])
+}
+
+TestWaitForQuickClicks() {
+    global testWaitQueue, testEvents
+    for key in ["LButton", "RButton", "MButton", "XButton1", "XButton2"] {
+        testEvents := []
+        testWaitQueue := [InputBatch([InputEvent(key, true), InputEvent(key, false)])]
+        ExecuteBehavior("waitfor(" key ");press(y)")
+        AssertKeys(["{blind}{y down}", "{blind}{y up}"])
+    }
+}
+
+TestWaitForScanCode() {
+    global testWaitQueue, testEvents
+    for key in ["SC025", "RCtrl"] {
+        testEvents := []
+        testWaitQueue := [InputBatch([InputEvent("LCtrl", true), InputEvent("LCtrl", false),
+            InputEvent(key, true), InputEvent(key, false)])]
+        ExecuteBehavior("waitfor(" key ");press(y)")
+        AssertKeys(["{blind}{y down}", "{blind}{y up}"])
+    }
+}
+
+TestIndependentWaits() {
+    global testRawPacket
+    left := BehaviorInputWait("LButton", "*", "")
+    right := BehaviorInputWait("RButton", "*", "")
+    for event in [InputEvent("LButton", true), InputEvent("LButton", false)] {
+        testRawPacket := event["raw"]
+        left.OnInput(0, 42, 0xFF, A_ScriptHwnd)
+        right.OnInput(0, 42, 0xFF, A_ScriptHwnd)
+    }
+    Assert(left.completed && !right.completed, "one wait consumed another wait's input")
+    testRawPacket := InputEvent("RButton", true)["raw"]
+    right.OnInput(0, 42, 0xFF, A_ScriptHwnd)
+    Assert(left.completed && right.completed, "the second wait lost its transition")
+}
+
+TestWaitInputFailure() {
+    global testWaitQueue
+    testWaitQueue := [InputBatch([Map("raw", 0, "before", 0)])]
+    failed := false
+    try ExecuteBehavior("lock;waitfor(LButton);press(y)")
+    catch Error {
+        failed := true
+    }
+    Assert(failed && !testInputCallbacks.Count, "input failure left the chain waiting or its callback registered")
+    Assert(testBlockModes.Length = 2 && testBlockModes[2] = "MouseMoveOff", "input failure left the mouse locked")
+    AssertKeys([])
+}
+
+TestIgnoreRawInput(*) {
+}
+
+TestNativeInputRegistration() {
+    callback := TestIgnoreRawInput
+    try {
+        NativeStartBehaviorInput(callback)
+        count := 0
+        deviceSize := 8 + A_PtrSize
+        result := DllCall("GetRegisteredRawInputDevices", "Ptr", 0, "UInt*", &count, "UInt", deviceSize, "UInt")
+        Assert(result != 0xFFFFFFFF && count >= 2, "raw input registration failed")
+        devices := Buffer(count * deviceSize)
+        result := DllCall("GetRegisteredRawInputDevices", "Ptr", devices, "UInt*", &count, "UInt", deviceSize, "UInt")
+        Assert(result != 0xFFFFFFFF, "raw input registration could not be read")
+        found := Map()
+        loop result {
+            offset := (A_Index - 1) * deviceSize
+            if NumGet(devices, offset, "UShort") = 1 {
+                usage := NumGet(devices, offset + 2, "UShort")
+                if usage = 2 || usage = 6 {
+                    Assert(NumGet(devices, offset + 4, "UInt") = 0x100, "raw input changed normal keyboard or mouse delivery")
+                    Assert(NumGet(devices, offset + 8, "Ptr") = A_ScriptHwnd, "raw input was registered to the wrong process window")
+                    found[usage] := true
+                }
+            }
+        }
+        Assert(found.Count = 2, "mouse or keyboard registration was missing")
+        failed := false
+        try NativeReadBehaviorInput(0)
+        catch OSError {
+            failed := true
+        }
+        Assert(failed, "invalid raw input handles were accepted")
+    } finally {
+        NativeStopBehaviorInput(callback)
+    }
+}
+
+TestCastChain() {
+    global testWaitQueue, testAppEvents
+    testAppEvents := []
+    testWaitQueue := [InputBatch([InputEvent("LButton", true), InputEvent("LButton", false)])]
+    ExecuteBehavior("press(e);waitfor(LButton);restartoverlay(timer)", "", "Game.exe")
+    AssertKeys(["{blind}{e down}", "{blind}{e up}"])
+    Assert(testAppEvents.Length = 1 && testAppEvents[1]["event"] = "overlay_restarted", "the cast chain did not restart its timer")
+    Assert(testAppEvents[1]["item"] = "timer", "the cast chain lost its timer target")
+    Assert(!testClicks.Length, "waiting for a click injected another click")
 }
 
 TestStartOverlay() {
@@ -644,16 +765,36 @@ TestGetKeyState(key, mode := "") {
     return testHeldKeys.Has(key) && testHeldKeys[key]
 }
 
-TestKeyWait(key, options := "") {
-    global testWaitQueue, testEvents
+TestStartBehaviorInput(callback) {
     Assert(testWaitQueue.Length > 0, "unexpected wait for input")
-    step := testWaitQueue.RemoveAt(1)
-    Assert(StrLower(key) = step["key"], "waitfor observed the wrong trigger")
-    Assert((InStr(options, "D") != 0) = step["down"], "waitfor accepted a held key without a fresh press")
-    Assert(Mod(testEvents.Length, 2) = 0, "waitfor left a synthetic output down")
-    if IsObject(step["callback"])
-        step["callback"].Call()
-    return step["result"]
+    testInputCallbacks[callback] := true
+    batch := testWaitQueue.RemoveAt(1)
+    SetTimer TestDeliverInput.Bind(callback, batch), -1
+}
+
+TestStopBehaviorInput(callback) {
+    if testInputCallbacks.Has(callback)
+        testInputCallbacks.Delete(callback)
+}
+
+TestReadBehaviorInput(handle) {
+    if !IsObject(testRawPacket)
+        throw Error("simulated raw input failure")
+    return testRawPacket
+}
+
+TestDeliverInput(callback, batch) {
+    global testRawPacket
+    if !testInputCallbacks.Has(callback)
+        return
+    for event in batch["events"] {
+        if IsObject(event["before"])
+            event["before"].Call()
+        testRawPacket := event["raw"]
+        callback.Call(0, 42, 0xFF, A_ScriptHwnd)
+    }
+    if IsObject(batch["after"])
+        batch["after"].Call()
 }
 
 TestWinActive(*) {
