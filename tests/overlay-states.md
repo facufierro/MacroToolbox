@@ -25,6 +25,11 @@
    should continue through the time away. Repeat between two apps with different
    overlay profiles. Expired timers must stay at zero and dismissed items must
    stay dismissed. Disarm and rearm the overlay profile to start a fresh session.
+9. Create a timer with **Only while running** visibility and **Start with overlay**
+   unchecked. It must stay hidden until a Start or Restart overlay action runs,
+   appear during its countdown, and hide exactly at expiry. Restarting it while
+   running must reset the countdown; starting it again must preserve its deadline.
+   Repeat with **Start with overlay** enabled and with a shared timer state.
 
 Without a build:
 

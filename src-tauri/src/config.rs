@@ -171,6 +171,8 @@ pub enum OverlayItem {
         #[serde(default)]
         start_with_overlay: bool,
         #[serde(default)]
+        show_only_running: bool,
+        #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
         display_mode: String,
@@ -777,6 +779,20 @@ mod tests {
         assert_eq!(saved["start_with_overlay"], true);
         let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
         assert_eq!(serde_json::to_value(reloaded).unwrap()["start_with_overlay"], true);
+    }
+
+    #[test]
+    fn running_only_timer_visibility_preserves_legacy_defaults_and_round_trips() {
+        let mut value = serde_json::json!({
+            "type": "timer", "id": "timer", "x": 0, "y": 0, "duration_ms": 10000
+        });
+        let legacy: super::OverlayItem = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["show_only_running"], false);
+        value["show_only_running"] = serde_json::json!(true);
+        let enabled: super::OverlayItem = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(enabled).unwrap();
+        let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
+        assert_eq!(serde_json::to_value(reloaded).unwrap()["show_only_running"], true);
     }
 
     #[test]

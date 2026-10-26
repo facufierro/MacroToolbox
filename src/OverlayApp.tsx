@@ -23,7 +23,7 @@ export default function OverlayApp() {
   const runtime = active?.runtime ?? EMPTY_RUNTIME;
   const scale = window.devicePixelRatio || 1;
   const logicalOrigin = toLogicalOverlayBounds(origin, scale);
-  const visibleItems = config.items.filter(item => isItemVisible(item, runtime, now));
+  const visibleItems = config.items.filter(item => isItemVisible(config, item, runtime, now));
 
   useEffect(() => {
     console.log("[overlay] OverlayApp mounted");

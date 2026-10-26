@@ -14,8 +14,8 @@ test("behavior choices include same-folder overlay items and respect inherited o
 });
 
 test("folder import remaps overlay start targets while preserving other actions", () => {
-  const source = "state(buff);startoverlay(timer);sleep(100); startoverlay(icon) ";
-  assert.equal(mapOverlayActions(source, id => `imported-${id}`), "state(buff);startoverlay(imported-timer);sleep(100);startoverlay(imported-icon)");
+  const source = "state(buff);startoverlay(timer);restartoverlay(timer);sleep(100); startoverlay(icon) ";
+  assert.equal(mapOverlayActions(source, id => `imported-${id}`), "state(buff);startoverlay(imported-timer);restartoverlay(imported-timer);sleep(100);startoverlay(imported-icon)");
   assert.equal(mapOverlayActions(source, id => id), source);
 });
 
@@ -23,8 +23,8 @@ test("deleting an overlay item clears its hotkey and event start actions across 
   const owner = profile("overlay", { overlay_items: [timer] });
   const consumer = profile("hotkeys", {
     kind: "hotkeys",
-    hotkeys: [{ trigger: "f1", behavior: "press(1);startoverlay(timer);state(buff)" }],
-    events: [{ event: "focus_gained", behavior: "startoverlay(timer);startoverlay(other)" }],
+    hotkeys: [{ trigger: "f1", behavior: "press(1);restartoverlay(timer);state(buff)" }],
+    events: [{ event: "focus_gained", behavior: "startoverlay(timer);restartoverlay(timer);startoverlay(other)" }],
   });
   const updated = removeOverlayItem({ id: "folder", profiles: [owner, consumer] }, owner.id, timer.id);
   assert.deepEqual(updated.profiles[0].overlay_items, []);

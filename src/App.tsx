@@ -70,7 +70,7 @@ function hasSpecificAppTarget(exe: string) {
   return exe.trim() !== "" && !isGlobalExe(exe);
 }
 
-function blankTimer():   OverlayItem { return { type: "timer", id: uid(), name: "", x: 0, y: 0, duration_ms: 60000, color: "#ffffff", font_size: 22, state_id: null, timer_state_id: null }; }
+function blankTimer():   OverlayItem { return { type: "timer", id: uid(), name: "", x: 0, y: 0, duration_ms: 60000, color: "#ffffff", font_size: 22, state_id: null, timer_state_id: null, show_only_running: true }; }
 function blankIcon():    OverlayItem { return { type: "icon",  id: uid(), name: "", x: 0, y: 0, w: 64, h: 64, src: null, state_id: null }; }
 function blankBar():     OverlayItem { return { type: "bar",   id: uid(), name: "", x: 0, y: 0, w: 200, h: 20, color: "#4ade80", max_value: 100, state_id: null }; }
 function blankText():    OverlayItem { return { type: "text",  id: uid(), name: "", x: 0, y: 0, font_size: 16, color: "#ffffff", content: "", state_id: null }; }
@@ -897,7 +897,7 @@ type Step =
   | { type: "goto"; x: string; y: string }
   | { type: "resolution"; width: string; height: string }
   | { type: "state"; stateId: string }
-  | { type: "startoverlay"; itemId: string }
+  | { type: "startoverlay"; itemId: string; restart?: boolean }
   | { type: "sleep"; ms: string }
   | { type: "send"; text: string }
   | { type: "borderless" | "fit" | "killprocess" | "lock" | "savecursor" | "restorecursor" | "stretch" };
@@ -915,6 +915,7 @@ function parseSteps(behavior: string): Step[] {
     if ((m = s.match(/^resolution\((\d+)\s*,\s*(\d+)\)$/))) return [{ type: "resolution" as const, width: m[1], height: m[2] }];
     if ((m = s.match(/^state\((.+)\)$/))) return [{ type: "state" as const, stateId: m[1] }];
     if ((m = s.match(/^startoverlay\((.+)\)$/))) return [{ type: "startoverlay" as const, itemId: m[1] }];
+    if ((m = s.match(/^restartoverlay\((.+)\)$/))) return [{ type: "startoverlay" as const, itemId: m[1], restart: true }];
     if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
     if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
     if (s === "borderless") return [{ type: "borderless" as const }];
@@ -939,7 +940,7 @@ function stepsToString(steps: Step[]): string {
       case "goto":  return `goto(${s.x},${s.y})`;
       case "resolution": return `resolution(${s.width},${s.height})`;
       case "state": return `state(${s.stateId})`;
-      case "startoverlay": return `startoverlay(${s.itemId})`;
+      case "startoverlay": return `${s.restart ? "restartoverlay" : "startoverlay"}(${s.itemId})`;
       case "sleep": return `sleep(${s.ms})`;
       case "send":  return `send(${s.text})`;
       default:      return s.type;
@@ -1054,12 +1055,19 @@ function StepRow({ step, index, total, gameExe, states, overlays, onChange, onDe
           </select>
         )}
         {step.type === "startoverlay" && (
-          <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })}>
-            <option value="">Select overlay</option>
-            {overlays.map(item => (
-              <option key={item.id} value={item.id}>{item.name || item.type}</option>
-            ))}
-          </select>
+          <>
+            <select value={step.restart ? "restart" : "start"} aria-label="Overlay action"
+              onChange={e => onChange({ ...step, restart: e.target.value === "restart" })}>
+              <option value="start">Start</option>
+              <option value="restart">Restart</option>
+            </select>
+            <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })}>
+              <option value="">Select overlay</option>
+              {overlays.map(item => (
+                <option key={item.id} value={item.id}>{item.name || item.type}</option>
+              ))}
+            </select>
+          </>
         )}
         {step.type === "sleep" && (
           <input type="number" value={step.ms} placeholder="ms"
@@ -1124,7 +1132,7 @@ function BehaviorStepsEditor({ steps, gameExe, states, overlays, onChange }: {
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "send", text: "" })}>+ send</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "sleep", ms: "" })}>+ sleep</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "state", stateId: states[0]?.id ?? "" })}>+ state</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "startoverlay", itemId: overlays[0]?.id ?? "" })}>+ startoverlay</button>
+        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "startoverlay", itemId: overlays[0]?.id ?? "", restart: true })}>+ startoverlay</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "stretch" })}>+ stretch</button>
         <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "waitfor", key: "" })}>+ waitfor</button>
       </div>
@@ -1373,9 +1381,9 @@ function hotkeyLabel(hotkey: Hotkey): string {
 function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayItem[]): string {
   const description = behavior.replace(/state\(([^)]+)\)/g, (_, stateId: string) => {
     return `state(${stateNameById(states, stateId) ?? stateId})`;
-  }).replace(/startoverlay\(([^)]+)\)/g, (_, itemId: string) => {
+  }).replace(/(startoverlay|restartoverlay)\(([^)]+)\)/g, (_, action: string, itemId: string) => {
     const item = overlays.find(item => item.id === itemId);
-    return `startoverlay(${item ? item.name || item.type : "Missing overlay"})`;
+    return `${action}(${item ? item.name || item.type : "Missing overlay"})`;
   });
   return description || "No behavior";
 }
@@ -1523,6 +1531,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
   const [timerFontSize, setTimerFontSize] = useState(String(initial.type === "timer" ? initial.font_size : 22));
   const [timerStateId, setTimerStateId] = useState(initial.type === "timer" ? (initial.timer_state_id ?? "") : "");
   const [startWithOverlay, setStartWithOverlay] = useState(initial.type === "timer" && !!initial.start_with_overlay);
+  const [showOnlyRunning, setShowOnlyRunning] = useState(initial.type === "timer" && !!initial.show_only_running);
 
   const [iw, setIw]             = useState(String(initial.type === "icon" ? initial.w : 64));
   const [ih, setIh]             = useState(String(initial.type === "icon" ? initial.h : 64));
@@ -1554,7 +1563,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
     };
     const timerMs = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
     switch (initial.type) {
-      case "timer": return { ...base, type: "timer", duration_ms: timerMs||60000, color: timerColor, font_size: parseInt(timerFontSize)||22, timer_state_id: timerStateId || null, start_with_overlay: startWithOverlay };
+      case "timer": return { ...base, type: "timer", duration_ms: timerMs||60000, color: timerColor, font_size: parseInt(timerFontSize)||22, timer_state_id: timerStateId || null, start_with_overlay: startWithOverlay, show_only_running: showOnlyRunning };
       case "icon":  return { ...base, type: "icon",  w: parseInt(iw)||64, h: parseInt(ih)||64, src };
       case "bar":   return { ...base, type: "bar",   w: parseInt(bw)||200, h: parseInt(bh)||20, color: barColor, max_value: parseFloat(maxVal)||100 };
       case "text":  return { ...base, type: "text",  font_size: parseInt(fontSize)||16, color: txtColor, content };
@@ -1570,8 +1579,12 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
 
         <input value={name} onChange={e => setName(e.target.value)} placeholder="Name" />
 
-        <select value={stateId} onChange={e => setStateId(e.target.value)}>
+        <select value={showOnlyRunning ? "@running" : stateId} aria-label="Visibility" onChange={e => {
+          setShowOnlyRunning(e.target.value === "@running");
+          setStateId(e.target.value === "@running" ? "" : e.target.value);
+        }}>
           <option value="">Always visible</option>
+          {initial.type === "timer" && <option value="@running">Only while running</option>}
           {states.map(state => (
             <option key={state.id} value={state.id}>Visible with {state.name}</option>
           ))}

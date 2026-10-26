@@ -11,13 +11,21 @@ $engineSource = [regex]::Match($source, '(?s)const ' + $engineName + ': &str = r
 if (-not $engineSource.Success) { throw "AutoHotkey $Engine engine not found" }
 
 # Exercise the production interpreter with input delivery replaced by an in-memory test sink.
-# No keyboard/mouse hooks or external application processes are needed. One test
-# delivers ControlClick messages to a hidden fixture window without global input.
+# No keyboard/mouse hooks or injected global input are needed. Native checks use a hidden
+# fixture window and register raw input only inside this short-lived test process.
 $isolatedEngine = [regex]::Replace($engineSource.Groups[1].Value, '\bSend(Input|Event)\b', 'TestSend')
 $isolatedEngine = [regex]::Replace($isolatedEngine, '\bGetKeyState\b', 'TestGetKeyState')
 if ($Engine -eq 'behavior') {
+    $nativeInput = [regex]::Match($engineSource.Groups[1].Value, '(?ms)^; Native behavior input boundary\..*?^; End native behavior input boundary\.').Value
+    if (-not $nativeInput) { throw 'Behavior input boundary not found' }
+    $isolatedEngine = $isolatedEngine.Replace($nativeInput, '')
+    foreach ($native in @('StartBehaviorInput', 'StopBehaviorInput', 'ReadBehaviorInput')) {
+        $isolatedEngine = [regex]::Replace($isolatedEngine, '\b' + $native + '\b', 'Test' + $native)
+        $nativeInput = [regex]::Replace($nativeInput, '\b' + $native + '\b', 'Native' + $native)
+    }
+    $isolatedEngine += [Environment]::NewLine + $nativeInput
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bWinGetProcessName\b', 'TestWinGetProcessName')
-    foreach ($native in @('ControlClick', 'MouseGetPos', 'WinGetClientPos', 'WinExist', 'WinActive', 'KeyWait', 'BlockInput')) {
+    foreach ($native in @('ControlClick', 'MouseGetPos', 'WinGetClientPos', 'WinExist', 'WinActive', 'BlockInput')) {
         $isolatedEngine = [regex]::Replace($isolatedEngine, '\b' + $native + '\b', 'Test' + $native)
     }
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*)MouseMove\b', '${1}TestMouseMove')
@@ -37,11 +45,10 @@ $fixture = [IO.File]::ReadAllText((Join-Path $projectPath "tests/ahk/$Engine.tes
 $testPath = Join-Path ([IO.Path]::GetTempPath()) ("MacroToolbox-$Engine-" + [Guid]::NewGuid().ToString('N') + '.ahk')
 $process = $null
 $stages = @(@{ Source = $isolatedEngine; Validate = ''; Name = "$Engine tests" })
-if ($Engine -eq 'copilot') {
-    # /Validate loads the real hotkey declarations without executing the script.
-    # It does not install the production keyboard hook or send any input.
-    $stages = @(@{ Source = $engineSource.Groups[1].Value; Validate = '/Validate '; Name = 'Copilot hotkey syntax validation' }) + $stages
-}
+# /Validate checks the production declarations and native boundary without executing them.
+$validationSource = $engineSource.Groups[1].Value
+if ($Engine -eq 'behavior') { $validationSource += [Environment]::NewLine + $nativeInput }
+$stages = @(@{ Source = $validationSource; Validate = '/Validate '; Name = "$Engine syntax validation" }) + $stages
 try {
     foreach ($stage in $stages) {
         [IO.File]::WriteAllText($testPath, $fixture + [Environment]::NewLine + $stage.Source, [Text.UTF8Encoding]::new($true))

@@ -90,22 +90,23 @@ function startTimer(config: OverlayConfig, state: OverlayRuntimeState, item: Ove
   if (item.type !== "timer") return;
   const linkedState = getState(config, item.timer_state_id);
   if (linkedState && (linkedState.duration_ms ?? 0) > 0) {
+    if (restart) delete state.timers[linkedState.id];
     activateState(state, linkedState, now);
   } else if (restart || (state.itemTimers[item.id] ?? 0) <= now) {
     state.itemTimers[item.id] = now + item.duration_ms;
   }
 }
 
-function startItem(config: OverlayConfig, state: OverlayRuntimeState, item: OverlayItem, now: number) {
+function startItem(config: OverlayConfig, state: OverlayRuntimeState, item: OverlayItem, now: number, restart = false) {
   delete state.hiddenItems[item.id];
   const visibilityState = getState(config, item.state_id);
   if (visibilityState) {
     activateState(state, visibilityState, now);
     for (const related of config.items) {
-      if (related.state_id === visibilityState.id) startTimer(config, state, related, now);
+      if (related.state_id === visibilityState.id) startTimer(config, state, related, now, restart && related.id === item.id);
     }
   }
-  startTimer(config, state, item, now);
+  startTimer(config, state, item, now, restart);
 }
 
 function toggleState(config: OverlayConfig, state: OverlayRuntimeState, profileState: ProfileState, now: number) {
@@ -130,9 +131,9 @@ export function applyRuntimeEvent(config: OverlayConfig, state: OverlayRuntimeSt
       if (item.type === "timer" && item.start_with_overlay) startItem(config, next, item, now);
     }
   }
-  if (event.event === "overlay_started") {
+  if (event.event === "overlay_started" || event.event === "overlay_restarted") {
     const item = config.items.find(item => item.id === event.item_id);
-    if (item) startItem(config, next, item, now);
+    if (item) startItem(config, next, item, now, event.event === "overlay_restarted");
   }
   if (event.event === "state_triggered" && event.state_id) {
     const profileState = getState(config, event.state_id);
@@ -177,17 +178,18 @@ export function dismissOverlayItem(config: OverlayConfig, state: OverlayRuntimeS
   return next;
 }
 
-export function isItemVisible(item: OverlayItem, state: OverlayRuntimeState, now: number) {
-  return item.state_id ? stateActive(state, item.state_id, now) : !state.hiddenItems[item.id];
+export function isItemVisible(config: OverlayConfig, item: OverlayItem, state: OverlayRuntimeState, now: number) {
+  if (item.state_id ? !stateActive(state, item.state_id, now) : state.hiddenItems[item.id]) return false;
+  return item.type !== "timer" || !item.show_only_running || (getTimerDeadline(config, item, state) ?? 0) > now;
+}
+
+function getTimerDeadline(config: OverlayConfig, item: OverlayItem & { type: "timer" }, state: OverlayRuntimeState) {
+  const linkedState = getState(config, item.timer_state_id);
+  return linkedState && (linkedState.duration_ms ?? 0) > 0 ? state.timers[linkedState.id] : state.itemTimers[item.id];
 }
 
 export function getTimerRemaining(config: OverlayConfig, item: OverlayItem & { type: "timer" }, state: OverlayRuntimeState, now: number) {
-  const linkedState = getState(config, item.timer_state_id);
-  const duration = linkedState?.duration_ms ?? 0;
-  if (linkedState && duration > 0) {
-    const expiresAt = state.timers[linkedState.id];
-    return expiresAt === undefined ? duration : Math.max(0, expiresAt - now);
-  }
-  const expiresAt = state.itemTimers[item.id];
-  return expiresAt === undefined ? item.duration_ms : Math.max(0, expiresAt - now);
+  const expiresAt = getTimerDeadline(config, item, state);
+  const linkedDuration = getState(config, item.timer_state_id)?.duration_ms ?? 0;
+  return expiresAt === undefined ? linkedDuration || item.duration_ms : Math.max(0, expiresAt - now);
 }

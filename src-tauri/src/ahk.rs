@@ -1483,32 +1483,127 @@ BehaviorContextActive(configuredExe, enabledKey) {
     return configuredExe = "" || configuredExe = "*" || WinActive("ahk_exe " configuredExe)
 }
 
-; Require a fresh press of the final key, with any recorded prerequisite keys held.
-; KeyWait uses our existing physical hooks and leaves normal input visible to the app.
-WaitForTrigger(keyStr, configuredExe := "", enabledKey := "") {
-    keys := HoldKeyList(RegExReplace(Trim(keyStr), "\s+", " "))
-    if !keys.Length
-        throw ValueError("waitfor requires a key or mouse button.")
-    key := keys.Pop()
-    released := !GetKeyState(key, "P")
-    loop {
-        if !BehaviorContextActive(configuredExe, enabledKey)
-            return false
-        if !released {
-            released := KeyWait(key, "T0.02")
-        } else if KeyWait(key, "D T0.02") {
-            ready := true
-            for prerequisite in keys {
-                mode := RegExMatch(prerequisite, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") ? "" : "P"
-                if !GetKeyState(prerequisite, mode) {
-                    ready := false
-                    break
-                }
-            }
-            if ready
-                return BehaviorContextActive(configuredExe, enabledKey)
-            released := false
+; Latch physical transitions instead of sampling a held state: a quick click or a hotkey
+; interrupting this thread can otherwise finish before KeyWait sees it. Raw input observes
+; the same hardware without consuming it or replacing the shared AutoHotkey keyboard hook.
+class BehaviorInputWait {
+    __New(keyStr, configuredExe, enabledKey) {
+        if Trim(keyStr) = ""
+            throw ValueError("waitfor requires a key or mouse button.")
+        this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "\s+", " "))
+        this.key := this.keys.Pop()
+        this.vk := GetKeyVK(this.key)
+        this.sc := GetKeySC(this.key)
+        if !this.vk && !this.sc
+            throw ValueError("Invalid waitfor key: " this.key)
+        this.released := !GetKeyState(this.key, "P")
+        this.completed := false
+        this.error := 0
+        this.configuredExe := configuredExe
+        this.enabledKey := enabledKey
+    }
+
+    Observe(down) {
+        if !down {
+            this.released := true
+            return
         }
+        if !this.released || this.completed
+            return
+        this.released := false
+        if !BehaviorContextActive(this.configuredExe, this.enabledKey)
+            return
+        for prerequisite in this.keys {
+            mode := RegExMatch(prerequisite, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") ? "" : "P"
+            if !GetKeyState(prerequisite, mode)
+                return
+        }
+        this.completed := true
+    }
+
+    OnInput(wParam, lParam, msg, hwnd) {
+        if this.completed || IsObject(this.error)
+            return
+        try this.ReadInput(lParam)
+        catch Error as err
+            this.error := err
+        ; Leave WM_INPUT unhandled so DefWindowProc performs Windows' required cleanup.
+    }
+
+    ReadInput(lParam) {
+        raw := ReadBehaviorInput(lParam)
+        headerSize := 8 + 2 * A_PtrSize
+        inputType := NumGet(raw, 0, "UInt")
+        if inputType = 0 {
+            static buttons := Map("lbutton", 1, "rbutton", 4, "mbutton", 16, "xbutton1", 64, "xbutton2", 256)
+            key := StrLower(this.key)
+            if !buttons.Has(key)
+                return
+            flags := NumGet(raw, headerSize + 4, "UShort")
+            if flags & buttons[key]
+                this.Observe(true)
+            if flags & (buttons[key] << 1)
+                this.Observe(false)
+        } else if inputType = 1 {
+            flags := NumGet(raw, headerSize + 2, "UShort")
+            sc := NumGet(raw, headerSize, "UShort") | (flags & 2 ? 0x100 : 0)
+            vk := NumGet(raw, headerSize + 6, "UShort")
+            matches := this.sc ? sc = this.sc : vk = this.vk
+            if RegExMatch(this.key, "i)^(Ctrl|Shift|Alt)$")
+                matches := vk = this.vk
+            if matches
+                this.Observe(!(flags & 1))
+        }
+    }
+}
+
+; Native behavior input boundary. Device delivery belongs to the AHK process, always to
+; A_ScriptHwnd, so concurrent waits cannot unregister each other's devices. Each wait owns
+; only its message callback; Windows releases the device registration with the process.
+StartBehaviorInput(callback) {
+    deviceSize := 8 + A_PtrSize
+    devices := Buffer(2 * deviceSize, 0)
+    for index, usage in [2, 6] {
+        offset := (index - 1) * deviceSize
+        NumPut("UShort", 1, "UShort", usage, "UInt", 0x100, "Ptr", A_ScriptHwnd, devices, offset)
+    }
+    if !DllCall("RegisterRawInputDevices", "Ptr", devices, "UInt", 2, "UInt", deviceSize)
+        throw OSError()
+    OnMessage 0xFF, callback
+}
+
+StopBehaviorInput(callback) {
+    OnMessage 0xFF, callback, 0
+}
+
+ReadBehaviorInput(handle) {
+    size := 0
+    headerSize := 8 + 2 * A_PtrSize
+    if DllCall("GetRawInputData", "Ptr", handle, "UInt", 0x10000003, "Ptr", 0, "UInt*", &size, "UInt", headerSize, "UInt") = 0xFFFFFFFF
+        throw OSError()
+    raw := Buffer(size)
+    if DllCall("GetRawInputData", "Ptr", handle, "UInt", 0x10000003, "Ptr", raw, "UInt*", &size, "UInt", headerSize, "UInt") = 0xFFFFFFFF
+        throw OSError()
+    return raw
+}
+; End native behavior input boundary.
+
+WaitForTrigger(keyStr, configuredExe := "", enabledKey := "") {
+    input := BehaviorInputWait(keyStr, configuredExe, enabledKey)
+    callback := input.OnInput.Bind(input)
+    try {
+        StartBehaviorInput(callback)
+        loop {
+            if IsObject(input.error)
+                throw input.error
+            if !BehaviorContextActive(configuredExe, enabledKey)
+                return false
+            if input.completed
+                return true
+            Sleep 10
+        }
+    } finally {
+        StopBehaviorInput(callback)
     }
 }
 
@@ -1569,6 +1664,8 @@ ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "
                 SendAppEvent("state_triggered", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^startoverlay\((.+)\)$", &m) {
                 SendAppEvent("overlay_started", "", "", Trim(m[1]))
+            } else if RegExMatch(token, "i)^restartoverlay\((.+)\)$", &m) {
+                SendAppEvent("overlay_restarted", "", "", Trim(m[1]))
             } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
                 Sleep Integer(m[1])
             } else if RegExMatch(token, "i)^waitfor\((.*)\)$", &m) {
