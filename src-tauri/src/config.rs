@@ -191,6 +191,10 @@ fn default_timer_font_size() -> u32 {
     22
 }
 
+fn default_timer_background() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayItem {
@@ -205,6 +209,8 @@ pub enum OverlayItem {
         color: String,
         #[serde(default = "default_timer_font_size")]
         font_size: u32,
+        #[serde(default = "default_timer_background")]
+        show_background: bool,
         #[serde(default)]
         state_id: Option<String>,
         #[serde(default)]
@@ -989,6 +995,23 @@ mod tests {
         let backup = std::path::PathBuf::from(format!("{}.v4.bak", path.display()));
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
         std::fs::remove_file(&path).unwrap(); std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
+    fn timer_background_preserves_legacy_appearance_and_round_trips_both_options() {
+        let mut value = serde_json::json!({
+            "type": "timer", "id": "timer", "x": 0, "y": 0, "duration_ms": 10000
+        });
+        let legacy: super::OverlayItem = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap()["show_background"], true);
+        for show_background in [false, true] {
+            value["show_background"] = serde_json::json!(show_background);
+            let timer: super::OverlayItem = serde_json::from_value(value.clone()).unwrap();
+            let saved = serde_json::to_value(timer).unwrap();
+            assert_eq!(saved["show_background"], show_background);
+            let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
+            assert_eq!(serde_json::to_value(reloaded).unwrap()["show_background"], show_background);
+        }
     }
 
     #[test]

@@ -1,14 +1,30 @@
 import { mapBehavior } from "./behaviors.ts";
 import type { OverlayGroup, OverlayItem, OverlayTarget, Profile, Scope } from "./types";
 
-export function availableOverlayItems(profiles: Profile[], localItems: OverlayItem[]) {
+// Part names are a view of their overlay and order; legacy saved names are not editable.
+export function nameOverlayParts(items: OverlayItem[], groups: OverlayGroup[]): OverlayItem[] {
+  const labels = new Map(groups.map(group => [group.id, group.name.trim() || "Overlay"]));
+  const counts = new Map<string, number>();
+  return items.map(item => {
+    const key = `${item.group_id ?? ""}/${item.type}`;
+    const index = counts.get(key) ?? 0;
+    counts.set(key, index + 1);
+    const type = item.type.charAt(0).toUpperCase() + item.type.slice(1);
+    return { ...item, name: `${labels.get(item.group_id ?? "") ?? "Overlay"} ${type} ${index}` };
+  });
+}
+
+export function availableOverlayItems(profiles: Profile[], localItems: OverlayItem[], localGroups: OverlayGroup[] = []) {
   const items = new Map(localItems.map(item => [item.id, item]));
+  const groups = new Map(localGroups.map(group => [group.id, group]));
   for (const profile of profiles) {
+    for (const group of profile.overlay_groups ?? [])
+      if (!groups.has(group.id)) groups.set(group.id, group);
     for (const item of profile.overlay_items) {
       if (!items.has(item.id)) items.set(item.id, item);
     }
   }
-  return [...items.values()];
+  return nameOverlayParts([...items.values()], [...groups.values()]);
 }
 
 export function resolveOverlayGroups(profiles: Profile[], profile: Profile, visited = new Set<string>()): OverlayGroup[] {
@@ -24,7 +40,7 @@ export function availableOverlayTargets(profiles: Profile[], items: OverlayItem[
   const groups = new Map(localGroups.map(group => [group.id, group]));
   for (const profile of profiles)
     for (const group of profile.overlay_groups ?? []) if (!groups.has(group.id)) groups.set(group.id, group);
-  return [...[...groups.values()].map(group => ({ ...group, type: "group" as const })), ...availableOverlayItems(profiles, items)];
+  return [...[...groups.values()].map(group => ({ ...group, type: "group" as const })), ...availableOverlayItems(profiles, items, [...groups.values()])];
 }
 
 export function saveOverlayGroup(profile: Profile, group: OverlayGroup, members: string[]): Profile {
@@ -35,6 +51,18 @@ export function saveOverlayGroup(profile: Profile, group: OverlayGroup, members:
     overlay_groups: groups.some(candidate => candidate.id === group.id) ? groups.map(candidate => candidate.id === group.id ? group : candidate) : [...groups, group],
     overlay_items: profile.overlay_items.map(item => ids.has(item.id) ? { ...item, group_id: group.id }
       : item.group_id === group.id ? { ...item, group_id: null } : item),
+  };
+}
+
+export function duplicateOverlayGroup(profile: Profile, group: OverlayGroup, items: OverlayItem[], createId: () => string): Profile {
+  const members = items.filter(item => item.group_id === group.id);
+  const ids = new Map([group.id, ...members.map(item => item.id)].map(id => [id, createId()]));
+  const copy = remapOverlayReferences({ ...profile, hotkeys: [], events: [],
+    overlay_groups: [{ ...group, name: `${group.name.trim() || "Overlay"} (copy)` }], overlay_items: members,
+  }, id => ids.get(id) ?? id);
+  return { ...profile,
+    overlay_groups: [...(profile.overlay_groups ?? []), ...copy.overlay_groups],
+    overlay_items: [...profile.overlay_items, ...nameOverlayParts(copy.overlay_items, copy.overlay_groups)],
   };
 }
 

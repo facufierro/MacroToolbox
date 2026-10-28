@@ -11,7 +11,8 @@ global copilotState := {phase: GetKeyState("LWin", "P") ? "win_held" : "idle", i
     shiftHeld: GetKeyState("LShift", "P"), shiftHeldBefore: false, winHeldBefore: false}
 global copilotShiftSuppressed := false, copilotCtrlHeld := false, copilotCtrlReleasePending := false
 global behaviorClipboardBackup := "", behaviorClipboardPending := false, behaviorClipboardSequence := 0
-global behaviorRuntime := BehaviorExecutor(), runtimeHost := BindingHost()
+global runtimeHost := BindingHost()
+global behaviorRuntime := BehaviorExecutor(runtimeHost.PhysicalOwnsOutput.Bind(runtimeHost))
 OnExit behaviorRuntime.Stop.Bind(behaviorRuntime)
 OnExit ReleaseSyntheticHeld
 OnExit ReleaseCopilotHeld
@@ -53,8 +54,10 @@ InstallMouseHook true, true
 global lastHealthTick := A_TickCount
 
 ReinstallHooks() {
+    global runtimeHost
     InstallKeybdHook true, true
     InstallMouseHook true, true
+    runtimeHost.ResetInput()
     ; If the old hook missed Copilot's key-up, its synthetic Ctrl belongs to that dead hook
     ; generation. Release it now; a still-held Copilot key will reacquire Ctrl on key repeat.
     ReleaseCopilotCtrl()
