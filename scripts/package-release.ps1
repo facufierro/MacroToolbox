@@ -1,5 +1,6 @@
 param(
-    [string]$Version
+    [string]$Version,
+    [switch]$PrepareTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,16 +89,32 @@ if (-not (Test-Path -LiteralPath $changelogPath -PathType Leaf)) {
 New-Item -ItemType Directory -Path $bundledAhkDir -Force | Out-Null
 Copy-Item -LiteralPath $sourceAhkExe -Destination $bundledAhkExe -Force
 
-if (Test-Path $releaseDir) {
-    Remove-Item -LiteralPath $releaseDir -Recurse -Force
-}
-New-Item -ItemType Directory -Path $releaseDir | Out-Null
-
 if (Test-Path $bundleDir) {
+    $resolvedBundle = [IO.Path]::GetFullPath($bundleDir)
+    $targetRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'src-tauri/target')) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedBundle.StartsWith($targetRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Bundle path is outside the build directory.' }
     Remove-Item -LiteralPath $bundleDir -Recurse -Force
 }
 
 npm run tauri build
+if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
+
+if ($PrepareTests) {
+    Write-Host 'Preparing Rust test binaries without running tests...'
+    $messages = @(& cargo test --manifest-path src-tauri/Cargo.toml --release --lib --no-run --message-format=json)
+    $testBuildExit = $LASTEXITCODE
+    $executables = @()
+    foreach ($message in $messages) {
+        $record = $message | ConvertFrom-Json
+        if ($record.reason -eq 'compiler-message' -and $record.message.rendered) { Write-Host $record.message.rendered }
+        if ($record.reason -eq 'compiler-artifact' -and $record.profile.test -and $record.executable) { $executables += $record.executable }
+    }
+    if ($testBuildExit -ne 0) { throw 'Rust test compilation failed.' }
+    if (-not $executables.Count) { throw 'No Rust test binary was produced.' }
+    . (Join-Path $PSScriptRoot 'test-artifacts.ps1')
+    @{ sourceHash = Get-TestSourceHash $repoRoot; executables = $executables } | ConvertTo-Json |
+        Set-Content -LiteralPath (Join-Path $repoRoot 'src-tauri/target/test-artifacts.json') -Encoding UTF8
+}
 
 $artifactPatterns = @(
     "nsis\*.exe",
@@ -111,6 +128,7 @@ foreach ($pattern in $artifactPatterns) {
         if (-not $artifact.Name.Contains($version)) {
             continue
         }
+        New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
         Copy-Item -LiteralPath $artifact.FullName -Destination $releaseDir
         $copied += $artifact.Name
     }

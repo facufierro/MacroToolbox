@@ -1,21 +1,31 @@
 param(
-    [ValidateSet('behavior', 'copilot')]
+    [ValidateSet('behavior', 'copilot', 'runtime')]
     [string]$Engine = 'behavior'
 )
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path -Parent $PSScriptRoot
 $ahkPath = Join-Path $projectPath 'src-tauri/resources/autohotkey/AutoHotkey64.exe'
 $source = [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/ahk.rs'))
-$engineName = $Engine.ToUpperInvariant() + '_ENGINE'
+$engineName = $(if ($Engine -eq 'runtime') { 'BEHAVIOR' } else { $Engine.ToUpperInvariant() }) + '_ENGINE'
 $engineSource = [regex]::Match($source, '(?s)const ' + $engineName + ': &str = r###"(.*?)"###;')
 if (-not $engineSource.Success) { throw "AutoHotkey $Engine engine not found" }
+$engineText = $engineSource.Groups[1].Value
+if ($Engine -eq 'runtime') {
+    foreach ($file in @('behavior_runtime.ahk', 'json.ahk', 'runtime_host.ahk')) {
+        $engineText += [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $projectPath "src-tauri/src/$file"))
+    }
+}
 
-# Exercise the production interpreter with input delivery replaced by an in-memory test sink.
+if ($Engine -in @('behavior', 'runtime')) {
+    $engineText += [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $projectPath 'tests/ahk/legacy-fixture.ahk'))
+}
+
+# Exercise production input primitives and the structured executor with an isolated test sink.
 # No keyboard/mouse hooks or injected global input are needed. Native checks use a hidden
 # fixture window and register raw input only inside this short-lived test process.
-$isolatedEngine = [regex]::Replace($engineSource.Groups[1].Value, '\bSend(Input|Event)\b', 'TestSend')
+$isolatedEngine = [regex]::Replace($engineText, '\bSend(Input|Event)\b', 'TestSend')
 $isolatedEngine = [regex]::Replace($isolatedEngine, '\bGetKeyState\b', 'TestGetKeyState')
-if ($Engine -eq 'behavior') {
+if ($Engine -in @('behavior', 'runtime')) {
     $nativeInput = [regex]::Match($engineSource.Groups[1].Value, '(?ms)^; Native behavior input boundary\..*?^; End native behavior input boundary\.').Value
     if (-not $nativeInput) { throw 'Behavior input boundary not found' }
     $isolatedEngine = $isolatedEngine.Replace($nativeInput, '')
@@ -29,7 +39,15 @@ if ($Engine -eq 'behavior') {
         $isolatedEngine = [regex]::Replace($isolatedEngine, '\b' + $native + '\b', 'Test' + $native)
     }
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*)MouseMove\b', '${1}TestMouseMove')
-    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*if )TryGetViewportFromApp\b', '${1}TestTryGetViewportFromApp')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*if !?)TryGetViewportFromApp\b', '${1}TestTryGetViewportFromApp')
+}
+if ($Engine -eq 'runtime') {
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bPostMessage\b', 'TestPostMessage')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bHotkey\b', 'TestHotkey')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bHotIf\b', 'TestHotIf')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bSendRuntimeAction\b(?=\()', 'TestRuntimeAction')
+    # The fixture supplies the operation sink; keep the production error-reporting path.
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^TestRuntimeAction\(profile, kind, id, value := ""\) \{.*?^\}', '')
 }
 if ($Engine -eq 'copilot') {
     foreach ($binding in @('$*LWin::CopilotWinDown()', '$*LWin up::CopilotWinUp()', '$*LShift::CopilotShiftDown()', '~$*LShift::ObserveCopilotShiftDown()', '~$*LShift up::ObserveCopilotShiftUp()')) {
@@ -42,16 +60,34 @@ if ($Engine -eq 'copilot') {
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bInputHook\b', 'TestInputHook')
 }
 $fixture = [IO.File]::ReadAllText((Join-Path $projectPath "tests/ahk/$Engine.test.ahk"))
+if ($Engine -eq 'runtime') {
+    $baseFixture = [IO.File]::ReadAllText((Join-Path $projectPath 'tests/ahk/behavior.test.ahk'))
+    $baseFixture = [regex]::Replace($baseFixture, '(?m)^RunTest\([^\r\n]*\)\r?\n|^FileAppend\("All 44[^\r\n]*\r?\n|^ExitApp 0\r?\n', '')
+    $fixture = $baseFixture + [Environment]::NewLine + $fixture
+}
 $testPath = Join-Path ([IO.Path]::GetTempPath()) ("MacroToolbox-$Engine-" + [Guid]::NewGuid().ToString('N') + '.ahk')
 $process = $null
 $stages = @(@{ Source = $isolatedEngine; Validate = ''; Name = "$Engine tests" })
 # /Validate checks the production declarations and native boundary without executing them.
-$validationSource = $engineSource.Groups[1].Value
-if ($Engine -eq 'behavior') { $validationSource += [Environment]::NewLine + $nativeInput }
+$validationSource = $engineText
+if ($Engine -in @('behavior', 'runtime')) { $validationSource += [Environment]::NewLine + $nativeInput }
 $stages = @(@{ Source = $validationSource; Validate = '/Validate '; Name = "$Engine syntax validation" }) + $stages
+if ($Engine -eq 'runtime') {
+    $fullSource = [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/input_host.ahk'))
+    $fullSource += [Environment]::NewLine + [regex]::Match($source, '(?s)const COPILOT_ENGINE: &str = r###"(.*?)"###;').Groups[1].Value
+    $fullSource += [Environment]::NewLine + $engineSource.Groups[1].Value
+    foreach ($file in @('behavior_runtime.ahk', 'json.ahk', 'runtime_host.ahk')) {
+        $fullSource += [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $projectPath "src-tauri/src/$file"))
+    }
+    $stages += @{ Source = $fullSource; Validate = '/Validate '; Name = 'Complete input host syntax validation'; NoFixture = $true }
+    $apiSource = [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/script_api.ahk'))
+    $apiSource += [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/json.ahk')).Replace('JsonReader', 'MacroToolboxJsonReader')
+    $stages += @{ Source = $apiSource; Validate = '/Validate '; Name = 'Script API syntax validation'; NoFixture = $true }
+}
 try {
     foreach ($stage in $stages) {
-        [IO.File]::WriteAllText($testPath, $fixture + [Environment]::NewLine + $stage.Source, [Text.UTF8Encoding]::new($true))
+        $prefix = if ($stage.NoFixture) { '' } else { $fixture }
+        [IO.File]::WriteAllText($testPath, $prefix + [Environment]::NewLine + $stage.Source, [Text.UTF8Encoding]::new($true))
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $ahkPath
         $start.Arguments = '/ErrorStdOut ' + $stage.Validate + '"' + $testPath + '"'

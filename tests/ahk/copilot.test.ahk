@@ -6,6 +6,7 @@
 global copilotState := {}, copilotShiftSuppressed := false
 global copilotCtrlHeld := false, copilotCtrlReleasePending := false
 global physical := Map(), logical := Map(), sent := [], timers := Map(), chordModifiers := []
+global heldOutputCounts := Map(), syntheticDown := Map()
 OnError(TestUnhandledError)
 
 RunTest("quick Win+R forwards Win before R", TestQuickWinR)

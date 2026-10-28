@@ -1,0 +1,9 @@
+[
+  {"source":"press(rctrl a b);repeat(x,100)","valid":true,"steps":[{"type":"press","key":"rctrl a b"},{"type":"repeat","key":"x","interval":"100","hold":"6"}]},
+  {"source":"pressalt(shift LButton);send(a;b)","valid":true,"steps":[{"type":"mousepress","key":"shift LButton"},{"type":"send","text":"a;b"}]},
+  {"source":"state(buff);restartoverlay(timer)","valid":true,"steps":[{"type":"state","stateId":"buff","action":"toggle"},{"type":"startoverlay","itemId":"timer","restart":true}]},
+  {"source":"[{\"type\":\"parallel\",\"steps\":[{\"type\":\"hold\",\"key\":\"RButton\"},{\"type\":\"sequence\",\"steps\":[{\"type\":\"sleep\",\"ms\":\"10\"},{\"type\":\"send\",\"text\":\"ø; 😀\\n\"}]}]}]","valid":true,"steps":[{"type":"parallel","steps":[{"type":"hold","key":"RButton"},{"type":"sequence","steps":[{"type":"sleep","ms":"10"},{"type":"send","text":"ø; 😀\n"}]}]}]},
+  {"source":"repeat(a,0)","valid":false,"steps":[{"type":"repeat","key":"a","interval":"0","hold":"6"}]},
+  {"source":"sleep(+5)","valid":false,"steps":[{"type":"sleep","ms":"+5"}]},
+  {"source":"future(action)","valid":false,"steps":[{"type":"unknown","source":"future(action)"}]}
+]

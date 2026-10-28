@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 
+use crate::behavior;
 use crate::config::{self, Profile};
 
 const GLOBAL_GAME_EXE: &str = "*";
@@ -176,19 +177,40 @@ pub fn disable_power_throttling(process: winapi::um::winnt::HANDLE) {
 
 /// Default precise key-down duration (ms) for a repeat tap when the behavior doesn't
 /// specify one. Kept small so a game that acts on the key per frame registers ~one press.
-const DEFAULT_REPEAT_HOLD_MS: u64 = 6;
 
 pub struct AhkManager {
     process: Option<Child>,
+    expected_revision: Option<String>,
+    active_revision: Option<String>,
+    launched_executable: Option<String>,
     bundled_ahk_exe: Option<PathBuf>,
     #[cfg(target_os = "windows")]
     job: AhkJob,
 }
 
 impl AhkManager {
+    pub fn validate(&self, configured: &str, script: &Path) -> Result<(), String> {
+        let executable = resolve_ahk_exe(configured, self.bundled_ahk_exe.as_deref());
+        let mut command = Command::new(&executable);
+        command.args(["/ErrorStdOut", "/Validate"]).arg(script);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command.output().map_err(|error| format!("Could not validate input configuration: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Input configuration rejected: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)));
+        }
+        Ok(())
+    }
+
     pub fn new(resource_dir: Option<PathBuf>) -> Self {
         Self {
             process: None,
+            expected_revision: None,
+            active_revision: None,
+            launched_executable: None,
             bundled_ahk_exe: resource_dir
                 .map(|dir| dir.join("resources").join("autohotkey").join("AutoHotkey64.exe"))
                 .filter(|path| path.exists()),
@@ -198,6 +220,7 @@ impl AhkManager {
     }
 
     pub fn launch(&mut self, ahk_exe: &str, script_path: &Path) -> Result<(), String> {
+        self.active_revision = None;
         // Let the old script release every synthetic input it owns before replacing it.
         if let Some(old) = self.process.take() {
             stop_process(old);
@@ -219,9 +242,18 @@ impl AhkManager {
         self.job.assign(&child);
         #[cfg(target_os = "windows")]
         keep_process_responsive(&child);
+        self.launched_executable = Some(exe);
         self.process = Some(child);
         Ok(())
     }
+
+    pub fn expect_revision(&mut self, revision: String) {
+        if self.expected_revision.as_ref() != Some(&revision) { self.active_revision = None; }
+        self.expected_revision = Some(revision);
+    }
+    pub fn activate_revision(&mut self, revision: String) { self.active_revision = Some(revision); }
+    pub fn is_active(&mut self) -> bool { self.is_running() && self.expected_revision.is_some() && self.expected_revision == self.active_revision }
+    pub fn uses_executable(&self, configured: &str) -> bool { self.launched_executable.as_deref() == Some(self.executable_path(configured).as_str()) }
 
     /// Resolve the configured interpreter exactly as manager-owned scripts do, including the
     /// bundled AutoHotkey v2 executable when no custom path is configured.
@@ -230,6 +262,7 @@ impl AhkManager {
     }
 
     pub fn kill(&mut self) {
+        self.active_revision = None;
         if let Some(child) = self.process.take() {
             stop_process(child);
         }
@@ -290,747 +323,81 @@ fn resolve_ahk_exe(configured: &str, bundled: Option<&Path>) -> String {
 }
 
 /// One armed profile plus the sibling slice it needs to resolve `parent_id` inheritance.
-pub struct ArmedProfile<'a> {
+pub struct ProfileContext<'a> {
     pub siblings: &'a [Profile],
     pub profile: &'a Profile,
     pub exe: &'a str,
 }
 
-/// Emit one armed profile's `#HotIf` block(s). Hotkeys/scripts sit under
-/// `WinActive("ahk_exe <exe>") && enabled["<id>"]` (or just `enabled["<id>"]` for exe "*") so
-/// they only fire while that app is focused; toggle keys sit under a focus-only gate so a
-/// disabled profile can still be re-enabled. `used_keys` tracks each activating key plus its
-/// held prerequisites per exe: the same chord may be bound for different apps, but within one
-/// app the first armed profile wins it (a duplicate label under an identical #HotIf would fail
-/// to load and kill every hotkey).
-fn generate_profile_block(
-    ap: &ArmedProfile,
-    used_keys: &mut HashMap<String, HashSet<String>>,
-    hold_ups: &mut HashSet<String>,
-    repeat_ups: &mut HashSet<String>,
-) -> String {
-    let p = ap.profile;
-    let exe = ap.exe.trim();
-    let global_game = exe == GLOBAL_GAME_EXE;
-    let id = escape_ahk_string(&p.id);
-    let exe_esc = escape_ahk_string(exe);
-    let mut resolved = config::resolve_profile_hotkeys(ap.siblings, p);
-    // AutoHotkey chooses the first matching #HotIf variant for a key. Put the most specific
-    // chord first so "x y z" wins over "x z" while all three keys are down.
-    resolved.sort_by_key(|hotkey| std::cmp::Reverse(trigger_chord_keys(&hotkey.trigger).len()));
-    let keyset = used_keys.entry(exe.to_string()).or_default();
-    let mut lines = String::new();
-    let mut combo_blocks = String::new();
-    let enabled_condition = if global_game {
-        format!("enabled[\"{id}\"]")
-    } else {
-        format!("WinActive(\"ahk_exe {exe_esc}\") && enabled[\"{id}\"]")
-    };
-    let focus_condition = if global_game {
-        String::new()
-    } else {
-        format!("WinActive(\"ahk_exe {exe_esc}\")")
-    };
-
-    for hk in resolved {
-        let ahk_key = trigger_to_key(&hk.trigger);
-        if ahk_key.is_empty() { continue; }
-        let chord_keys = trigger_chord_keys(&hk.trigger);
-        let physical_chord_keys = trigger_physical_chord_keys(&hk.trigger);
-        let prerequisite_keys = chord_keys[..chord_keys.len().saturating_sub(1)].join(" ");
-        let binding_id = format!("{ahk_key}|{prerequisite_keys}");
-        if !keyset.insert(binding_id) { continue; }
-        let trigger = escape_ahk_string(&hk.trigger);
-        let waits_for_input = hk.behavior.split(';')
-            .any(|step| step.trim().to_ascii_lowercase().starts_with("waitfor("));
-        let trigger_modifiers = trigger_modifier_symbols(&hk.trigger);
-        // Missing options retain legacy matching; an explicit choice controls whether
-        // extra held modifiers may activate this binding and pass through to its output.
-        let ahk_key = if hk.allow_extra_modifiers.unwrap_or(trigger_modifiers.is_empty()) {
-            format!("$*{}", ahk_key.trim_start_matches(&['$', '*'][..]))
-        } else {
-            ahk_key
-        };
-        // AltGr needs its native wildcard to tolerate Windows' synthesized LCtrl.
-        // An explicit exact-match choice must still reject other held modifiers.
-        let modifier_condition = if hk.allow_extra_modifiers == Some(false) && ahk_key.contains('*') {
-            format!("TriggerModifiersAllowed(\"{trigger}\")")
-        } else {
-            String::new()
-        };
-        // The overlay only reacts to a hotkey_triggered ping for a binding that carries a
-        // state_id (it drives overlay state flags/timers). For every other hotkey the ping is
-        // a wasted blocking localhost round-trip on the hotkey's own thread — its first-call
-        // COM init and the idle-throttled backend are what make an early keypress feel like a
-        // cold start — so emit it only when a state_id makes it meaningful.
-        let notify = if hk.state_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
-            format!("    SendAppEvent(\"hotkey_triggered\", \"{trigger}\")\n")
-        } else {
-            String::new()
-        };
-
-        // A behavior that is exactly one hold(...) becomes a true held remap: the key stays
-        // down while the hotkey is held, released by a paired wildcard key-up hotkey.
-        if let Some(hold_arg) = parse_pure_hold(&hk.behavior) {
-            let keys = escape_ahk_string(&hold_arg);
-            let owner = escape_ahk_string(&format!("{}:{}", p.id, hk.trigger));
-            let chord = escape_ahk_string(&physical_chord_keys.join(" "));
-            let binding = format!(
-                "{ahk_key}:: {{\n    HoldChordDown(\"{owner}\", \"{keys}\", \"{chord}\", \"{trigger_modifiers}\")\n{notify}}}\n"
-            );
-            push_trigger_binding(
-                &mut lines,
-                &mut combo_blocks,
-                &enabled_condition,
-                &prerequisite_keys,
-                &modifier_condition,
-                &binding,
-            );
-            for trigger_key in physical_chord_keys {
-                hold_ups.insert(trigger_key);
-            }
-            continue;
-        }
-
-        // A multi-step behavior containing hold(...) runs its one-shot steps once, while each
-        // hold action remains down until the trigger is released. Registering the whole behavior
-        // as one owner also suppresses hardware auto-repeat from replaying its press actions.
-        if has_compound_hold(&hk.behavior) {
-            let behavior = escape_ahk_string(&hk.behavior);
-            let owner = escape_ahk_string(&format!("{}:{}", p.id, hk.trigger));
-            let chord = escape_ahk_string(&physical_chord_keys.join(" "));
-            let behavior_exe = escape_ahk_string(exe);
-            let wait_context = if waits_for_input { format!(", \"{id}\"") } else { String::new() };
-            let binding = format!(
-                "{ahk_key}:: {{\n    HoldBehaviorDown(\"{owner}\", \"{behavior}\", \"{chord}\", \"{trigger_modifiers}\", \"{behavior_exe}\"{wait_context})\n{notify}}}\n"
-            );
-            push_trigger_binding(
-                &mut lines,
-                &mut combo_blocks,
-                &enabled_condition,
-                &prerequisite_keys,
-                &modifier_condition,
-                &binding,
-            );
-            for trigger_key in physical_chord_keys {
-                hold_ups.insert(trigger_key);
-            }
-            continue;
-        }
-
-        // A behavior that is exactly one repeat(...) becomes a hold-to-repeat. The loop
-        // outlives the #HotIf press gate, so it re-checks focus (exe) and this profile's
-        // enabled flag (id) itself each tick.
-        if let Some((repeat_keys, interval, hold)) = parse_pure_repeat(&hk.behavior) {
-            let poll_key = trigger_bare_key(&hk.trigger);
-            if !poll_key.is_empty() {
-                let keys = escape_ahk_string(&repeat_keys);
-                let poll_key = escape_ahk_string(&poll_key);
-                let chord = escape_ahk_string(&physical_chord_keys.join(" "));
-                let repeat_exe = if global_game { String::new() } else { exe_esc.clone() };
-                // A synthetic up for the trigger itself also changes Windows' asynchronous
-                // state, so skip that fallback for same-trigger output. The AHK hook remains
-                // installed for every repeat regardless.
-                let use_windows_state = !repeat_output_uses_trigger(&repeat_keys, &hk.trigger);
-                let binding = format!(
-                    "{ahk_key}:: {{\n    repeatDown[\"{poll_key}\"] := true\n    repeatChord[\"{poll_key}\"] := \"{chord}\"\n{notify}    RepeatHold(\"{keys}\", {interval}, \"{poll_key}\", \"{chord}\", \"{repeat_exe}\", {hold}, \"{id}\", {use_windows_state}, \"{trigger_modifiers}\")\n}}\n"
-                );
-                push_trigger_binding(
-                    &mut lines,
-                    &mut combo_blocks,
-                    &enabled_condition,
-                    &prerequisite_keys,
-                    &modifier_condition,
-                    &binding,
-                );
-                // One global key-up hotkey per physical key clears the repeat flag. `~` lets the
-                // native key-up through so normal typing of the key still works; keyed by the bare
-                // key because there is only one physical key regardless of how many triggers use it.
-                repeat_ups.insert(poll_key);
-                continue;
-            }
-        }
-
-        let behavior = escape_ahk_string(&hk.behavior);
-        let behavior_exe = escape_ahk_string(exe);
-        let wait_context = if waits_for_input { format!(", \"\", true, \"{id}\"") } else { String::new() };
-        // Run the behavior first, then notify the overlay (when a state_id makes the ping
-        // meaningful): the ping is a blocking localhost request, so doing it after keeps a
-        // busy backend from delaying the output.
-        let binding = format!(
-            "{ahk_key}:: {{\n    ExecuteBehavior(\"{behavior}\", \"{trigger_modifiers}\", \"{behavior_exe}\"{wait_context})\n{notify}}}\n"
-        );
-        push_trigger_binding(
-            &mut lines,
-            &mut combo_blocks,
-            &enabled_condition,
-            &prerequisite_keys,
-            &modifier_condition,
-            &binding,
-        );
-    }
-
-    for script in &p.scripts {
-        if !script.enabled || script.trigger != "hotkey" { continue; }
-        let ahk_key = trigger_to_key(&script.hotkey);
-        let chord_keys = trigger_chord_keys(&script.hotkey);
-        let prerequisite_keys = chord_keys[..chord_keys.len().saturating_sub(1)].join(" ");
-        let binding_id = format!("{ahk_key}|{prerequisite_keys}");
-        if ahk_key.is_empty() || !keyset.insert(binding_id) { continue; }
-        let sid = escape_ahk_string(&script.id);
-        push_trigger_binding(
-            &mut lines,
-            &mut combo_blocks,
-            &enabled_condition,
-            &prerequisite_keys,
-            "",
-            &format!("{ahk_key}:: RunScript(\"{sid}\")\n"),
-        );
-    }
-
-    // Toggle keys only bind when explicitly set; the overlay-toggle is skipped when it equals
-    // the hotkeys-toggle. Both flip THIS profile's enabled flag, gated by focus only so a
-    // disabled profile can be re-enabled from its own app.
-    let mut toggle_lines = String::new();
-    let mut toggle_combo_blocks = String::new();
-    let mut toggle_bindings = HashSet::new();
-    for trigger in [p.toggle_hotkeys_key.as_deref(), p.toggle_overlay_key.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        let key = trigger_to_key(trigger);
-        if key.is_empty() {
-            continue;
-        }
-        let chord_keys = trigger_chord_keys(trigger);
-        let prerequisite_keys = chord_keys[..chord_keys.len().saturating_sub(1)].join(" ");
-        if !toggle_bindings.insert(format!("{key}|{prerequisite_keys}")) {
-            continue;
-        }
-        push_trigger_binding(
-            &mut toggle_lines,
-            &mut toggle_combo_blocks,
-            &focus_condition,
-            &prerequisite_keys,
-            "",
-            &format!("{key}:: ToggleEnabled(\"{id}\")\n"),
-        );
-    }
-
-    let mut out = combo_blocks;
-    if !lines.is_empty() {
-        out.push_str(&format!("#HotIf {enabled_condition}\n{lines}#HotIf\n"));
-    }
-    out.push_str(&toggle_combo_blocks);
-    if !toggle_lines.is_empty() {
-        if global_game {
-            out.push_str(&format!("#HotIf\n{toggle_lines}#HotIf\n"));
-        } else {
-            out.push_str(&format!("#HotIf WinActive(\"ahk_exe {exe_esc}\")\n{toggle_lines}#HotIf\n"));
-        }
-    }
-    out
-}
-
-fn push_trigger_binding(
-    simple_lines: &mut String,
-    combo_blocks: &mut String,
-    base_condition: &str,
-    prerequisite_keys: &str,
-    modifier_condition: &str,
-    binding: &str,
-) {
-    if prerequisite_keys.is_empty() && modifier_condition.is_empty() {
-        simple_lines.push_str(binding);
-        return;
-    }
-    let mut conditions = Vec::new();
-    if !base_condition.is_empty() {
-        conditions.push(base_condition.to_string());
-    }
-    if !prerequisite_keys.is_empty() {
-        let prerequisite_keys = escape_ahk_string(prerequisite_keys);
-        conditions.push(format!("TriggerChordHeld(\"{prerequisite_keys}\")"));
-    }
-    if !modifier_condition.is_empty() {
-        conditions.push(modifier_condition.to_string());
-    }
-    let condition = conditions.join(" && ");
-    combo_blocks.push_str(&format!("#HotIf {condition}\n{binding}#HotIf\n"));
-}
-
-/// Build ONE always-on AHK script for every armed profile, each gated to its own app.
-pub fn generate_combined_script(armed: &[ArmedProfile]) -> String {
-    // Specific-exe blocks first, "*" last, so an app's binding takes precedence over a global
-    // one for the same key.
-    let mut ordered: Vec<&ArmedProfile> = armed.iter().collect();
+/// Serialize validated behavior data for the persistent input host.
+pub fn runtime_config(profiles: &[ProfileContext]) -> Result<String, String> {
+    use serde_json::json;
+    use std::hash::{Hash, Hasher};
+    let mut ordered: Vec<_> = profiles.iter().collect();
     ordered.sort_by_key(|ap| ap.exe.trim() == GLOBAL_GAME_EXE);
-
-    let mut used_keys: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut hold_ups: HashSet<String> = HashSet::new();
-    let mut repeat_ups: HashSet<String> = HashSet::new();
-    let mut blocks = String::new();
-    let mut enabled_init = String::new();
-    let mut overlay_init = String::new();
-    let mut event_profiles_init = String::new();
-    let mut target_states_init = String::new();
-    let mut event_targets = HashSet::new();
-
-    for ap in &ordered {
-        let p = ap.profile;
-        let exe = ap.exe.trim();
-        if exe.is_empty() { continue; }
-        let id = escape_ahk_string(&p.id);
-        let exe_esc = escape_ahk_string(exe);
-        enabled_init.push_str(&format!("enabled[\"{id}\"] := true\n"));
-        blocks.push_str(&generate_profile_block(
-            ap,
-            &mut used_keys,
-            &mut hold_ups,
-            &mut repeat_ups,
-        ));
-        // Only overlay-type profiles drive the overlay window; other profile kinds never
-        // show it (otherwise an armed hotkeys profile would pop an empty overlay).
-        if p.kind == "overlay" && !p.overlay_disabled {
-            let overlay_exe = if exe == GLOBAL_GAME_EXE { "*" } else { &exe_esc };
-            overlay_init.push_str(&format!(
-                "overlayProfiles.Push(Map(\"id\", \"{id}\", \"exe\", \"{overlay_exe}\"))\n"
-            ));
+    let mut result = Vec::new();
+    for ap in ordered {
+        if ap.exe.trim().is_empty() { continue; }
+        let profile = ap.profile;
+        let mut bindings = Vec::new();
+        let mut hotkeys = config::resolve_profile_hotkeys(ap.siblings, profile);
+        hotkeys.sort_by_key(|hotkey| std::cmp::Reverse(trigger_chord_keys(&hotkey.trigger).len()));
+        let binding = |trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str| {
+            let modifiers = trigger_modifier_symbols(trigger);
+            let base = trigger_to_key(trigger);
+            let key = if allow_extra.unwrap_or(modifiers.is_empty()) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
+            let chord = trigger_physical_chord_keys(trigger);
+            let prerequisites = trigger_chord_keys(trigger);
+            json!({"key":key, "trigger":trigger, "modifiers":modifiers, "chord":chord.join(" "),
+                "prerequisites":prerequisites[..prerequisites.len().saturating_sub(1)].join(" "), "specificity":prerequisites.len().saturating_sub(1),
+                "exact":allow_extra == Some(false), "toggle":toggle, "steps":steps, "section":section})
+        };
+        for hotkey in hotkeys.into_iter().filter(|_| profile.armed && !profile.hotkeys_disabled) {
+            if hotkey.trigger.trim().is_empty() { continue; }
+            let mut steps = behavior::parse(&hotkey.behavior)?;
+            if profile.armed { behavior::validate(&steps).map_err(|error| format!("{} / {}: {error}", profile.name, hotkey.trigger))?; }
+            if let Some(state_id) = &hotkey.state_id { steps.push(behavior::Action::State { state_id: state_id.clone(), action: behavior::StateAction::Toggle }); }
+            bindings.push(binding(&hotkey.trigger, steps, false, hotkey.allow_extra_modifiers, "hotkeys"));
         }
-
-        if exe != GLOBAL_GAME_EXE {
-            let resolved_events = if p.kind == "events" {
-                config::resolve_profile_events(ap.siblings, p)
-            } else {
-                Vec::new()
-            };
-            let event_pairs: Vec<String> = resolved_events
-                .into_iter()
-                .filter(|event| matches!(
-                    event.event.as_str(),
-                    "app_started" | "app_stopped" | "window_ready" | "focus_gained" | "focus_lost"
-                ))
-                .filter(|event| !event.behavior.trim().is_empty())
-                .map(|event| format!(
-                    "\"{}\", \"{}\"",
-                    escape_ahk_string(&event.event),
-                    escape_ahk_string(&event.behavior),
-                ))
-                .collect();
-            let launch_scripts: Vec<String> = p.scripts
-                .iter()
-                .filter(|script| script.enabled && script.trigger == "launch")
-                .map(|script| format!("\"{}\"", escape_ahk_string(&script.id)))
-                .collect();
-
-            if !event_pairs.is_empty() || !launch_scripts.is_empty() {
-                let event_exe = exe.to_lowercase();
-                let event_exe_esc = escape_ahk_string(&event_exe);
-                let events = format!("Map({})", event_pairs.join(", "));
-                let scripts = format!("[{}]", launch_scripts.join(", "));
-                event_profiles_init.push_str(&format!(
-                    "eventProfiles.Push(Map(\"id\", \"{id}\", \"exe\", \"{event_exe_esc}\", \"target\", \"{exe_esc}\", \"events\", {events}, \"launchScripts\", {scripts}))\n"
-                ));
-                if event_targets.insert(event_exe) {
-                    target_states_init.push_str(&format!(
-                        "targetStates[\"{event_exe_esc}\"] := Map(\"initialized\", false, \"running\", false, \"windowReady\", false, \"focused\", false)\n"
-                    ));
-                }
-            }
+        for script in profile.scripts.iter().filter(|script| profile.armed && !profile.scripts_disabled && script.enabled && script.trigger == "hotkey" && !script.hotkey.trim().is_empty()) {
+            bindings.push(binding(&script.hotkey, vec![behavior::Action::Script { script_id: script.id.clone() }], false, None, "scripts"));
         }
+        let mut toggles = HashSet::new();
+        for trigger in [profile.toggle_hotkeys_key.as_deref(), profile.toggle_overlay_key.as_deref()].into_iter().flatten().filter(|trigger| profile.armed && !trigger.trim().is_empty()) {
+            if toggles.insert(trigger) { bindings.push(binding(trigger, Vec::new(), true, None, "")); }
+        }
+        let mut events = serde_json::Map::new();
+        for event in config::resolve_profile_events(ap.siblings, profile).into_iter().filter(|_| profile.armed && !profile.events_disabled) {
+            let steps = behavior::parse(&event.behavior)?;
+            if profile.armed { behavior::validate(&steps)?; }
+            events.insert(event.event.clone(), serde_json::to_value(steps).map_err(|error| error.to_string())?);
+        }
+        let mut data = json!({"id":profile.id, "target":ap.exe.trim(), "armed":profile.armed,
+            "overlay":config::profile_has_overlay(ap.siblings, profile), "bindings":bindings, "events":events,
+            "sections":{"hotkeys":!profile.hotkeys_disabled,"events":!profile.events_disabled,"scripts":!profile.scripts_disabled},
+            "launchScripts":profile.scripts.iter().filter(|script| !profile.scripts_disabled && script.enabled && script.trigger == "launch").map(|script| script.id.clone()).collect::<Vec<_>>()});
+        let mut revisions = serde_json::Map::new();
+        for section in ["hotkeys", "events", "scripts"] {
+            let inputs: Vec<_> = data["bindings"].as_array().unwrap().iter().filter(|binding| binding["section"].as_str() == Some(section)).collect();
+            let definition = json!({"armed":profile.armed,"target":ap.exe.trim(),"enabled":profile.section_enabled(section),
+                "bindings":inputs,"events":if section == "events" { Some(&data["events"]) } else { None },
+                "scripts":if section == "scripts" { Some(&profile.scripts) } else { None }});
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            definition.to_string().hash(&mut hash);
+            revisions.insert(section.into(), json!(hash.finish().to_string()));
+        }
+        data["sectionRevisions"] = serde_json::Value::Object(revisions);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        data.to_string().hash(&mut hash);
+        data["revision"] = json!(hash.finish().to_string());
+        result.push(data);
     }
-
-    let mut release_keys: Vec<&String> = hold_ups.union(&repeat_ups).collect();
-    release_keys.sort();
-    let mut release_up_lines = String::new();
-    for key in release_keys {
-        let releases_repeat = repeat_ups.contains(key);
-        let releases_hold = hold_ups.contains(key);
-        let key = escape_ahk_string(key);
-        let mut actions = String::new();
-        if releases_repeat {
-            actions.push_str(&format!("    repeatDown[\"{key}\"] := false\n"));
-        }
-        if releases_hold {
-            actions.push_str(&format!("    ReleaseTriggerHolds(\"{key}\")\n"));
-        }
-        // This handler is global so release recovery survives profile/focus changes. Always
-        // pass the physical up through when no active owner suppressed its corresponding down.
-        // Ignore an output tap's synthetic up when the macro presses its own trigger button;
-        // the hook's physical state stays down until the user actually releases it.
-        release_up_lines.push_str(&format!(
-            "~*{key} up:: {{\n    if GetKeyState(\"{key}\", \"P\")\n        return\n{actions}}}\n"
-        ));
-    }
-
-    let header = format!(
-        r###"#Requires AutoHotkey v2.0
-#SingleInstance Force
-
-; A held hotkey (a hold/repeat remap, or a held accent key) auto-repeats dozens of times a
-; second, which would trip AHK's runaway-hotkey guard (default 70 per 2s) and pop a warning
-; that kills every hotkey. Raise it well above any real hold rate.
-A_MaxHotkeysPerInterval := 1000
-
-CoordMode "Pixel", "Screen"
-CoordMode "Mouse", "Screen"
-SetTitleMatchMode 2
-
-global enabled := Map()
-global overlayVisible := false
-global overlayProfiles := []
-global lastFocusId := ""
-global eventProfiles := []
-global targetStates := Map()
-global behaviorEventQueue := []
-global behaviorEventDraining := false
-global repeatDown := Map()
-global repeatChord := Map()
-global syntheticDown := Map()
-global chordHolds := Map()
-global heldOutputCounts := Map()
-global mirroredMouseDown := Map()
-global copilotState := {{phase: GetKeyState("LWin", "P") ? "win_held" : "idle", input: "",
-    shiftHeld: GetKeyState("LShift", "P"), shiftHeldBefore: false, winHeldBefore: false}}
-global copilotShiftSuppressed := false
-global copilotCtrlHeld := false
-global copilotCtrlReleasePending := false
-global behaviorClipboardBackup := ""
-global behaviorClipboardPending := false
-global behaviorClipboardSequence := 0
-{enabled_init}{overlay_init}{event_profiles_init}{target_states_init}OnExit ReleaseSyntheticHeld
-OnExit ReleaseCopilotHeld
-OnExit HideOverlayOnExit
-OnExit RestoreBehaviorClipboard
-
-SendOverlayCommand(path) {{
-    try {{
-        xhr := ComObject("WinHttp.WinHttpRequest.5.1")
-        xhr.Open("GET", "http://127.0.0.1:17823/" path, false)
-        ; Bound the wait so a momentarily busy backend can't stall the keypress that triggered it.
-        xhr.SetTimeouts(500, 500, 500, 500)
-        xhr.Send()
-    }} catch Error {{
-    }}
-}}
-
-UriEncode(str) {{
-    result := ""
-    loop parse, str
-    {{
-        code := Ord(A_LoopField)
-        if ((code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A) || code = 0x2D || code = 0x2E || code = 0x5F || code = 0x7E)
-            result .= Chr(code)
-        else
-            result .= Format("%{{:02X}}", code)
-    }}
-    return result
-}}
-
-SendAppEvent(eventType, hotkeyTrigger := "", stateId := "", itemId := "") {{
-    path := "event?type=" UriEncode(eventType)
-    if (hotkeyTrigger != "")
-        path .= "&hotkey_trigger=" UriEncode(hotkeyTrigger)
-    if (stateId != "")
-        path .= "&state_id=" UriEncode(stateId)
-    if (itemId != "")
-        path .= "&item_id=" UriEncode(itemId)
-    SendOverlayCommand(path)
-}}
-
-RunScript(id) {{
-    SendOverlayCommand("script?id=" UriEncode(id))
-}}
-
-QueueBehaviorEvent(behavior, targetExe, profileId) {{
-    global behaviorEventQueue
-    behaviorEventQueue.Push(Map("behavior", behavior, "target", targetExe, "profile", profileId))
-    SetTimer DrainBehaviorEvents, -1
-}}
-
-DrainBehaviorEvents(*) {{
-    global behaviorEventQueue, behaviorEventDraining
-    if behaviorEventDraining
-        return
-    behaviorEventDraining := true
-    try {{
-        while behaviorEventQueue.Length > 0 {{
-            queued := behaviorEventQueue.RemoveAt(1)
-            preserveHooks := RegExMatch(queued["behavior"], "i)(?:^|;)\s*waitfor\(") != 0
-            ExecuteBehavior(queued["behavior"], "", queued["target"], "", preserveHooks, queued["profile"])
-        }}
-    }} finally {{
-        behaviorEventDraining := false
-        if behaviorEventQueue.Length > 0
-            SetTimer DrainBehaviorEvents, -1
-    }}
-}}
-
-DispatchTargetEvent(exe, eventName) {{
-    global eventProfiles
-    for profile in eventProfiles {{
-        if (profile["exe"] != exe)
-            continue
-        if (eventName = "app_started") {{
-            for scriptId in profile["launchScripts"]
-                RunScript(scriptId)
-        }}
-        events := profile["events"]
-        if events.Has(eventName)
-            QueueBehaviorEvent(events[eventName], profile["target"], profile["id"])
-    }}
-}}
-
-; One monitor owns target lifecycle transitions and overlay focus. The first observation only
-; seeds state, so rebuilding this script cannot impersonate an app or focus event.
-SyncRuntime(*) {{
-    global enabled, targetStates, overlayProfiles, overlayVisible, lastFocusId
-    for exe, state in targetStates {{
-        running := ProcessExist(exe) != 0
-        windowReady := running && WinExist("ahk_exe " exe) != 0
-        focused := windowReady && WinActive("ahk_exe " exe) != 0
-        if !state["initialized"] {{
-            state["initialized"] := true
-        }} else {{
-            if !state["running"] && running
-                DispatchTargetEvent(exe, "app_started")
-            if !state["windowReady"] && windowReady
-                DispatchTargetEvent(exe, "window_ready")
-            if !state["focused"] && focused
-                DispatchTargetEvent(exe, "focus_gained")
-            if state["focused"] && !focused
-                DispatchTargetEvent(exe, "focus_lost")
-            if state["running"] && !running
-                DispatchTargetEvent(exe, "app_stopped")
-        }}
-        state["running"] := running
-        state["windowReady"] := windowReady
-        state["focused"] := focused
-    }}
-
-    ; The overlay follows the focused app: find the first armed overlay profile whose app is
-    ; focused (specific apps first, then "*"), tell the backend which profile's config to push,
-    ; and show/hide from that profile's enabled flag.
-    focusId := ""
-    shouldShow := false
-    for p in overlayProfiles {{
-        if (p["exe"] = "*" || WinActive("ahk_exe " p["exe"])) {{
-            focusId := p["id"]
-            shouldShow := enabled.Has(focusId) && enabled[focusId]
-            break
-        }}
-    }}
-    if (focusId != lastFocusId) {{
-        lastFocusId := focusId
-        SendOverlayCommand(focusId = "" ? "focus" : "focus?id=" UriEncode(focusId))
-    }}
-    if (shouldShow != overlayVisible) {{
-        overlayVisible := shouldShow
-        SendOverlayCommand(shouldShow ? "show" : "hide")
-    }}
-}}
-
-ToggleEnabled(id) {{
-    global enabled
-    if enabled.Has(id)
-        enabled[id] := !enabled[id]
-}}
-
-HideOverlayOnExit(*) {{
-    global overlayVisible
-    if !overlayVisible
-        return
-    overlayVisible := false
-    SendOverlayCommand("hide")
-}}
-
-SetTimer SyncRuntime, 200
-SyncRuntime()
-
-; Windows silently removes low-level hooks when the system sleeps or the hook
-; times out while the process is throttled in the background (idle in the tray),
-; leaving hotkeys dead even though this script is still running. Install both hooks
-; up front and reinstall them after a wake or a detected process stall.
-InstallKeybdHook true, true
-InstallMouseHook true, true
-global lastHealthTick := A_TickCount
-
-ReinstallHooks() {{
-    InstallKeybdHook true, true
-    InstallMouseHook true, true
-    ; If the old hook missed Copilot's key-up, its synthetic Ctrl belongs to that dead hook
-    ; generation. Release it now; a still-held Copilot key will reacquire Ctrl on key repeat.
-    ReleaseCopilotCtrl()
-}}
-
-OnMessage 0x218, OnPowerBroadcast  ; WM_POWERBROADCAST
-
-OnPowerBroadcast(wParam, lParam, msg, hwnd) {{
-    ; PBT_APMRESUMESUSPEND (0x7) / PBT_APMRESUMEAUTOMATIC (0x12): just woke up.
-    if (wParam = 0x7 || wParam = 0x12)
-        ReinstallHooks()
-}}
-
-CheckHookHealth(*) {{
-    global lastHealthTick
-    ; This 1-second timer firing far late means the process was throttled or suspended (idle in
-    ; the tray under Efficiency Mode, or a real sleep). Windows drops the low-level hooks in that
-    ; state, so reinstall them the instant we run again — this is what makes hotkeys recover
-    ; promptly after the process resumes.
-    gap := A_TickCount - lastHealthTick
-    lastHealthTick := A_TickCount
-    if (gap > 3000) {{
-        ReinstallHooks()
-    }}
-}}
-SetTimer CheckHookHealth, 1000
-
-; The key-up hotkey is the primary release signal. This independent owner-scoped monitor
-; clears a repeat if that hotkey is ever delayed or displaced by another hook callback.
-CheckRepeatReleases(*) {{
-    global repeatDown, repeatChord
-    anyDown := false
-    for triggerKey, down in repeatDown {{
-        if !down
-            continue
-        chord := repeatChord.Has(triggerKey) ? repeatChord[triggerKey] : triggerKey
-        if TriggerChordHeld(chord)
-            anyDown := true
-        else
-            repeatDown[triggerKey] := false
-    }}
-    if !anyDown
-        SetTimer CheckRepeatReleases, 0
-}}
-
-; A previous force-terminated instance can leave synthesized modifiers logically down.
-; Clear only keys which are not physically held, so startup cannot cancel real input.
-ReleaseStaleCopilotModifiers()
-
-
-; The Copilot key arrives as LWin+LShift+F23 (SC06E). Keep this remap in the same
-; process as every other hotkey so there is one keyboard hook and one modifier-state owner.
-; The remap and profile hotkeys intentionally share one keyboard hook. SendInput temporarily
-; removes that hook, so its RCtrl cannot act as a modifier for this script's own RCtrl hotkeys.
-; SendEvent at level 1 keeps the remapped key visible to the level-0 profile bindings and lets
-; the same hook forget Copilot's built-in LWin/LShift before matching the user's next key.
-{COPILOT_ENGINE}
-
-{release_up_lines}
-{blocks}
-"###
-    );
-
-    header + BEHAVIOR_ENGINE
+    serde_json::to_string(&result).map_err(|error| error.to_string())
 }
 
-/// Escape a string for safe embedding inside an AHK v2 double-quoted string literal.
-/// The backtick is AHK's escape character, so it must be handled first; an unescaped
-/// backtick (or quote / newline) in user text would otherwise terminate the string
-/// early and shift every following brace, producing an unparseable script.
-fn escape_ahk_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '`'  => out.push_str("``"),
-            '"'  => out.push_str("`\""),
-            '\n' => out.push_str("`n"),
-            '\r' => out.push_str("`r"),
-            '\t' => out.push_str("`t"),
-            _    => out.push(ch),
-        }
-    }
-    out
-}
-
-/// If `behavior` is exactly a single `hold(...)` action, return its inner key string.
-/// A multi-step behavior (containing `;`) is not treated as a remap.
-fn parse_pure_hold(behavior: &str) -> Option<String> {
-    let b = behavior.trim();
-    let lower = b.to_lowercase();
-    if !lower.starts_with("hold(") || !b.ends_with(')') {
-        return None;
-    }
-    let inner = b[5..b.len() - 1].trim();
-    if inner.is_empty() || inner.contains(';') {
-        return None;
-    }
-    Some(inner.to_string())
-}
-
-/// Whether a multi-step behavior contains a hold(...) action. Pure holds use the simpler remap
-/// path above; behaviors without a hold remain ordinary one-shot behaviors.
-fn has_compound_hold(behavior: &str) -> bool {
-    if !behavior.contains(';') {
-        return false;
-    }
-
-    behavior.split(';').any(|token| {
-        let token = token.trim();
-        let lower = token.to_lowercase();
-        if lower.starts_with("hold(") && token.ends_with(')') {
-            let inner = token[5..token.len() - 1].trim();
-            !inner.is_empty()
-        } else {
-            false
-        }
-    })
-}
-
-/// If `behavior` is exactly a single `repeat(<keys>, <interval_ms>)` action, return the
-/// key string (which may carry modifiers) and the interval. A multi-step behavior
-/// (containing `;`) is not treated as a hold-to-repeat.
-/// Parses `repeat(<keys>, <interval>[, <hold>])`. Returns (keys, interval_ms, hold_ms).
-/// `hold` (the precise key-down duration of each tap) is optional and defaults to
-/// DEFAULT_REPEAT_HOLD_MS. The key part never contains a comma (modifiers are
-/// space-separated), so splitting on commas is unambiguous.
-fn parse_pure_repeat(behavior: &str) -> Option<(String, u64, u64)> {
-    let b = behavior.trim();
-    let lower = b.to_lowercase();
-    if !lower.starts_with("repeat(") || !b.ends_with(')') {
-        return None;
-    }
-    let inner = b["repeat(".len()..b.len() - 1].trim();
-    if inner.contains(';') {
-        return None;
-    }
-    let parts: Vec<&str> = inner.splitn(3, ',').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let keys = parts[0].trim();
-    let interval = parts[1].trim().parse::<u64>().ok()?;
-    let hold = match parts.get(2) {
-        Some(h) => h.trim().parse::<u64>().ok()?,
-        None => DEFAULT_REPEAT_HOLD_MS,
-    };
-    if keys.is_empty() || interval == 0 {
-        return None;
-    }
-    Some((keys.to_string(), interval, hold))
-}
-
-fn repeat_output_uses_trigger(repeat_keys: &str, trigger: &str) -> bool {
-    let trigger_keys: Vec<String> = trigger_physical_chord_keys(trigger)
-        .iter()
-        .map(|key| repeat_comparison_key(key))
-        .collect();
-    !trigger_keys.is_empty()
-        && repeat_keys.split_whitespace().any(|part| {
-            let repeat_key = repeat_comparison_key(&trigger_bare_key(part));
-            trigger_keys.contains(&repeat_key)
-        })
-}
-
-fn repeat_comparison_key(key: &str) -> String {
-    match key.to_ascii_lowercase().as_str() {
-        "control" | "lcontrol" | "rcontrol" => "control".to_string(),
-        "shift" | "lshift" | "rshift" => "shift".to_string(),
-        "alt" | "lalt" | "ralt" => "alt".to_string(),
-        "m1" => "lbutton".to_string(),
-        "m2" => "rbutton".to_string(),
-        key => key.to_string(),
-    }
+pub fn input_script() -> String {
+    [include_str!("input_host.ahk"), COPILOT_ENGINE, BEHAVIOR_ENGINE,
+        BEHAVIOR_RUNTIME, include_str!("json.ahk"), include_str!("runtime_host.ahk")].join("\n")
 }
 
 /// AutoHotkey Blind-mode exclusions for modifiers contributed by a trigger. Exclusions suppress
@@ -1240,10 +607,14 @@ ReleaseStaleCopilotModifiers() {
 }
 
 ReleaseCopilotCtrl() {
-    global copilotCtrlHeld, copilotCtrlReleasePending
+    global copilotCtrlHeld, copilotCtrlReleasePending, heldOutputCounts, syntheticDown
     if !copilotCtrlHeld
         return
     copilotCtrlHeld := false
+    if heldOutputCounts.Has("RCtrl") {
+        syntheticDown["RCtrl"] := true
+        return
+    }
     ; A physical Right Ctrl owns its hold until its own release; clear our DownR afterward.
     if GetKeyState("RCtrl", "P") {
         copilotCtrlReleasePending := true
@@ -1270,7 +641,7 @@ ReleaseCopilotHeld(*) {
 }
 
 CheckCopilotRelease(*) {
-    global copilotCtrlReleasePending
+    global copilotCtrlReleasePending, heldOutputCounts, syntheticDown
     if !copilotCtrlReleasePending {
         SetTimer CheckCopilotRelease, 0
         return
@@ -1278,7 +649,10 @@ CheckCopilotRelease(*) {
     if !GetKeyState("RCtrl", "P") {
         copilotCtrlReleasePending := false
         SetTimer CheckCopilotRelease, 0
-        SendCopilotKeys("{Blind}{RCtrl up}")
+        if heldOutputCounts.Has("RCtrl")
+            syntheticDown["RCtrl"] := true
+        else
+            SendCopilotKeys("{Blind}{RCtrl up}")
     }
 }
 
@@ -1407,6 +781,8 @@ $*SC06E::CopilotDown()
 $*SC06E up::CopilotUp()
 "###;
 
+const BEHAVIOR_RUNTIME: &str = include_str!("behavior_runtime.ahk");
+
 const BEHAVIOR_ENGINE: &str = r###"; Resolve a single-character key name for sending. When the character exists on the
 ; active layout, keep the name: AHK then picks that layout's key (and shift state), so
 ; "y" types y on QWERTZ too — a fixed US scancode would press the wrong key there.
@@ -1490,7 +866,7 @@ class BehaviorInputWait {
     __New(keyStr, configuredExe, enabledKey) {
         if Trim(keyStr) = ""
             throw ValueError("waitfor requires a key or mouse button.")
-        this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "\s+", " "))
+        this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "[,\s]+", " "))
         this.key := this.keys.Pop()
         this.vk := GetKeyVK(this.key)
         this.sc := GetKeySC(this.key)
@@ -1588,100 +964,7 @@ ReadBehaviorInput(handle) {
 }
 ; End native behavior input boundary.
 
-WaitForTrigger(keyStr, configuredExe := "", enabledKey := "") {
-    input := BehaviorInputWait(keyStr, configuredExe, enabledKey)
-    callback := input.OnInput.Bind(input)
-    try {
-        StartBehaviorInput(callback)
-        loop {
-            if IsObject(input.error)
-                throw input.error
-            if !BehaviorContextActive(configuredExe, enabledKey)
-                return false
-            if input.completed
-                return true
-            Sleep 10
-        }
-    } finally {
-        StopBehaviorInput(callback)
-    }
-}
-
-ExecuteBehavior(str, triggerModifiers := "", configuredExe := "", holdOwner := "", preserveHooks := false, enabledKey := "") {
-    global chordHolds
-    MouseGetPos &savedX, &savedY
-    locked := false
-    try {
-        for token in StrSplit(str, ";") {
-            token := Trim(token)
-            if (token = "")
-                continue
-            if (token = "savecursor") {
-                MouseGetPos &savedX, &savedY
-            } else if (token = "restorecursor") {
-                if locked {
-                    BlockInput "MouseMoveOff"
-                    locked := false
-                }
-                SendMode "Event"
-                SetMouseDelay -1
-                MouseMove savedX, savedY, 0
-            } else if (token = "lock") {
-                BlockInput "MouseMove"
-                locked := true
-            } else if (token = "borderless") {
-                SendBehaviorCommand("borderless", configuredExe)
-            } else if (token = "killprocess") {
-                SendBehaviorCommand("killprocess", configuredExe)
-            } else if (token = "stretch") {
-                SendBehaviorCommand("stretch", configuredExe)
-            } else if (token = "fit") {
-                SendBehaviorCommand("fit", configuredExe)
-            } else if RegExMatch(token, "i)^resolution\((\d+)\s*,\s*(\d+)\)$", &m) {
-                SendBehaviorCommand("resolution", configuredExe, "&width=" m[1] "&height=" m[2])
-            } else if RegExMatch(token, "i)^goto\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)$", &m) {
-                SendMode "Event"
-                SetMouseDelay -1
-                GetGameViewport(&gameX, &gameY, &gameW, &gameH)
-                MouseMove gameX + ResolveCoord(m[1], gameW), gameY + ResolveCoord(m[2], gameH), 0
-            } else if RegExMatch(token, "i)^press\((.+)\)$", &m) {
-                for k in StrSplit(m[1], ",")
-                    DoPress(Trim(k), 30, false, preserveHooks, triggerModifiers)
-                Sleep 30
-            } else if RegExMatch(token, "i)^(?:mousepress|pressalt)\((.+)\)$", &m) {
-                DoMousePress(Trim(m[1]), configuredExe)
-                Sleep 30
-            } else if RegExMatch(token, "i)^repeat\((.+?),\s*(\d+)(?:,\s*\d+)?\)$", &m) {
-                DoPress(Trim(m[1]), 30, false, preserveHooks, triggerModifiers)
-                Sleep 30
-            } else if RegExMatch(token, "i)^hold\((.+)\)$", &m) {
-                if (holdOwner = "") {
-                    DoPress(Trim(m[1]), 30, false, false, triggerModifiers)
-                } else {
-                    HoldBehaviorKey(holdOwner, Trim(m[1]), triggerModifiers)
-                }
-            } else if RegExMatch(token, "i)^state\((.+)\)$", &m) {
-                SendAppEvent("state_triggered", "", Trim(m[1]))
-            } else if RegExMatch(token, "i)^startoverlay\((.+)\)$", &m) {
-                SendAppEvent("overlay_started", "", "", Trim(m[1]))
-            } else if RegExMatch(token, "i)^restartoverlay\((.+)\)$", &m) {
-                SendAppEvent("overlay_restarted", "", "", Trim(m[1]))
-            } else if RegExMatch(token, "i)^sleep\((\d+)\)$", &m) {
-                Sleep Integer(m[1])
-            } else if RegExMatch(token, "i)^waitfor\((.*)\)$", &m) {
-                if !WaitForTrigger(Trim(m[1]), configuredExe, enabledKey)
-                    return
-            } else if RegExMatch(token, "i)^send\((.+)\)$", &m) {
-                SendBehaviorText(m[1])
-            }
-        }
-    } finally {
-        if locked
-            BlockInput "MouseMoveOff"
-    }
-}
-
-DoMousePress(keyName, configuredExe := "") {
+DoMousePress(keyName, configuredExe := "", modifierFlags := 0) {
     global heldOutputCounts
     static buttons := Map("lbutton", "Left", "rbutton", "Right", "mbutton", "Middle",
         "xbutton1", "X1", "xbutton2", "X2")
@@ -1702,18 +985,18 @@ DoMousePress(keyName, configuredExe := "") {
     SetControlDelay -1
     try {
         if !(GetKeyState(keyName, "P") || heldOutputCounts.Has(keyName)) {
-            ControlClick(position, target,, buttons[keyName], 1, "NA Pos")
+            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags)
             return
         }
         ; A second down is not a new press while the app already sees this button held.
         ; Release first and give the app time to observe it before sending the click.
-        finish := FinishMousePress.Bind(position, target, buttons[keyName], keyName)
+        finish := FinishModifiedMousePress.Bind(position, target, buttons[keyName], keyName, modifierFlags)
         OnExit finish
         previousCritical := Critical()
         try {
-            ControlClick(position, target,, buttons[keyName], 1, "NA Pos U")
+            WindowClick(position, target, buttons[keyName], "NA Pos U", modifierFlags)
             Sleep 30
-            ControlClick(position, target,, buttons[keyName], 1, "NA Pos")
+            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags)
         } finally {
             try finish.Call()
             finally {
@@ -1725,7 +1008,7 @@ DoMousePress(keyName, configuredExe := "") {
     finally SetControlDelay previousDelay
 }
 
-FinishMousePress(position, target, button, keyName, exitReason := "", *) {
+FinishMousePress(position, target, button, keyName, exitReason := "", modifierFlags := 0, *) {
     global heldOutputCounts
     ; Reasserting a physical hold here starts another press on the clicked UI, so a
     ; later restorecursor drags it. Only an explicit hold behavior owns a remaining down.
@@ -1733,8 +1016,45 @@ FinishMousePress(position, target, button, keyName, exitReason := "", *) {
     held := exitReason = "" && heldOutputCounts.Has(keyName)
     previousDelay := A_ControlDelay
     SetControlDelay -1
-    try ControlClick(position, target,, button, 1, held ? "NA Pos D" : "NA Pos U")
+    try WindowClick(position, target, button, held ? "NA Pos D" : "NA Pos U", modifierFlags)
     finally SetControlDelay previousDelay
+}
+
+FinishModifiedMousePress(position, target, button, keyName, flags, exitReason := "", *) {
+    FinishMousePress(position, target, button, keyName, exitReason, flags)
+}
+
+WindowClick(position, target, button, options, flags := 0) {
+    if !flags {
+        ControlClick(position, target,, button, 1, options)
+        return
+    }
+    ; ControlClick omits MK_CONTROL/MK_SHIFT. Modified clicks must carry those
+    ; flags in both messages, including the release and held-button recovery.
+    if !RegExMatch(position, "^X(-?\d+) Y(-?\d+)$", &coordinates)
+        throw ValueError("Invalid window click position.")
+    point := Buffer(8)
+    NumPut("Int", Integer(coordinates[1]), "Int", Integer(coordinates[2]), point)
+    current := target
+    loop {
+        child := DllCall("ChildWindowFromPointEx", "Ptr", current, "Int64", NumGet(point, 0, "Int64"), "UInt", 7, "Ptr")
+        if !child || child = current
+            break
+        DllCall("MapWindowPoints", "Ptr", current, "Ptr", child, "Ptr", point, "UInt", 1)
+        current := child
+    }
+    packed := (NumGet(point, 0, "Int") & 0xFFFF) | ((NumGet(point, 4, "Int") & 0xFFFF) << 16)
+    messages := Map("Left", [0x201, 1, 0], "Right", [0x204, 2, 0], "Middle", [0x207, 16, 0],
+        "X1", [0x20B, 32, 1 << 16], "X2", [0x20B, 64, 2 << 16])
+    message := messages[button]
+    if !InStr(options, " D") && !InStr(options, " U") {
+        try PostMessage message[1], flags | message[2] | message[3], packed,, current
+        finally PostMessage message[1] + 1, flags | message[3], packed,, current
+    } else if InStr(options, " D") {
+        PostMessage message[1], flags | message[2] | message[3], packed,, current
+    } else {
+        PostMessage message[1] + 1, flags | message[3], packed,, current
+    }
 }
 
 SendBehaviorText(text) {
@@ -1749,7 +1069,7 @@ SendBehaviorText(text) {
     ; by Text mode. Paste through the clipboard there, preserving every clipboard format; other
     ; applications keep the immediate Unicode-packet path.
     if (activeExe != "WhatsApp.Root.exe" && activeExe != "WhatsApp.exe") {
-        SendInput("{Text}" text)
+        SendEvent("{Text}" text)
         return
     }
 
@@ -1766,7 +1086,7 @@ SendBehaviorText(text) {
             return
         }
         behaviorClipboardSequence := DllCall("GetClipboardSequenceNumber", "UInt")
-        SendInput("^v")
+        SendEvent("^v")
         ; WhatsApp reads clipboard data asynchronously after handling the paste shortcut. A
         ; one-shot timer keeps this hotkey available for another character while it does so.
         SetTimer RestoreBehaviorClipboard, -500
@@ -1797,50 +1117,16 @@ ResolveCoord(value, size) {
     return Round(numeric)
 }
 
-GetGameViewport(&x, &y, &w, &h) {
-    if TryGetViewportFromApp(&x, &y, &w, &h)
-        return
-
-    WinGetClientPos &x, &y, &w, &h, "A"
-    bestArea := 0
-
-    for childHwnd in WinGetControlsHwnd("A") {
-        if !DllCall("IsWindowVisible", "ptr", childHwnd, "int")
-            continue
-
-        rect := Buffer(16, 0)
-        if !DllCall("GetWindowRect", "ptr", childHwnd, "ptr", rect.Ptr, "int")
-            continue
-
-        left := NumGet(rect, 0, "int")
-        top := NumGet(rect, 4, "int")
-        right := NumGet(rect, 8, "int")
-        bottom := NumGet(rect, 12, "int")
-
-        childX := Max(left, x)
-        childY := Max(top, y)
-        childRight := Min(right, x + w)
-        childBottom := Min(bottom, y + h)
-        childW := childRight - childX
-        childH := childBottom - childY
-        if (childW <= 0 || childH <= 0)
-            continue
-
-        area := childW * childH
-        if (area > bestArea) {
-            bestArea := area
-            x := childX
-            y := childY
-            w := childW
-            h := childH
-        }
-    }
+GetGameViewport(&x, &y, &w, &h, target := "") {
+    if !TryGetViewportFromApp(&x, &y, &w, &h, target)
+        throw TargetError("Target viewport is unavailable.")
 }
 
-TryGetViewportFromApp(&x, &y, &w, &h) {
+TryGetViewportFromApp(&x, &y, &w, &h, target := "") {
     try {
         xhr := ComObject("WinHttp.WinHttpRequest.5.1")
-        xhr.Open("GET", "http://127.0.0.1:17823/viewport", false)
+        xhr.Open("GET", "http://127.0.0.1:17823/viewport?exe=" UriEncode(target), false)
+        xhr.SetTimeouts(500, 500, 500, 500)
         xhr.Send()
         if (xhr.Status != 200)
             return false
@@ -1856,152 +1142,6 @@ TryGetViewportFromApp(&x, &y, &w, &h) {
         return (w > 0 && h > 0)
     } catch Error {
         return false
-    }
-}
-
-DoPress(keyStr, holdMs := 30, spin := false, preserveHooks := false, triggerModifiers := "") {
-    ; SendEvent keeps AutoHotkey's physical-input hooks installed. Repeat taps need those
-    ; hooks throughout every synthetic input so unrelated physical releases cannot disappear.
-    if preserveHooks {
-        SetKeyDelay -1, -1
-        SetMouseDelay -1
-    }
-    mods := ""
-    key  := ""
-    for part in StrSplit(Trim(StrLower(keyStr)), " ") {
-        if (part = "ctrl")
-            mods .= "^"
-        else if (part = "lctrl")
-            mods .= "<^"
-        else if (part = "rctrl")
-            mods .= ">^"
-        else if (part = "shift")
-            mods .= "+"
-        else if (part = "lshift")
-            mods .= "<+"
-        else if (part = "rshift")
-            mods .= ">+"
-        else if (part = "alt")
-            mods .= "!"
-        else if (part = "lalt")
-            mods .= "<!"
-        else if (part = "ralt")
-            mods .= ">!"
-        else if (part = "win")
-            mods .= "#"
-        else if (part = "lwin")
-            mods .= "<#"
-        else if (part = "rwin")
-            mods .= ">#"
-        else
-            key := part
-    }
-    if RegExMatch(key, "i)^f(\d+)$", &m)
-        key := "F" m[1]
-    key := PhysKey(key)
-    blind := BlindFor(triggerModifiers, mods)
-    ; Mouse-button taps always preserve the mouse hook, even outside a repeat. Otherwise a
-    ; physical button-up can race the tap's temporary logical-state restoration.
-    if ((key = "m1" || key = "m2") && !preserveHooks) {
-        preserveHooks := true
-        SetKeyDelay -1, -1
-        SetMouseDelay -1
-    }
-    ; If no key was given, the modifier itself is the key to press
-    if (key = "") {
-        if (mods = "<^")
-            DoPressKey("LCtrl", preserveHooks, blind)
-        else if (mods = ">^")
-            DoPressKey("RCtrl", preserveHooks, blind)
-        else if (mods = "^")
-            DoPressKey("Ctrl", preserveHooks, blind)
-        else if (mods = "<+")
-            DoPressKey("LShift", preserveHooks, blind)
-        else if (mods = ">+")
-            DoPressKey("RShift", preserveHooks, blind)
-        else if (mods = "+")
-            DoPressKey("Shift", preserveHooks, blind)
-        else if (mods = "<!")
-            DoPressKey("LAlt", preserveHooks, blind)
-        else if (mods = ">!")
-            DoPressKey("RAlt", preserveHooks, blind)
-        else if (mods = "!")
-            DoPressKey("Alt", preserveHooks, blind)
-        else if (mods = "<#")
-            DoPressKey("LWin", preserveHooks, blind)
-        else if (mods = ">#")
-            DoPressKey("RWin", preserveHooks, blind)
-        else if (mods = "#")
-            DoPressKey("LWin", preserveHooks, blind)
-        return
-    }
-    ctrlKey := ""
-    if InStr(mods, "<^")
-        ctrlKey := "LCtrl"
-    else if InStr(mods, ">^")
-        ctrlKey := "RCtrl"
-    else if InStr(mods, "^")
-        ctrlKey := "Ctrl"
-    shiftKey := ""
-    if InStr(mods, "<+")
-        shiftKey := "LShift"
-    else if InStr(mods, ">+")
-        shiftKey := "RShift"
-    else if InStr(mods, "+")
-        shiftKey := "Shift"
-    altKey := ""
-    if InStr(mods, "<!")
-        altKey := "LAlt"
-    else if InStr(mods, ">!")
-        altKey := "RAlt"
-    else if InStr(mods, "!")
-        altKey := "Alt"
-    ctrlOwned := false
-    shiftOwned := false
-    altOwned := false
-    try {
-        ; Acquire inside the protected region so a failed send cannot strand an earlier modifier.
-        ctrlOwned := AcquireModifier(ctrlKey, preserveHooks, blind)
-        shiftOwned := AcquireModifier(shiftKey, preserveHooks, blind)
-        altOwned := AcquireModifier(altKey, preserveHooks, blind)
-        if (key = "m1" || key = "m2") {
-            phys := (key = "m1") ? "LButton" : "RButton"
-            wasHeld := GetKeyState(phys, "P")
-            if mirroredMouseDown.Has(phys)
-                ReleaseMirroredMouse(phys, preserveHooks)
-            else if wasHeld
-                SendKeyEvents(blind "{" phys " Up}", preserveHooks)
-            Sleep 30
-            SendOwnedKeyDown(phys, preserveHooks, "Down", blind)
-            try {
-                Sleep 30
-            } finally {
-                SendOwnedKeyUp(phys, preserveHooks, blind)
-            }
-            ; With the hook preserved, do not restore a logical mouse-down after the user
-            ; physically released the button during this tap. The mirror remains owner-tracked
-            ; so a release racing this check is still observed and forwarded as an up.
-            if (wasHeld && GetKeyState(phys, "P"))
-                MirrorPhysicalMouseDown(phys, preserveHooks)
-            return
-        }
-        if (mods != "")
-            Sleep 20
-        SendOwnedKeyDown(key, preserveHooks, "Down", blind)
-        try {
-            if (spin)
-                SpinHold(holdMs)  ; precise sub-Sleep-granularity hold for the repeat tap
-            else
-                Sleep holdMs
-        } finally {
-            SendOwnedKeyUp(key, preserveHooks, blind)  ; always release, even if the hold throws
-        }
-        if (mods != "")
-            Sleep 20
-    } finally {
-        ReleaseModifier(altKey, altOwned, preserveHooks, blind)
-        ReleaseModifier(shiftKey, shiftOwned, preserveHooks, blind)
-        ReleaseModifier(ctrlKey, ctrlOwned, preserveHooks, blind)
     }
 }
 
@@ -2040,51 +1180,15 @@ ReleaseSyntheticHeld(*) {
     syntheticDown.Clear()
 }
 
-MirrorPhysicalMouseDown(keyName, preserveHooks) {
-    global mirroredMouseDown
-    mirroredMouseDown[keyName] := true
-    SendOwnedKeyDown(keyName, preserveHooks)
-    SetTimer CheckMirroredMouseReleases, 10
-}
-
-ReleaseMirroredMouse(keyName, preserveHooks := true) {
-    global mirroredMouseDown
-    SendOwnedKeyUp(keyName, preserveHooks)
-    if mirroredMouseDown.Has(keyName)
-        mirroredMouseDown.Delete(keyName)
-}
-
-CheckMirroredMouseReleases(*) {
-    global mirroredMouseDown
-    released := []
-    for keyName in mirroredMouseDown {
-        if !GetKeyState(keyName, "P")
-            released.Push(keyName)
-    }
-    for keyName in released
-        ReleaseMirroredMouse(keyName)
-    if (mirroredMouseDown.Count = 0)
-        SetTimer CheckMirroredMouseReleases, 0
-}
-
-DoPressKey(keyName, preserveHooks := false, blind := "{Blind}") {
-    if GetKeyState(keyName)
-        return
-    SendOwnedKeyDown(keyName, preserveHooks, "DownTemp", blind)
-    try {
-        Sleep 30
-    } finally {
-        if !GetKeyState(keyName, "P")
-            SendOwnedKeyUp(keyName, preserveHooks, blind)
-    }
-}
-
-; Acquire only modifier state that this action owns. A macro must never release a modifier
-; which was already held by the user or by the Copilot remap.
 AcquireModifier(modKey, preserveHooks := false, blind := "{Blind}") {
     if (modKey = "" || GetKeyState(modKey))
         return false
-    SendOwnedKeyDown(modKey, preserveHooks, "DownTemp", blind)
+    try SendOwnedKeyDown(modKey, preserveHooks, "DownTemp", blind)
+    catch Error as failure {
+        if !GetKeyState(modKey, "P")
+            SendOwnedKeyUp(modKey, preserveHooks, blind)
+        throw failure
+    }
     return true
 }
 
@@ -2117,7 +1221,7 @@ TriggerChordHeld(chordKeys) {
 ;   - Each physical trigger owns one output reference. Hardware auto-repeat is ignored so a held
 ;     output remains one uninterrupted down rather than repeating while the trigger stays held.
 ; Global key-up handlers release owners independently of profile enabled/focus conditions.
-HoldKeyDown(owner, keyStr, triggerModifiers := "") {
+HoldKeyDown(owner, keyStr, triggerModifiers := "", ordered := true) {
     global chordHolds
     SetKeyDelay -1, -1
     SetMouseDelay -1
@@ -2130,7 +1234,7 @@ HoldKeyDown(owner, keyStr, triggerModifiers := "") {
         AcquireHeldOutput(keyName, blind)
         ; Preserve the configured order as distinct transitions: the first output remains down
         ; before the next one is pressed. Some games miss simultaneous synthetic mouse downs.
-        if (index < keys.Length)
+        if (ordered && index < keys.Length)
             Sleep 30
     }
 }
@@ -2147,12 +1251,12 @@ AcquireHeldOutput(keyName, blind) {
     global heldOutputCounts
     count := heldOutputCounts.Has(keyName) ? heldOutputCounts[keyName] : 0
     heldOutputCounts[keyName] := count + 1
-    if (count = 0)
+    if (count = 0) && !(RegExMatch(keyName, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") && GetKeyState(keyName))
         SendOwnedKeyDown(keyName, true, "DownR", blind)
 }
 
 ReleaseHeldOutputsTogether(keys, blind) {
-    global heldOutputCounts, syntheticDown
+    global heldOutputCounts, syntheticDown, copilotCtrlHeld
     releases := []
     index := keys.Length
     while (index >= 1) {
@@ -2163,7 +1267,12 @@ ReleaseHeldOutputsTogether(keys, blind) {
                 heldOutputCounts[keyName] := count - 1
             else {
                 heldOutputCounts.Delete(keyName)
-                releases.Push(keyName)
+                if syntheticDown.Has(keyName) {
+                    if !GetKeyState(keyName, "P") && !(keyName = "RCtrl" && copilotCtrlHeld)
+                        releases.Push(keyName)
+                    else
+                        syntheticDown.Delete(keyName)
+                }
             }
         }
         index--
@@ -2185,7 +1294,7 @@ ReleaseHeldOutputsTogether(keys, blind) {
 
 ; Track every single-key or multi-input trigger independently. Global key-up handlers call
 ; ReleaseTriggerHolds for every physical member, so releasing any member ends its whole chord.
-HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "") {
+HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true) {
     global chordHolds
     ; Keep a trigger-up buffered until the ordered down sequence is complete. Otherwise a quick
     ; release during its inter-key delay could release the first output before the second is owned.
@@ -2200,7 +1309,7 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "") {
             "chord", chordKeys,
             "modifiers", triggerModifiers
         )
-        HoldKeyDown(owner, keyStr, triggerModifiers)
+        HoldKeyDown(owner, keyStr, triggerModifiers, ordered)
     } catch Error as err {
         HoldChordUp(owner)
         throw err
@@ -2211,48 +1320,6 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "") {
 
 ; Register before the first step so a release during the prefix also ends ownership. Only
 ; registration is critical: the release hotkey must be able to interrupt a waiting hold step.
-HoldBehaviorDown(owner, behavior, chordKeys, triggerModifiers := "", configuredExe := "", enabledKey := "") {
-    global chordHolds
-    previousCritical := Critical()
-    try {
-        if chordHolds.Has(owner)
-            return
-        chordHolds[owner] := Map(
-            "keys", "",
-            "chord", chordKeys,
-            "modifiers", triggerModifiers
-        )
-    } finally {
-        Critical previousCritical
-    }
-    try {
-        ; Keep both input hooks installed while a preceding press(...) is emitted. SendEvent at
-        ; the hotkey's default input level cannot retrigger this script's hook hotkeys, and the
-        ; hook retains the trigger's physical-down state until its real release.
-        ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true, enabledKey)
-    } finally {
-        HoldChordUp(owner)
-    }
-}
-
-; A sequence resumes after the trigger's release handler has released its held outputs.
-; Observe ownership, not synthesized key state, so mouse triggers and held chords use the
-; same release event as standalone remaps. A trigger released during an earlier step cannot
-; acquire a new hold afterward.
-HoldBehaviorKey(owner, keyStr, triggerModifiers := "") {
-    global chordHolds
-    previousCritical := Critical()
-    try {
-        if !chordHolds.Has(owner)
-            return
-        HoldKeyDown(owner, keyStr, triggerModifiers)
-    } finally {
-        Critical previousCritical
-    }
-    while chordHolds.Has(owner)
-        Sleep 10
-}
-
 HoldChordUp(owner) {
     global chordHolds
     if !chordHolds.Has(owner)
@@ -2261,21 +1328,6 @@ HoldChordUp(owner) {
     chordHolds.Delete(owner)
     if (state["keys"] != "")
         HoldKeyUp(state["keys"], state["modifiers"])
-}
-
-ReleaseTriggerHolds(triggerKey) {
-    global chordHolds
-    released := []
-    for owner, state in chordHolds {
-        for chordKey in StrSplit(state["chord"], " ") {
-            if (chordKey = triggerKey) {
-                released.Push(owner)
-                break
-            }
-        }
-    }
-    for owner in released
-        HoldChordUp(owner)
 }
 
 HoldKeyList(keyStr) {
@@ -2306,6 +1358,10 @@ HoldKeyList(keyStr) {
         else if (part = "rwin")
             held.Push("RWin")
         else {
+            if (part = "m1")
+                part := "lbutton"
+            else if (part = "m2")
+                part := "rbutton"
             if RegExMatch(part, "i)^f(\d+)$", &m)
                 part := "F" m[1]
             held.Push(PhysKey(part))
@@ -2346,638 +1402,101 @@ SpinHold(ms) {
     } until (t >= limit)
 }
 
-; Hold-to-repeat. The press hotkey runs this loop for exactly as long as the trigger's
-; physical key is held, pressing `keys` once per `interval` ms. Because it occupies the
-; hotkey's single thread for the whole hold (#MaxThreadsPerHotkey is 1 by default), the
-; trigger's OS key-repeat — and any key events this loop itself injects — cannot re-enter
-; it, so there is only ever one loop and the rate is the interval, not the OS repeat rate.
-; Each press holds the key down for exactly `holdMs` (precise busy-wait), tunable so a game
-; that reads the key per frame can be made to register exactly one press per interval.
-RepeatHold(keys, interval, triggerKey, triggerChord, exe, holdMs, enabledKey, useWindowsState, triggerModifiers := "") {
-    global enabled, repeatDown
-    ; Stop as soon as EITHER release signal fires: the key-up hotkey clearing repeatDown, or
-    ; the independent Windows state poll. GetKeyState(..., "P") reads AutoHotkey's hook state,
-    ; so it can remain stale if the hook misses a release while SendInput has it uninstalled.
-    ; GetAsyncKeyState reads the current OS state instead of that same cached hook state. It is
-    ; skipped when the repeated output includes the trigger itself, because that synthetic input
-    ; legitimately changes the OS state; the key-up latch and hook state still cover that case.
-    SetTimer CheckRepeatReleases, 10
-    while ((repeatDown.Has(triggerKey) && repeatDown[triggerKey]) && TriggerChordPhysicallyDown(triggerChord, useWindowsState)) {
-        ; Toggling the profile off or leaving its target app ends this press. Retaining the
-        ; loop across a focus change lets a missed key-up leave a stale repeat ready to resume.
-        if (!enabled[enabledKey] || (exe != "" && !WinActive("ahk_exe " exe))) {
-            break
-        }
-        start := A_TickCount
-        ; Every repeat preserves both physical-input hooks. Besides keeping this trigger's
-        ; release visible, that prevents an unrelated mouse/key release from being displaced.
-        DoPress(keys, holdMs, true, true, triggerModifiers)
-        elapsed := A_TickCount - start
-        if (elapsed < interval)
-            Sleep interval - elapsed
-    }
-    repeatDown[triggerKey] := false
-}
-
-TriggerChordPhysicallyDown(triggerChord, useWindowsState) {
-    for triggerKey in StrSplit(triggerChord, " ") {
-        if (triggerKey != "" && !TriggerPhysicallyDown(triggerKey, useWindowsState))
-            return false
-    }
-    return triggerChord != ""
-}
-
-TriggerPhysicallyDown(triggerKey, useWindowsState) {
-    static mouseButtonsSwapped := DllCall("GetSystemMetrics", "Int", 23)
-    if !GetKeyState(triggerKey, "P")
-        return false
-    if !useWindowsState
-        return true
-    vk := GetKeyVK(triggerKey)
-    if !vk
-        return false
-    ; AutoHotkey's L/RButton names mean primary/secondary, while GetAsyncKeyState's virtual
-    ; keys mean physical left/right. Translate them when Windows has swapped the mouse buttons.
-    if mouseButtonsSwapped {
-        if (triggerKey = "LButton")
-            vk := 0x02
-        else if (triggerKey = "RButton")
-            vk := 0x01
-    }
-    return (DllCall("GetAsyncKeyState", "Int", vk, "Short") & 0x8000) != 0
-}"###;
+"###;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        generate_combined_script, repeat_output_uses_trigger, trigger_chord_keys,
-        trigger_modifier_symbols, trigger_to_key, ArmedProfile, COPILOT_ENGINE,
-    };
-    use crate::config::{BehaviorEvent, Hotkey, Profile, Script};
-
-    fn profile_with_hotkey(trigger: &str, behavior: &str) -> Profile {
-        Profile {
-            id: "test-profile".to_string(),
-            name: "Test".to_string(),
-            kind: "hotkeys".to_string(),
-            armed: true,
-            parent_id: None,
-            hotkeys: vec![Hotkey {
-                name: String::new(),
-                trigger: trigger.to_string(),
-                behavior: behavior.to_string(),
-                allow_extra_modifiers: None,
-                state_id: None,
-            }],
-            events: Vec::new(),
-            states: Vec::new(),
-            overlay_items: Vec::new(),
-            overlay_triggers: Vec::new(),
-            overlay_groups: Vec::new(),
-            scripts: Vec::new(),
-            overlay_disabled: false,
-            toggle_hotkeys_key: None,
-            toggle_overlay_key: None,
-        }
+    use super::*;
+    fn profile(source: &str) -> Profile {
+        serde_json::from_value(serde_json::json!({"id":"profile","name":"Keys","armed":true,"hotkeys":[{"trigger":"rctrl o","behavior":source}]})).unwrap()
     }
-
     #[test]
-    fn startoverlay_behavior_uses_the_shared_runtime_event_route() {
-        let profile = profile_with_hotkey("f1", "startoverlay(timer-item)");
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
-        }];
-        let script = generate_combined_script(&armed);
-        assert!(script.contains("ExecuteBehavior(\"startoverlay(timer-item)\""));
-        assert!(script.contains("SendAppEvent(eventType, hotkeyTrigger := \"\", stateId := \"\", itemId := \"\")"));
-        assert!(script.contains("path .= \"&item_id=\" UriEncode(itemId)"));
-        assert!(script.contains("SendAppEvent(\"overlay_started\", \"\", \"\", Trim(m[1]))"));
+    fn every_composition_uses_the_same_structured_execution_contract() {
+        let profile = profile(r#"[{"type":"parallel","steps":[{"type":"hold","key":"LButton"},{"type":"repeat","key":"a","interval":"100","hold":"6"}]}]"#);
+        let profiles = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }];
+        let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles).unwrap()).unwrap();
+        let binding = &config[0]["bindings"][0];
+        assert_eq!(binding["steps"][0]["type"], "parallel");
+        assert_eq!(binding["modifiers"], "^");
+        assert_eq!(binding["trigger"], "rctrl o");
+        assert_eq!(config[0]["target"], "Game.exe");
     }
-
     #[test]
-    fn waiting_chains_preserve_the_hook_and_carry_their_profile_context() {
-        let profile = profile_with_hotkey("q", "press(x);waitfor(LButton);press(y)");
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
-        }];
-        let script = generate_combined_script(&armed);
-        assert!(script.contains(
-            "ExecuteBehavior(\"press(x);waitfor(LButton);press(y)\", \"\", \"Game.exe\", \"\", true, \"test-profile\")"
-        ));
-
-        let profile = profile_with_hotkey("q", "hold(x);waitfor(LButton);press(y)");
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe",
-        }];
-        let script = generate_combined_script(&armed);
-        let chord = trigger_chord_keys("q").join(" ");
-        assert!(script.contains(&format!(
-            "HoldBehaviorDown(\"test-profile:q\", \"hold(x);waitfor(LButton);press(y)\", \"{chord}\", \"\", \"Game.exe\", \"test-profile\")"
-        )));
+    fn changes_update_data_without_replacing_the_shared_hook_script() {
+        let first = profile("press(x)"); let second = profile("press(y)");
+        let a = [ProfileContext { siblings: std::slice::from_ref(&first), profile: &first, exe:"Game.exe" }];
+        let b = [ProfileContext { siblings: std::slice::from_ref(&second), profile: &second, exe:"Game.exe" }];
+        assert_eq!(input_script(), input_script());
+        assert_ne!(runtime_config(&a).unwrap(), runtime_config(&b).unwrap());
     }
-
     #[test]
-    fn altgr_arrow_press_excludes_modifiers_without_releasing_the_held_trigger() {
-        let mut profile = profile_with_hotkey("ralt left", "press(Home)");
-        profile.hotkeys.push(Hotkey {
-            name: String::new(),
-            trigger: "ralt right".to_string(),
-            behavior: "press(End)".to_string(),
-            allow_extra_modifiers: None,
-            state_id: None,
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-
-        assert!(script.contains(
-            "$*>!left:: {\n    ExecuteBehavior(\"press(Home)\", \"^!\", \"*\")"
-        ));
-        assert!(script.contains(
-            "$*>!right:: {\n    ExecuteBehavior(\"press(End)\", \"^!\", \"*\")"
-        ));
-        assert!(script.contains("return \"{Blind\" triggerModifiers \"}\""));
-        assert!(!script.contains("ReleaseTriggerModifiers"));
+    fn invalid_active_behaviors_fail_before_activation() {
+        let profile = profile("repeat(a,0)");
+        assert!(runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}]).is_err());
+    }
+    #[test]
+    fn disabled_drafts_do_not_register_or_validate_native_bindings() {
+        let mut profile = profile("future(action)"); profile.armed = false;
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}]).unwrap()).unwrap();
+        assert!(data[0]["bindings"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn exact_altgr_and_ordinary_modifiers_retain_their_meaning() {
         assert_eq!(trigger_modifier_symbols("ralt left"), "^!");
-        assert_eq!(trigger_modifier_symbols("lctrl rshift lalt left"), "^+!");
+        assert_eq!(trigger_modifier_symbols("rctrl shift o"), "^+");
+        assert_eq!(trigger_bare_key("ctrl"), "Control");
+        assert_eq!(trigger_bare_key("lctrl"), "LControl");
+        assert_eq!(trigger_bare_key("rctrl"), "RControl");
+        assert_eq!(trigger_bare_key("XButton2"), "xbutton2");
     }
-
     #[test]
-    fn behavior_commands_receive_the_profile_target() {
-        let profile = profile_with_hotkey("f11", "borderless;stretch;fit;killprocess;resolution(1280,720)");
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "Game.exe",
-        }];
-        let script = generate_combined_script(&armed);
-
-        assert!(script.contains(
-            "ExecuteBehavior(\"borderless;stretch;fit;killprocess;resolution(1280,720)\", \"\", \"Game.exe\")"
-        ));
-        assert!(script.contains("SendBehaviorCommand(\"borderless\", configuredExe)"));
-        assert!(script.contains("SendBehaviorCommand(\"killprocess\", configuredExe)"));
-        assert!(script.contains("SendBehaviorCommand(\"stretch\", configuredExe)"));
-        assert!(script.contains("SendBehaviorCommand(\"fit\", configuredExe)"));
-        assert!(script.contains("SendBehaviorCommand(\"resolution\", configuredExe, \"&width=\" m[1] \"&height=\" m[2])"));
-        assert!(script.contains("targetExe := WinGetProcessName(\"A\")"));
-    }
-
-    #[test]
-    fn regular_keys_and_mouse_buttons_can_be_held_as_trigger_chords() {
-        let mut profile = profile_with_hotkey("x y", "press(Home)");
-        profile.hotkeys.push(Hotkey {
-            name: String::new(),
-            trigger: "XButton1 y".to_string(),
-            behavior: "press(End)".to_string(),
-            allow_extra_modifiers: None,
-            state_id: None,
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-        let x = &trigger_chord_keys("x")[0];
-        let y = &trigger_chord_keys("y")[0];
-
-        assert!(script.contains(&format!(
-            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"{x}\")\n$*{y}::"
-        )));
-        assert!(script.contains(&format!(
-            "#HotIf enabled[\"test-profile\"] && TriggerChordHeld(\"xbutton1\")\n$*{y}::"
-        )));
-        assert!(script.contains("TriggerChordHeld(chordKeys)"));
-    }
-
-    #[test]
-    fn held_and_repeating_chords_end_when_any_trigger_key_is_released() {
-        let mut profile = profile_with_hotkey("x y", "hold(rctrl)");
-        profile.hotkeys.push(Hotkey {
-            name: String::new(),
-            trigger: "XButton1 f4".to_string(),
-            behavior: "repeat(f5, 100, 6)".to_string(),
-            allow_extra_modifiers: None,
-            state_id: None,
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-        let x = &trigger_chord_keys("x")[0];
-        let y = &trigger_chord_keys("y")[0];
-
-        assert!(script.contains(&format!(
-            "HoldChordDown(\"test-profile:x y\", \"rctrl\", \"{x} {y}\", \"\")"
-        )));
-        assert!(script.contains(&format!(
-            "~*{x} up:: {{\n    if GetKeyState(\"{x}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{x}\")"
-        )));
-        assert!(script.contains(&format!(
-            "~*{y} up:: {{\n    if GetKeyState(\"{y}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{y}\")"
-        )));
-        assert!(script.contains("repeatChord[\"F4\"] := \"xbutton1 F4\""));
-        assert!(script.contains(
-            "RepeatHold(\"f5\", 100, \"F4\", \"xbutton1 F4\", \"\", 6, \"test-profile\", true, \"\")"
-        ));
-        assert!(script.contains("TriggerChordPhysicallyDown(triggerChord, useWindowsState)"));
-    }
-
-    #[test]
-    fn unmodified_press_and_repeat_hotkeys_accept_extra_modifiers() {
-        for (behavior, handler) in [
-            ("press(y)", "ExecuteBehavior"),
-            ("press(y);sleep(50);press(z)", "ExecuteBehavior"),
-            ("repeat(y,100,6)", "repeatDown"),
-        ] {
-            let mut profile = profile_with_hotkey("x", behavior);
-            profile.hotkeys.push(Hotkey {
-                name: String::new(),
-                trigger: "shift x".to_string(),
-                behavior: "press(z)".to_string(),
-                allow_extra_modifiers: None,
-                state_id: None,
-            });
-            let armed = [ArmedProfile {
-                siblings: std::slice::from_ref(&profile),
-                profile: &profile,
-                exe: "*",
-            }];
-            let script = generate_combined_script(&armed);
-            let key = &trigger_chord_keys("x")[0];
-
-            assert!(script.contains(&format!("$*{key}:: {{\n    {handler}")));
-            assert!(script.contains(&format!(
-                "$+{key}:: {{\n    ExecuteBehavior(\"press(z)\", \"+\", \"*\")"
-            )));
-            assert!(!script.contains(&format!("$*+{key}::")));
-            if handler == "ExecuteBehavior" {
-                assert!(script.contains(&format!(
-                    "ExecuteBehavior(\"{behavior}\", \"\", \"*\")"
-                )));
-            } else {
-                assert!(script.contains(&format!(
-                    "RepeatHold(\"y\", 100, \"{}\", \"{}\", \"\", 6, \"test-profile\", true, \"\")",
-                    super::trigger_bare_key("x"), key
-                )));
-            }
-        }
-    }
-
-    #[test]
-    fn extra_modifiers_option_controls_every_behavior_binding() {
-        for trigger in ["1", "ctrl 1", "rctrl 1", "x 1"] {
-            for behavior in ["press(2)", "hold(2)", "repeat(2,100,6)", "press(p);hold(2)"] {
-                for allow in [false, true] {
-                    let mut profile = profile_with_hotkey(trigger, behavior);
-                    profile.hotkeys[0].allow_extra_modifiers = Some(allow);
-                    let armed = [ArmedProfile {
-                        siblings: std::slice::from_ref(&profile),
-                        profile: &profile,
-                        exe: "*",
-                    }];
-                    let script = generate_combined_script(&armed);
-                    let exact = trigger_to_key(trigger);
-                    let wildcard = format!("$*{}", exact.trim_start_matches('$'));
-                    let (expected, other) = if allow { (&wildcard, &exact) } else { (&exact, &wildcard) };
-                    assert!(script.contains(&format!("{expected}:: {{")), "{trigger}: {behavior}, allow={allow}");
-                    assert!(!script.contains(&format!("{other}:: {{")), "{trigger}: {behavior}, allow={allow}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn altgr_extra_modifier_option_keeps_native_wildcard_and_gates_exact_matching() {
-        for allow in [None, Some(false), Some(true)] {
-            for trigger in ["ralt left", "ralt x left"] {
-                for behavior in ["press(Home)", "hold(Home)", "repeat(Home,100,6)", "press(p);hold(Home)"] {
-                    let mut profile = profile_with_hotkey(trigger, behavior);
-                    profile.hotkeys[0].allow_extra_modifiers = allow;
-                    let armed = [ArmedProfile {
-                        siblings: std::slice::from_ref(&profile),
-                        profile: &profile,
-                        exe: "*",
-                    }];
-                    let script = generate_combined_script(&armed);
-                    let mut condition = "#HotIf enabled[\"test-profile\"]".to_string();
-                    if trigger.contains(" x ") {
-                        condition.push_str(&format!(" && TriggerChordHeld(\"{}\")", trigger_chord_keys("x")[0]));
-                    }
-                    if allow == Some(false) {
-                        condition.push_str(&format!(" && TriggerModifiersAllowed(\"{trigger}\")"));
-                    }
-                    assert!(script.contains(&format!("{condition}\n$*>!left:: {{")), "{trigger}: {behavior}, allow={allow:?}");
-                    assert_eq!(script.contains(&format!("TriggerModifiersAllowed(\"{trigger}\")")), allow == Some(false));
-                    assert!(!script.contains("$**"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unmodified_hold_macros_accept_and_preserve_unrelated_modifiers() {
-        for behavior in ["hold(XButton1 LButton)", "press(XButton1);hold(LButton)"] {
-            let mut profile = profile_with_hotkey("XButton1", behavior);
-            for trigger in ["shift XButton1", "rctrl o", "rctrl shift o"] {
-                profile.hotkeys.push(Hotkey {
-                    name: String::new(),
-                    trigger: trigger.to_string(),
-                    behavior: "hold(F5)".to_string(),
-                    allow_extra_modifiers: None,
-                    state_id: None,
-                });
-            }
-            let armed = [ArmedProfile {
-                siblings: std::slice::from_ref(&profile),
-                profile: &profile,
-                exe: "Game.exe",
-            }];
-            let script = generate_combined_script(&armed);
-
-            assert!(script.contains("$*xbutton1:: {\n    Hold"));
-            assert!(script.contains("\"xbutton1\", \"\""));
-            assert!(script.contains("$+xbutton1:: {\n    HoldChordDown"));
-            for trigger in ["rctrl o", "rctrl shift o"] {
-                assert!(script.contains(&format!("{}:: {{", trigger_to_key(trigger))));
-                assert!(!trigger_to_key(trigger).contains('*'));
-            }
-            assert!(script.contains("~*xbutton1 up:: {"));
-            assert!(script.contains("ReleaseTriggerHolds(\"xbutton1\")"));
-            assert!(script.contains("blind := BlindFor(triggerModifiers, KeyModifierSymbols(keyStr))"));
-            assert!(script.contains("return \"{Blind\" triggerModifiers \"}\""));
-            assert!(script.contains("SendOwnedKeyDown(keyName, true, \"DownR\", blind)"));
-            assert!(script.contains("if chordHolds.Has(owner)\n            return"));
-        }
-    }
-
-    #[test]
-    fn hold_actions_keep_every_recorded_regular_key_and_mouse_button() {
-        let mut profile = profile_with_hotkey("x", "hold(XButton1 RButton)");
-        profile.hotkeys.push(Hotkey {
-            name: String::new(),
-            trigger: "z".to_string(),
-            behavior: "hold(XButton1 RButton)".to_string(),
-            allow_extra_modifiers: None,
-            state_id: None,
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-        let hold_key_list = script
-            .split_once("HoldKeyList(keyStr) {")
-            .unwrap()
-            .1
-            .split_once("KeyModifierSymbols(keyStr) {")
-            .unwrap()
-            .0;
-        let x = &trigger_chord_keys("x")[0];
-        let z = &trigger_chord_keys("z")[0];
-
-        assert!(script.contains(&format!(
-            "HoldChordDown(\"test-profile:x\", \"XButton1 RButton\", \"{x}\", \"\")"
-        )));
-        assert!(script.contains(&format!(
-            "HoldChordDown(\"test-profile:z\", \"XButton1 RButton\", \"{z}\", \"\")"
-        )));
-        assert!(script.contains(&format!(
-            "~*{x} up:: {{\n    if GetKeyState(\"{x}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{x}\")"
-        )));
-        assert!(script.contains(&format!(
-            "~*{z} up:: {{\n    if GetKeyState(\"{z}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{z}\")"
-        )));
-        assert!(hold_key_list.contains("held.Push(PhysKey(part))"));
-        assert!(!hold_key_list.contains("key := part"));
-        assert!(script.contains("global heldOutputCounts := Map()"));
-        assert!(script.contains("heldOutputCounts[keyName] := count + 1"));
-        assert!(script.contains("if (count > 1)"));
-        assert!(script.contains(
-            "if chordHolds.Has(owner)\n            return"
-        ));
-        assert!(script.contains("previousCritical := Critical()"));
-        assert!(script.contains("} finally {\n        Critical previousCritical"));
-        assert!(!script.contains("ReassertHeldOutputs"));
-        assert!(script.contains(
-            "AcquireHeldOutput(keyName, blind)\n        ; Preserve the configured order"
-        ));
-        assert!(script.contains("if (index < keys.Length)\n            Sleep 30"));
-        assert!(script.contains("ReleaseHeldOutputsTogether(keys, blind)"));
-        assert!(script.contains(
-            "for keyName in releases\n        events .= \"{\" keyName \" Up}\"\n    SendKeyEvents(events, true)"
-        ));
-        assert!(script.contains("ReleaseTriggerHolds(triggerKey)"));
-        assert!(!script.contains("CheckChordHoldReleases"));
-    }
-
-    #[test]
-    fn pressing_the_trigger_then_holding_another_button_waits_for_physical_trigger_up() {
-        let profile = profile_with_hotkey("XButton2", "press(XButton2);hold(RButton)");
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-        let trigger = &trigger_chord_keys("XButton2")[0];
-
-        assert!(script.contains(&format!(
-            "HoldBehaviorDown(\"test-profile:XButton2\", \"press(XButton2);hold(RButton)\", \"{trigger}\", \"\", \"*\")"
-        )));
-        assert!(script.contains(&format!(
-            "~*{trigger} up:: {{\n    if GetKeyState(\"{trigger}\", \"P\")\n        return\n    ReleaseTriggerHolds(\"{trigger}\")"
-        )));
-        assert!(script.contains(
-            "if chordHolds.Has(owner)\n            return\n        chordHolds[owner] := Map("
-        ));
-        assert!(script.contains(
-            "ExecuteBehavior(behavior, triggerModifiers, configuredExe, owner, true, enabledKey)"
-        ));
-        assert!(script.contains(
-            "DoPress(Trim(k), 30, false, preserveHooks, triggerModifiers)"
-        ));
-        assert!(script.contains(
-            "HoldBehaviorKey(holdOwner, Trim(m[1]), triggerModifiers)"
-        ));
-    }
-
-    #[test]
-    fn lifecycle_events_and_launch_scripts_share_the_seeded_target_monitor() {
-        let mut profile = profile_with_hotkey("f11", "press(F11)");
-        profile.kind = "events".to_string();
-        profile.hotkeys.clear();
-        profile.events = vec![
-            BehaviorEvent {
-                event: "window_ready".to_string(),
-                behavior: "borderless".to_string(),
-            },
-            BehaviorEvent {
-                event: "focus_gained".to_string(),
-                behavior: "press(F5)".to_string(),
-            },
-        ];
-        profile.scripts.push(Script {
-            id: "launch-script".to_string(),
-            name: "Launch".to_string(),
-            enabled: true,
-            trigger: "launch".to_string(),
-            hotkey: String::new(),
-            language: "python".to_string(),
-            source: "code".to_string(),
-            code: String::new(),
-            path: String::new(),
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "Game.exe",
-        }];
-        let script = generate_combined_script(&armed);
-
-        assert!(script.contains(
-            "eventProfiles.Push(Map(\"id\", \"test-profile\", \"exe\", \"game.exe\", \"target\", \"Game.exe\""
-        ));
-        assert!(script.contains("\"window_ready\", \"borderless\""));
-        assert!(script.contains("\"focus_gained\", \"press(F5)\""));
-        assert!(script.contains("\"launchScripts\", [\"launch-script\"]"));
-        assert!(script.contains("if !state[\"initialized\"] {\n            state[\"initialized\"] := true"));
-        assert!(script.contains("DispatchTargetEvent(exe, \"app_started\")"));
-        assert!(script.contains("QueueBehaviorEvent(events[eventName], profile[\"target\"], profile[\"id\"])"));
-        assert!(script.contains("SetTimer SyncRuntime, 200\nSyncRuntime()"));
-    }
-
-    #[test]
-    fn combined_script_keeps_copilot_recovery_without_profiles() {
-        let script = generate_combined_script(&[]);
-
+    fn copilot_and_profiles_keep_one_hook_with_the_required_send_levels() {
+        let script = input_script();
         assert!(script.contains("$*SC06E::CopilotDown()"));
         assert!(script.contains("SendCopilotKeys(keys \"{RCtrl downR}\")"));
-        assert!(!script.contains("SendCopilotKeys(\"{Blind}{LCtrl downR}\")"));
-        assert!(script.contains(
-            "previousSendLevel := SendLevel(1)\n    try SendEvent(keys)\n    finally SendLevel(previousSendLevel)"
-        ));
-        assert!(script.contains(
-            "copilotCtrlReleasePending := true\n        SetTimer CheckCopilotRelease, 10"
-        ));
-        assert!(script.contains(
-            "if !copilotCtrlReleasePending {\n        SetTimer CheckCopilotRelease, 0\n        return"
-        ));
-        assert!(!script.contains("CopilotKeyPhysicallyDown"));
-        assert!(!script.contains("copilotCtrlHeld && !"));
-        assert!(script.contains(
-            "InstallMouseHook true, true\n    ; If the old hook missed Copilot's key-up"
-        ));
-        assert!(script.contains(
-            "#InputLevel 1\n$*LWin::CopilotWinDown()\n$*LWin up::CopilotWinUp()\n#HotIf copilotState.phase = \"waiting\"\n$*LShift::CopilotShiftDown()"
-        ));
-        assert!(script.contains("~$*LShift::ObserveCopilotShiftDown()\n~$*LShift up::ObserveCopilotShiftUp()\n#InputLevel 0"));
-        assert_eq!(script.matches("$*LShift::").count(), 2);
-        assert!(!COPILOT_ENGINE.contains("SendInput"));
-        assert!(COPILOT_ENGINE.contains("input.MinSendLevel := 101"));
-        assert!(COPILOT_ENGINE.contains("input.OnKeyDown := CopilotPrefixKey.Bind(\"down\")"));
+        assert!(script.contains("SendEvent(keys)"));
         assert!(!COPILOT_ENGINE.contains("GetAsyncKeyState"));
-        assert!(script.contains(
-            "AcquireModifier(modKey, preserveHooks := false, blind := \"{Blind}\")"
-        ));
-        assert!(script.contains("if (modKey = \"\" || GetKeyState(modKey))"));
-        assert!(script.contains("if !GetKeyState(modKey, \"P\")"));
-        assert!(!script.contains("SendModState("));
-        assert!(!script.contains("A_TimeIdleKeyboard"));
-        assert!(script.contains("SendBehaviorText(m[1])"));
-        assert!(script.contains("activeExe != \"WhatsApp.Root.exe\""));
-        assert!(script.contains("behaviorClipboardBackup := ClipboardAll()"));
-        assert!(script.contains("SetTimer RestoreBehaviorClipboard, -500"));
-        assert!(script.contains("OnExit RestoreBehaviorClipboard"));
     }
 
     #[test]
-    fn copilot_remap_and_distinct_right_ctrl_accent_bindings_share_the_hook() {
-        let mut profile = profile_with_hotkey("rctrl o", "send(ø)");
-        profile.hotkeys.push(Hotkey {
-            name: String::new(),
-            trigger: "rctrl shift o".to_string(),
-            behavior: "send(Ø)".to_string(),
-            allow_extra_modifiers: None,
-            state_id: None,
-        });
-        let armed = [ArmedProfile {
-            siblings: std::slice::from_ref(&profile),
-            profile: &profile,
-            exe: "*",
-        }];
-        let script = generate_combined_script(&armed);
-        let key = &trigger_chord_keys("o")[0];
-
-        assert!(script.contains(&format!(
-            "$>^{key}:: {{\n    ExecuteBehavior(\"send(ø)\", \"^\", \"*\")"
-        )));
-        assert!(script.contains(&format!(
-            "$>^+{key}:: {{\n    ExecuteBehavior(\"send(Ø)\", \"^+\", \"*\")"
-        )));
-        assert!(script.contains("#InputLevel 0\n$*SC06E::CopilotDown()"));
-        assert!(COPILOT_ENGINE.contains("previousSendLevel := SendLevel(1)\n    try SendEvent(keys)"));
+    fn every_profile_category_can_publish_overlay_parts_with_its_bindings() {
+        for kind in ["hotkeys", "events", "scripts", "overlay"] {
+            let mut profile = profile("press(x)"); profile.kind = kind.into();
+            profile.overlay_items = vec![serde_json::from_value(serde_json::json!({"type":"text","id":"label","x":0,"y":0,"font_size":16,"color":"#fff","content":"Buff"})).unwrap()];
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }]).unwrap()).unwrap();
+            assert_eq!(data[0]["overlay"], true);
+            assert!(!data[0]["bindings"].as_array().unwrap().is_empty());
+            profile.overlay_disabled = true;
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }]).unwrap()).unwrap();
+            assert_eq!(data[0]["overlay"], false);
+        }
     }
 
     #[test]
-    fn repeat_release_check_uses_independent_state_when_safe() {
-        let script = generate_combined_script(&[]);
-
-        assert!(script.contains("TriggerChordPhysicallyDown(triggerChord, useWindowsState)"));
-        assert!(script.contains("DllCall(\"GetAsyncKeyState\", \"Int\", vk, \"Short\") & 0x8000"));
-        assert!(script.contains("&& TriggerChordPhysicallyDown(triggerChord, useWindowsState)"));
-        assert!(script.contains("DllCall(\"GetSystemMetrics\", \"Int\", 23)"));
-        assert!(script.contains("DoPress(keys, holdMs, true, true, triggerModifiers)"));
-        assert!(script.contains("if preserveHooks\n        SendEvent(keys)"));
-        assert!(script.contains("SetKeyDelay -1, -1"));
-        assert!(script.contains("SetMouseDelay -1"));
-        assert!(script.contains("SetTimer CheckRepeatReleases, 10"));
-        assert!(!script.contains("&& GetKeyState(triggerKey, \"P\")"));
-    }
-
-    #[test]
-    fn repeat_ends_when_its_profile_loses_authority() {
-        let script = generate_combined_script(&[]);
-
-        assert!(script.contains(
-            "if (!enabled[enabledKey] || (exe != \"\" && !WinActive(\"ahk_exe \" exe))) {\n            break"
-        ));
-        assert!(!script.contains("so the repeat can't leak into other apps"));
-    }
-
-    #[test]
-    fn generated_script_releases_owned_synthetic_input_on_exit() {
-        let script = generate_combined_script(&[]);
-
-        assert!(script.contains("global syntheticDown := Map()"));
-        assert!(script.contains("OnExit ReleaseSyntheticHeld"));
-        assert!(script.contains(
-            "OnExit ReleaseSyntheticHeld\nOnExit ReleaseCopilotHeld\nOnExit HideOverlayOnExit"
-        ));
-        assert!(script.contains("syntheticDown[keyName] := true"));
-        assert!(script.contains("if !GetKeyState(keyName, \"P\")\n            SendEvent"));
-        assert!(script.contains("AcquireHeldOutput(keyName, blind)"));
-        assert!(script.contains("ReleaseHeldOutputsTogether(keys, blind)"));
-        assert!(script.contains("global mirroredMouseDown := Map()"));
-        assert!(script.contains("MirrorPhysicalMouseDown(phys, preserveHooks)"));
-        assert!(script.contains("SetTimer CheckMirroredMouseReleases, 10"));
-    }
-
-    #[test]
-    fn repeat_output_trigger_comparison_ignores_modifiers_and_case() {
-        assert!(repeat_output_uses_trigger("XButton1", "shift xbutton1"));
-        assert!(repeat_output_uses_trigger("f4", "CTRL F4"));
-        assert!(repeat_output_uses_trigger("ctrl f4", "ctrl"));
-        assert!(repeat_output_uses_trigger("lctrl f4", "ctrl"));
-        assert!(repeat_output_uses_trigger("m1", "LButton"));
-        assert!(!repeat_output_uses_trigger("f5", "ctrl f4"));
-        assert!(!repeat_output_uses_trigger("rctrl f5", "lctrl f4"));
+    fn section_switches_filter_only_their_bindings_and_keep_independent_revisions() {
+        let mut profile = profile("press(x)");
+        profile.events = vec![serde_json::from_value(serde_json::json!({"event":"focus_gained","behavior":"press(y)"})).unwrap()];
+        profile.scripts = vec![
+            serde_json::from_value(serde_json::json!({"id":"script","trigger":"hotkey","hotkey":"f9","source":"code"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"id":"launch","trigger":"launch","source":"code"})).unwrap(),
+        ];
+        let configuration = |profile: &Profile| -> serde_json::Value {
+            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe:"Game.exe" }]).unwrap()).unwrap()
+        };
+        let before = configuration(&profile);
+        profile.hotkeys_disabled = true;
+        profile.hotkeys[0].behavior = "unknown(draft)".into();
+        let after = configuration(&profile);
+        assert_eq!(after[0]["bindings"].as_array().unwrap().len(), 1);
+        assert_eq!(after[0]["bindings"][0]["section"], "scripts");
+        assert_ne!(before[0]["sectionRevisions"]["hotkeys"], after[0]["sectionRevisions"]["hotkeys"]);
+        assert_eq!(before[0]["sectionRevisions"]["events"], after[0]["sectionRevisions"]["events"]);
+        assert_eq!(before[0]["sectionRevisions"]["scripts"], after[0]["sectionRevisions"]["scripts"]);
+        profile.events_disabled = true;
+        profile.scripts_disabled = true;
+        let disabled = configuration(&profile);
+        assert!(disabled[0]["bindings"].as_array().unwrap().is_empty());
+        assert!(disabled[0]["events"].as_object().unwrap().is_empty());
+        assert!(disabled[0]["launchScripts"].as_array().unwrap().is_empty());
     }
 }

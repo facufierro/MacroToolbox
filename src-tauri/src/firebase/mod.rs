@@ -378,10 +378,12 @@ impl Firebase {
                 let database = snapshot.materialize(&self.directory)?;
                 config::save_db(&state.db_path, &database)?;
                 #[cfg(windows)]
-                state.script_jobs.lock().unwrap().clear();
+                state.script_runtime.lock().unwrap().clear();
+                *state.runtime.lock().unwrap() = crate::runtime::Runtime::default();
+                state.hotkeys_ahk.lock().unwrap().kill();
                 crate::clear_overlay(app);
                 crate::set_overlay_visible(app, false);
-                crate::sync_hotkeys(&state, &database);
+                crate::sync_hotkeys(&state, &database)?;
                 crate::sync_autostart(app, database.settings.launch_on_startup);
                 let restored_digest = crypto::digest(&snapshot::capture(database)?.bytes)?;
                 let _ = app.emit("firebase-restored", ());

@@ -5,6 +5,16 @@ mouse down/up pair to the profile's target window at the current cursor position
 Global profiles target the active window. The editor offers left, right, middle,
 Mouse 4 and Mouse 5.
 
+Modified combinations such as `rctrl shift LButton` use the same input recorder as
+other behaviors. Ctrl/Shift clicks carry their modifier flags in both native
+window messages. Modifier transitions preserve independently held keys and use
+the shared keyboard hook.
+
+Modified clicks acquire their modifiers through the same ownership tracking as
+held keys. The executor allows 30 ms before the click and 30 ms after it for input
+delivery. Other branches keep running during these waits; focus loss or disabling
+the profile cancels the pending click and releases only its owned input.
+
 Saved `pressalt(...)` steps remain supported and appear as `mousepress` in the
 editor. Saving them uses the new name.
 
@@ -24,6 +34,7 @@ ControlClick message delivery to a hidden fixture window:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ahk-behavior.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ahk-behavior.ps1 -Engine copilot
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ahk-behavior.ps1 -Engine runtime
 ```
 
 After the user-built app is restarted:

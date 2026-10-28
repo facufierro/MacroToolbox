@@ -1,0 +1,12 @@
+.app-shell { display: flex; flex-direction: column; height: 100vh; }
+.app-shell__content { position: relative; flex: 1; min-height: 0; }
+.app-console { flex-shrink: 0; border-top: 1px solid var(--border); background: var(--bg2); }
+.app-console__header { display: flex; align-items: center; gap: 4px; padding: 3px 10px; }
+.app-console__toggle { display: flex; align-items: center; gap: 8px; flex: 1; padding: 4px 0; border: 0; background: none; color: var(--text2); font: inherit; font-size: 0.8rem; cursor: pointer; text-align: left; }
+.app-console__toggle:hover { color: var(--text); }
+.app-console__count, .app-console__repeat { color: var(--danger); }
+.app-console__output { height: min(220px, 35vh); overflow: auto; list-style: none; padding: 4px 12px 8px; font: 0.75rem/1.5 Consolas, monospace; }
+.app-console__entry { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-top: 1px solid var(--border); }
+.app-console__entry time, .app-console__source { flex-shrink: 0; color: var(--text2); }
+.app-console__entry pre { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--danger); font: inherit; user-select: text; }
+.app-console__empty { color: var(--text2); padding-top: 6px; }

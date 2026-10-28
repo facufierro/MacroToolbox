@@ -57,6 +57,9 @@ export const api = {
   setProfileArmed: (profileId: string, armed: boolean) =>
     invoke<Database>("set_profile_armed", { profileId, armed }),
 
+  setProfilePartEnabled: (profileId: string, part: "hotkeys" | "events" | "scripts" | "overlay" | "states", enabled: boolean, groupId: string | null = null) =>
+    invoke<Database>("set_profile_part_enabled", { profileId, part, groupId, enabled }),
+
   getAhkStatus: () =>
     invoke<boolean>("get_ahk_status"),
 
