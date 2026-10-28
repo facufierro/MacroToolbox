@@ -592,9 +592,15 @@ fn trigger_to_key(trigger: &str) -> String {
 }
 
 const COPILOT_ENGINE: &str = r###"SendCopilotKeys(keys) {
+    previousDelay := A_KeyDelay, previousDuration := A_KeyDuration
     previousSendLevel := SendLevel(1)
+    ; Modifier handoffs must finish before the next physical key reaches the app.
+    SetKeyDelay -1, -1
     try SendEvent(keys)
-    finally SendLevel(previousSendLevel)
+    finally {
+        SetKeyDelay previousDelay, previousDuration
+        SendLevel(previousSendLevel)
+    }
 }
 
 ReleaseStaleCopilotModifiers() {
@@ -740,23 +746,30 @@ CopilotDown() {
     global copilotCtrlHeld, copilotCtrlReleasePending
     if copilotCtrlHeld
         return
-    copilotState.winHeldBefore := copilotState.winHeldBefore || copilotState.phase = "win_held"
-    copilotState.shiftHeldBefore := copilotState.shiftHeldBefore || copilotState.shiftHeld
-    SetTimer PassCopilotKeys, 0
-    StopCopilotPrefix()
-    copilotState.phase := "copilot"
-    copilotShiftSuppressed := false
-    copilotCtrlHeld := true
-    copilotCtrlReleasePending := false
-    SetTimer CheckCopilotRelease, 0
-    keys := "{Blind}"
-    if !copilotState.winHeldBefore
-        keys .= "{vkE8}"
-    if !copilotState.shiftHeldBefore
-        keys .= "{LShift up}"
-    if !copilotState.winHeldBefore
-        keys .= "{LWin up}"
-    SendCopilotKeys(keys "{RCtrl downR}")
+    previousCritical := Critical()
+    try {
+        ; Ownership was captured at Win-down. A prefix timeout may have passed this
+        ; chord's Win/Shift already; those are still Copilot modifiers to neutralize.
+        SetTimer PassCopilotKeys, 0
+        copilotState.phase := "copilot"
+        copilotShiftSuppressed := false
+        copilotCtrlHeld := true
+        copilotCtrlReleasePending := false
+        SetTimer CheckCopilotRelease, 0
+        keys := "{Blind}"
+        if !copilotState.winHeldBefore
+            keys .= "{vkE8}"
+        if !copilotState.shiftHeldBefore
+            keys .= "{LShift up}"
+        if !copilotState.winHeldBefore
+            keys .= "{LWin up}"
+        SendCopilotKeys(keys "{RCtrl downR}")
+    } finally {
+        ; Keep the prefix suppressing physical keys until Right Ctrl is delivered.
+        ; Critical defers their callbacks so replay observes the completed handoff.
+        try StopCopilotPrefix()
+        finally Critical previousCritical
+    }
 }
 
 CopilotUp() {
@@ -1239,12 +1252,16 @@ HoldKeyDown(owner, keyStr, triggerModifiers := "", ordered := true) {
     }
 }
 
-HoldKeyUp(keyStr, triggerModifiers := "") {
+HoldKeyUp(keyStr, triggerModifiers := "", physicalOwner := 0) {
     SetKeyDelay -1, -1
     SetMouseDelay -1
     keys := HoldKeyList(keyStr)
     blind := BlindFor(triggerModifiers, KeyModifierSymbols(keyStr))
-    ReleaseHeldOutputsTogether(keys, blind)
+    ReleaseHeldOutputsTogether(keys, blind, physicalOwner)
+}
+
+PhysicalOwnsOutput(keyName, physicalOwner := 0) {
+    return IsObject(physicalOwner) ? physicalOwner.Call(keyName) : GetKeyState(keyName, "P")
 }
 
 AcquireHeldOutput(keyName, blind) {
@@ -1255,7 +1272,7 @@ AcquireHeldOutput(keyName, blind) {
         SendOwnedKeyDown(keyName, true, "DownR", blind)
 }
 
-ReleaseHeldOutputsTogether(keys, blind) {
+ReleaseHeldOutputsTogether(keys, blind, physicalOwner := 0) {
     global heldOutputCounts, syntheticDown, copilotCtrlHeld
     releases := []
     index := keys.Length
@@ -1268,7 +1285,7 @@ ReleaseHeldOutputsTogether(keys, blind) {
             else {
                 heldOutputCounts.Delete(keyName)
                 if syntheticDown.Has(keyName) {
-                    if !GetKeyState(keyName, "P") && !(keyName = "RCtrl" && copilotCtrlHeld)
+                    if !PhysicalOwnsOutput(keyName, physicalOwner) && !(keyName = "RCtrl" && copilotCtrlHeld)
                         releases.Push(keyName)
                     else
                         syntheticDown.Delete(keyName)
@@ -1294,7 +1311,7 @@ ReleaseHeldOutputsTogether(keys, blind) {
 
 ; Track every single-key or multi-input trigger independently. Global key-up handlers call
 ; ReleaseTriggerHolds for every physical member, so releasing any member ends its whole chord.
-HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true) {
+HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true, physicalOwner := 0) {
     global chordHolds
     ; Keep a trigger-up buffered until the ordered down sequence is complete. Otherwise a quick
     ; release during its inter-key delay could release the first output before the second is owned.
@@ -1311,7 +1328,7 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true)
         )
         HoldKeyDown(owner, keyStr, triggerModifiers, ordered)
     } catch Error as err {
-        HoldChordUp(owner)
+        HoldChordUp(owner, physicalOwner)
         throw err
     } finally {
         Critical previousCritical
@@ -1320,14 +1337,14 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true)
 
 ; Register before the first step so a release during the prefix also ends ownership. Only
 ; registration is critical: the release hotkey must be able to interrupt a waiting hold step.
-HoldChordUp(owner) {
+HoldChordUp(owner, physicalOwner := 0) {
     global chordHolds
     if !chordHolds.Has(owner)
         return
     state := chordHolds[owner]
     chordHolds.Delete(owner)
     if (state["keys"] != "")
-        HoldKeyUp(state["keys"], state["modifiers"])
+        HoldKeyUp(state["keys"], state["modifiers"], physicalOwner)
 }
 
 HoldKeyList(keyStr) {

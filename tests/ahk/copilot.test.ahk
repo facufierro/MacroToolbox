@@ -7,6 +7,7 @@ global copilotState := {}, copilotShiftSuppressed := false
 global copilotCtrlHeld := false, copilotCtrlReleasePending := false
 global physical := Map(), logical := Map(), sent := [], timers := Map(), chordModifiers := []
 global heldOutputCounts := Map(), syntheticDown := Map()
+global onSendEvent := 0, queuedInputs := [], deliveredModifiers := []
 OnError(TestUnhandledError)
 
 RunTest("quick Win+R forwards Win before R", TestQuickWinR)
@@ -25,12 +26,19 @@ RunTest("physical Win releases during a Copilot hold", TestPhysicalWinRelease)
 RunTest("physical Shift before Copilot stays down", TestPhysicalShift)
 RunTest("hook recovery releases and reacquires Right Ctrl", TestRecovery)
 RunTest("exit cleanup preserves physical modifiers", TestExitCleanup)
-FileAppend("All 16 Copilot tests passed." Chr(10), "*")
+RunTest("a key arriving during the Copilot handoff reaches the game with Right Ctrl", TestCopilotHandoff.Bind(false))
+RunTest("a quick tap during the Copilot handoff retains its down and up", TestCopilotHandoff.Bind(true))
+RunTest("a delayed Copilot chord neutralizes modifiers already passed by its prefix", TestDelayedCopilotChord.Bind(false))
+RunTest("a delayed Copilot chord preserves independently held Shift", TestDelayedCopilotChord.Bind(true))
+RunTest("remapped transitions do not inherit behavior delays", TestRemapDelays)
+RunTest("failed remap delivery restores the caller's input settings", TestRemapDeliveryFailure)
+FileAppend("All 22 Copilot tests passed." Chr(10), "*")
 ExitApp 0
 
 RunTest(name, test) {
     global copilotState, copilotShiftSuppressed, copilotCtrlHeld, copilotCtrlReleasePending
     global physical, logical, sent, timers, chordModifiers
+    global onSendEvent, queuedInputs, deliveredModifiers
     copilotState := {phase: "idle", input: "", shiftHeld: false, shiftHeldBefore: false, winHeldBefore: false}
     copilotShiftSuppressed := false
     copilotCtrlHeld := false
@@ -40,12 +48,16 @@ RunTest(name, test) {
     sent := []
     timers := Map()
     chordModifiers := []
+    onSendEvent := 0
+    queuedInputs := []
+    deliveredModifiers := []
     test.Call()
     Assert(!logical.Get("RCtrl", false), name " left Right Ctrl down")
     Assert(!logical.Get("LWin", false) && !logical.Get("LShift", false), name " left Win/Shift down")
     Assert(!copilotCtrlHeld && !copilotCtrlReleasePending, name " left Ctrl owned")
     Assert(!IsObject(copilotState.input), name " left the prefix running")
     Assert(A_SendLevel = 0, name " leaked the remap send level")
+    Assert(!A_IsCritical, name " left the input handoff critical")
     FileAppend("PASS: " name Chr(10), "*")
 }
 
@@ -222,6 +234,86 @@ TestExitCleanup() {
     NativeUp("LWin")
 }
 
+TestCopilotHandoff(quickTap) {
+    global onSendEvent
+    onSendEvent := PressDuringHandoff.Bind(quickTap)
+    BeginCopilot()
+    for callback in queuedInputs
+        callback.Call()
+    Assert(deliveredModifiers.Length = 1 && deliveredModifiers[1] = "RCtrl", "the game's next key arrived before Right Ctrl")
+    Assert(ExternalModifiers() = "RCtrl", "the handoff leaked Win or Shift")
+    Assert(logical.Get("n", false) = !quickTap, "the handoff lost a queued key transition")
+    NativeUp("n")
+    EndCopilot()
+}
+
+TestDelayedCopilotChord(physicalShift) {
+    if physicalShift
+        NativeDown("LShift")
+    NativeDown("LWin")
+    if !physicalShift
+        NativeDown("LShift")
+    ; Model the prefix timer running before the queued F23 handler.
+    PassCopilotKeys()
+    Assert(ExternalModifiers() = "Shift Win", "test did not pass the pending prefix")
+    CopilotDown()
+    expected := physicalShift ? "RCtrl Shift" : "RCtrl"
+    Assert(ExternalModifiers() = expected, "delayed F23 mistook its own prefix for independently held modifiers")
+    CopilotUp()
+    NativeUp("LWin")
+    NativeUp("LShift")
+}
+
+PressDuringHandoff(quickTap, key, direction) {
+    global onSendEvent
+    if key = "LShift" && direction = "up" {
+        onSendEvent := 0
+        NativeDown("n")
+        if quickTap
+            NativeUp("n")
+    }
+}
+
+TestRemapDelays() {
+    global onSendEvent
+    previousDelay := A_KeyDelay, previousDuration := A_KeyDuration
+    try {
+        SetKeyDelay 40, 20
+        onSendEvent := AssertImmediateRemap
+        BeginCopilot()
+        Assert(A_KeyDelay = 40 && A_KeyDuration = 20, "remap changed the caller's key timing")
+        EndCopilot()
+    } finally SetKeyDelay previousDelay, previousDuration
+}
+
+AssertImmediateRemap(*) {
+    Assert(A_KeyDelay = -1 && A_KeyDuration = -1, "modifier handoff was delayed between transitions")
+}
+
+TestRemapDeliveryFailure() {
+    global onSendEvent
+    previousDelay := A_KeyDelay, previousDuration := A_KeyDuration
+    try {
+        SetKeyDelay 40, 20
+        SendLevel 3
+        onSendEvent := FailRemapDelivery
+        failed := false
+        try SendCopilotKeys("{Blind}{RCtrl up}")
+        catch Error
+            failed := true
+        Assert(failed, "delivery failure was swallowed")
+        Assert(A_SendLevel = 3 && A_KeyDelay = 40 && A_KeyDuration = 20, "failed delivery changed the caller's input settings")
+    } finally {
+        onSendEvent := 0
+        SendLevel 0
+        SetKeyDelay previousDelay, previousDuration
+    }
+}
+
+FailRemapDelivery(*) {
+    throw Error("simulated remap delivery failure")
+}
+
 BeginCopilot() {
     global chordModifiers, logical
     chordModifiers := []
@@ -272,11 +364,14 @@ NativeDown(key) {
             ObserveCopilotShiftDown()
         }
     } else if IsObject(copilotState.input) && copilotState.input.InProgress {
-        codes := Map("r", [0x52, 0x013], "RCtrl", [0xA3, 0x11D])[key]
+        codes := Map("r", [0x52, 0x013], "n", [0x4E, 0x031], "RCtrl", [0xA3, 0x11D])[key]
         input := copilotState.input
-        input.OnKeyDown.Call(input, codes[1], codes[2])
-    } else
+        DeliverPrefixInput(input, input.OnKeyDown, codes)
+    } else {
+        if key = "n"
+            deliveredModifiers.Push(ExternalModifiers())
         logical[key] := true
+    }
 }
 
 NativeUp(key) {
@@ -284,11 +379,22 @@ NativeUp(key) {
     physical[key] := false
     if key = "LWin"
         CopilotWinUp()
-    else {
+    else if key != "LShift" && IsObject(copilotState.input) && copilotState.input.InProgress {
+        codes := Map("r", [0x52, 0x013], "n", [0x4E, 0x031], "RCtrl", [0xA3, 0x11D])[key]
+        input := copilotState.input
+        DeliverPrefixInput(input, input.OnKeyUp, codes)
+    } else {
         logical[key] := false
         if key = "LShift"
             ObserveCopilotShiftUp()
     }
+}
+
+DeliverPrefixInput(input, callback, codes) {
+    if A_IsCritical
+        queuedInputs.Push(callback.Bind(input, codes[1], codes[2]))
+    else
+        callback.Call(input, codes[1], codes[2])
 }
 
 ExternalModifiers() {
@@ -340,9 +446,13 @@ TestSend(keys) {
     Assert(A_SendLevel = 1, "remapped input bypassed the shared hook's send level")
     sent.Push(keys)
     position := 1
-    while RegExMatch(keys, "\{(LCtrl|RCtrl|LWin|LShift|vk52sc013|vkA3sc11D) (up|downR|down)\}", &match, position) {
-        key := Map("vk52sc013", "r", "vkA3sc11D", "RCtrl").Get(match[1], match[1])
+    while RegExMatch(keys, "\{(LCtrl|RCtrl|LWin|LShift|vk52sc013|vk4Esc031|vkA3sc11D) (up|downR|down)\}", &match, position) {
+        key := Map("vk52sc013", "r", "vk4Esc031", "n", "vkA3sc11D", "RCtrl").Get(match[1], match[1])
+        if key = "n" && match[2] != "up"
+            deliveredModifiers.Push(ExternalModifiers())
         logical[key] := match[2] != "up"
+        if IsObject(onSendEvent)
+            onSendEvent.Call(key, match[2])
         position := match.Pos + match.Len
     }
 }

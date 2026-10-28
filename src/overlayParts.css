@@ -1,3 +1,18 @@
+.ov-flow-slot {
+  display: flex;
+  flex-shrink: 0;
+}
+/* Only the first part sets the cross-axis size, keeping its top-left anchored.
+   Other parts overflow their slots so their centers still line up with it. */
+.ov-flow-slot--column {
+  width: 0;
+  justify-content: center;
+}
+.ov-flow-slot--row {
+  height: 0;
+  align-items: center;
+}
+
 .ov-timer {
   display: inline-flex;
   align-items: center;
@@ -7,6 +22,10 @@
   padding: 4px 10px;
   min-width: 64px;
   backdrop-filter: blur(4px);
+}
+.ov-timer--no-background {
+  background: transparent;
+  backdrop-filter: none;
 }
 .ov-timer__time {
   font-weight: 700;

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { OverlayConfig } from "./types";
-import { getOverlayItemPosition, toLogicalOverlayBounds } from "./overlayPosition";
-import { EMPTY_RUNTIME, getTimerRemaining, isItemVisible, acceptSnapshot, type OverlaySnapshot } from "./overlayRuntime";
-import { OverlayItemView } from "./OverlayParts";
+import { acceptOverlayOrigin, acceptOverlaySnapshot, getOverlayItemPosition, toLogicalOverlayBounds, type OverlayBounds, type OverlayPresentation } from "./overlayPosition";
+import { EMPTY_RUNTIME, getTimerRemaining, isItemVisible, type OverlaySnapshot } from "./overlayRuntime";
+import { OverlayGroupView, OverlayItemView } from "./OverlayParts";
 import { captureWindowErrors, errorMessage } from "./consoleLog";
 import "./overlay.css";
 
@@ -16,15 +16,18 @@ function reportError(error: unknown) {
 }
 
 export default function OverlayApp() {
-  const [snapshot, setSnapshot] = useState<OverlaySnapshot>({ config: EMPTY_CONFIG, runtime: EMPTY_RUNTIME, revision: 0 });
-  const [origin, setOrigin] = useState<[number, number, number, number]>([0, 0, 0, 0]);
+  const [presentation, setPresentation] = useState<OverlayPresentation>({
+    snapshot: { config: EMPTY_CONFIG, runtime: EMPTY_RUNTIME, revision: 0 }, origin: null, generation: 0,
+  });
   const [now, setNow] = useState(() => Date.now());
   const itemEls = useRef<Map<string, HTMLElement>>(new Map());
   const lastDebug = useRef("");
+  const { snapshot, origin, generation } = presentation;
   const { config, runtime } = snapshot;
+  const folderId = config.profile_id;
   const scale = window.devicePixelRatio || 1;
-  const logicalOrigin = toLogicalOverlayBounds(origin, scale);
-  const visibleItems = config.items.filter(item => isItemVisible(config, item, runtime, now));
+  const logicalOrigin = origin ? toLogicalOverlayBounds(origin, scale) : null;
+  const visibleItems = logicalOrigin ? config.items.filter(item => isItemVisible(config, item, runtime, now)) : [];
 
   useEffect(() => {
     const stopCapturing = captureWindowErrors(window, reportError);
@@ -35,19 +38,10 @@ export default function OverlayApp() {
       if (disposed) unlisten(); else unlisteners.push(unlisten);
     };
     // Subscribe before requesting the initial snapshot, so a transition cannot be lost.
-    const receive = (next: OverlaySnapshot) => setSnapshot(previous => acceptSnapshot(previous, next));
+    const receive = (next: OverlaySnapshot) => setPresentation(previous => acceptOverlaySnapshot(previous, next));
     void subscribe<OverlaySnapshot>("overlay-snapshot", receive).then(() => {
       if (!disposed) void invoke<OverlaySnapshot>("get_overlay_snapshot").then(value => { if (!disposed) receive(value); }).catch(reportError);
     }).catch(reportError);
-    invoke<[number, number, number, number]>("get_overlay_origin")
-      .then(setOrigin)
-      .catch(reportError);
-
-    const interval = window.setInterval(() => {
-      invoke<[number, number, number, number]>("get_overlay_origin")
-        .then(setOrigin)
-        .catch(reportError);
-    }, 250);
     const clock = window.setInterval(() => setNow(Date.now()), 100);
 
     void subscribe<[number, number]>("overlay-right-click", coordinates => {
@@ -69,13 +63,34 @@ export default function OverlayApp() {
     return () => {
       disposed = true;
       stopCapturing();
-      window.clearInterval(interval);
       window.clearInterval(clock);
       for (const unlisten of unlisteners) unlisten();
     };
   }, []);
 
   useEffect(() => {
+    if (folderId === null) return;
+    let disposed = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const next = await invoke<OverlayBounds | null>("get_overlay_origin", { folderId });
+        if (!disposed) setPresentation(previous => acceptOverlayOrigin(previous, generation, next));
+      } catch (error) {
+        if (!disposed) reportError(error);
+      } finally {
+        if (!disposed) timer = window.setTimeout(refresh, 250);
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [folderId, generation]);
+
+  useEffect(() => {
+    if (!logicalOrigin) return;
     const first = visibleItems[0];
     const firstPosition = first ? getOverlayItemPosition(first, logicalOrigin) : null;
     const message = JSON.stringify({
@@ -102,6 +117,7 @@ export default function OverlayApp() {
     invoke("debug_overlay_log", { message }).catch(reportError);
   }, [config, logicalOrigin, origin, runtime, scale, visibleItems]);
 
+  if (!logicalOrigin) return null;
   return (
     <div className="overlay-root">
       {visibleItems.filter(item => !config.groups?.some(group => group.id === item.group_id)).map(item => (
@@ -113,14 +129,12 @@ export default function OverlayApp() {
         const members = visibleItems.filter(item => item.group_id === group.id);
         if (!members.length) return null;
         const flow = group.layout === "row" || group.layout === "column";
-        return <div key={group.id} style={{ position: "absolute",
-          ...getOverlayItemPosition({ x: group.x ?? 0, y: group.y ?? 0 }, logicalOrigin),
-          ...(flow ? { display: "flex", flexDirection: group.layout as "row" | "column", alignItems: "center", gap: group.gap ?? 8 } : {}) }}>
+        return <OverlayGroupView key={group.id} group={group} origin={logicalOrigin}>
           {members.map(item => <OverlayItemView key={item.id} item={item} flow={flow}
             origin={[0, 0, logicalOrigin[2], logicalOrigin[3]]}
             remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} value={runtime.values?.[item.id]}
             onMount={el => { if (el) itemEls.current.set(item.id, el); else itemEls.current.delete(item.id); }} />)}
-        </div>;
+        </OverlayGroupView>;
       })}
     </div>
   );

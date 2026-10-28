@@ -60,12 +60,15 @@ a released version's changelog; put the change in the next version instead.
 1. Find the highest released version: the greatest `vX.Y.Z` represented by a Git tag
    (`git tag --sort=-v:refname`) or a `releases/vX.Y.Z/` directory.
 2. Classify the change according to semantic versioning:
-   - **Major** (`v<MAJOR+1>.0.0`): a breaking change. Existing saved configuration (`db.json`),
-     scopes, profiles, or hotkeys stop working or require migration, or a feature or command is
-     removed or renamed.
+   - **Major** (`v<MAJOR+1>.0.0`): a backward-incompatible change. Existing saved configuration
+     (`db.json`), scopes, profiles, hotkeys, or persisted behavior commands stop working or
+     require users to migrate their setup manually.
    - **Minor** (`v<MAJOR>.<MINOR+1>.0`): a new backward-compatible user-facing capability, such
      as a setting, button, overlay item, or command. Existing setups continue to work.
    - **Patch** (`v<MAJOR>.<MINOR>.<PATCH+1>`): a bug fix or small correction with no new feature.
+   Adding, removing, renaming, or moving UI controls does not by itself require a major bump.
+   UI refinements are patch changes; new capabilities are minor changes, unless they break
+   existing saved setups as defined above. Compatible automatic migrations are not major changes.
    If a batch mixes change types, use the highest-ranked one: major, then minor, then patch.
 3. Increment the selected part of the highest released version and reset every lower part to
    zero. For example, from `v1.0.6`, a fix targets `v1.0.7`, a feature targets `v1.1.0`, and a

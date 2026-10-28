@@ -2,7 +2,7 @@ import { Icon, IconButton } from "./Icon";
 import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
-import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog, confirm as confirmDialog, ask } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { api } from "./api";
@@ -17,7 +17,7 @@ import { mapScriptActions, withReferencedScripts, carryReferencedScripts, remove
 import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step } from "./behaviors";
 import { allowsExtraModifiers } from "./hotkeyModifiers";
 import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
-import { availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, removeOverlayGroup, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
+import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, removeOverlayGroup, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
 import type {
   Database,
   Scope,
@@ -44,7 +44,6 @@ type Modal =
   | { type: "setParent"; gameId: string; profile: Profile }
   | { type: "copyProfile"; sourceGameId: string; profile: Profile }
   | { type: "overlayItem"; gameId: string; profileId: string; index: number | null; item: OverlayItem; gameExe: string; states: ProfileState[] }
-  | { type: "copyOverlayItem"; sourceGameId: string; sourceProfileId: string; item: OverlayItem }
   | { type: "copyState"; sourceGameId: string; sourceProfileId: string; state: ProfileState }
   | { type: "profileState"; gameId: string; profileId: string; index: number | null; state: ProfileState }
   | { type: "script"; gameId: string; profileId: string; index: number | null; script: Script };
@@ -296,8 +295,9 @@ function resolveStates(profiles: Profile[], profile: Profile): Array<{ state: Pr
 }
 
 function resolveOverlayItems(profiles: Profile[], profile: Profile): Array<{ item: OverlayItem; own: boolean }> {
-  return resolveProfileEntries(profiles, profile, current => current.overlay_items, item => item.id)
-    .map(({ value, own }) => ({ item: value, own }));
+  const entries = resolveProfileEntries(profiles, profile, current => current.overlay_items, item => item.id);
+  const items = nameOverlayParts(entries.map(({ value }) => value), resolveOverlayGroups(profiles, profile));
+  return entries.map(({ own }, index) => ({ item: items[index], own }));
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -849,10 +849,6 @@ function CopyToProfileModal({
 
 // ── Overlay components ────────────────────────────────────────────────────────
 
-function overlayItemLabel(item: OverlayItem): string {
-  return item.name.trim() ? `${item.name} - ${item.type}` : item.type;
-}
-
 function overlayItemDesc(item: OverlayItem, states: ProfileState[]): string {
   const pos = `(${item.x}, ${item.y})`;
   const stateLabel = stateNameById(states, item.state_id);
@@ -955,12 +951,11 @@ function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOver
   );
 }
 
-function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onOverride, onMove, first, last }: {
+function OverlayItemRow({ item, states, inherited, onEdit, onDelete, onOverride, onMove, first, last }: {
   item: OverlayItem;
   states: ProfileState[];
   inherited: boolean;
   onEdit?: () => void;
-  onCopy?: () => void;
   onDelete?: () => void;
   onOverride?: () => void;
   onMove?: (direction: -1 | 1) => void;
@@ -969,7 +964,7 @@ function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onO
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{overlayItemLabel(item)}</span>
+      <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{item.name}</span>
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
         {onMove && <>
@@ -977,14 +972,10 @@ function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onO
           <IconButton icon="arrow-down" label="Move down"  className="icon-btn" disabled={last} onClick={() => onMove(1)} />
         </>}
         {inherited ? (
-          <>
-            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
-            <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
-          </>
+          <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
         ) : (
           <>
             <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
-            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
             <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
           </>
         )}
@@ -1033,7 +1024,6 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
   onClose: () => void;
 }) {
   const reportError = useErrorReporter();
-  const [name, setName] = useState(initial.name);
   const [x, setX] = useState(String(initial.x));
   const [y, setY] = useState(String(initial.y));
   const [stateId, setStateId] = useState(initial.state_id ?? "");
@@ -1044,6 +1034,7 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
   const [secs, setSecs]         = useState(String(initial.type === "timer" ? Math.floor((initial.duration_ms % 60000) / 1000) : 0));
   const [timerColor, setTimerColor] = useState(initial.type === "timer" ? initial.color : "#ffffff");
   const [timerFontSize, setTimerFontSize] = useState(String(initial.type === "timer" ? initial.font_size : 22));
+  const [timerBackground, setTimerBackground] = useState(initial.type !== "timer" || initial.show_background !== false);
   const [timerStateId, setTimerStateId] = useState(initial.type === "timer" ? (initial.timer_state_id ?? "") : "");
   const [startWithOverlay, setStartWithOverlay] = useState(initial.type === "timer" && !!initial.start_with_overlay);
   const [showOnlyRunning, setShowOnlyRunning] = useState(initial.type === "timer" && !!initial.show_only_running);
@@ -1070,7 +1061,7 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
   function build(): OverlayItem {
     const base = {
       id: initial.id,
-      name: name.trim(),
+      name: initial.name,
       x: parseFloat(x)||0,
       y: parseFloat(y)||0,
       state_id: stateId || null,
@@ -1079,7 +1070,7 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
     };
     const timerMs = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
     switch (initial.type) {
-      case "timer": return { ...base, type: "timer", duration_ms: timerMs||60000, color: timerColor, font_size: parseInt(timerFontSize)||22, timer_state_id: timerStateId || null, start_with_overlay: startWithOverlay, show_only_running: showOnlyRunning };
+      case "timer": return { ...base, type: "timer", duration_ms: timerMs||60000, color: timerColor, font_size: parseInt(timerFontSize)||22, show_background: timerBackground, timer_state_id: timerStateId || null, start_with_overlay: startWithOverlay, show_only_running: showOnlyRunning };
       case "icon":  return { ...base, type: "icon",  w: parseInt(iw)||64, h: parseInt(ih)||64, src };
       case "bar":   return { ...base, type: "bar",   w: parseInt(bw)||200, h: parseInt(bh)||20, color: barColor, max_value: parseFloat(maxVal)||100 };
       case "text":  return { ...base, type: "text",  font_size: parseInt(fontSize)||16, color: txtColor, content };
@@ -1093,12 +1084,9 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
       <div className="modal modal--overlay-item" onClick={e => e.stopPropagation()}>
         <h2>{typeLabel}</h2>
 
-        <div className="form-grid form-grid--2">
-          <label>Name <input value={name} onChange={e => setName(e.target.value)} /></label>
-          <label>Overlay <select value={groupId} onChange={event => setGroupId(event.target.value)}>
-            {groups.map(group => <option key={group.id} value={group.id}>{group.name || "Overlay"}</option>)}
-          </select></label>
-        </div>
+        <label>Overlay <select value={groupId} onChange={event => setGroupId(event.target.value)}>
+          {groups.map(group => <option key={group.id} value={group.id}>{group.name || "Overlay"}</option>)}
+        </select></label>
         <label>Show part <select value={visibleTimerId ? `@timer:${visibleTimerId}` : showOnlyRunning ? "@running" : stateId} onChange={e => {
           const timer = e.target.value.startsWith("@timer:");
           setVisibleTimerId(timer ? e.target.value.slice(7) : "");
@@ -1145,6 +1133,10 @@ function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, on
               ))}
             </select></label>
           </div>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={timerBackground} onChange={e => setTimerBackground(e.target.checked)} />
+            <span>Text background</span>
+          </label>
         </fieldset>}
 
         {initial.type === "icon" && <fieldset className="overlay-item-form__section">
@@ -1418,7 +1410,6 @@ function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }
       onMove={own ? direction => { saveProfile(moveOverlayPart(profile, item.id, direction)).catch(error => reportError(error)); } : undefined}
       first={siblings[0]?.id === item.id} last={siblings[siblings.length - 1]?.id === item.id}
       onEdit={own ? () => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: ownIndex, item, gameExe: profileExe, states: stateOptions }) : undefined}
-      onCopy={() => onModal({ type: "copyOverlayItem", sourceGameId: folder.id, sourceProfileId: profileId, item })}
       onDelete={own ? async () => { onDb(await api.upsertGame(removeOverlayItem(folder, profileId, item.id))); } : undefined}
       onOverride={!own ? async () => { await saveProfile({ ...profile, overlay_items: [...profile.overlay_items, { ...item }] }); } : undefined} />;
   }
@@ -1487,11 +1478,12 @@ function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }
           <IconButton icon="plus" label="Add overlay" className="btn btn--ghost btn--sm" onClick={() => saveProfile({ ...profile, overlay_groups: [...profile.overlay_groups, { id: uid(), name: "", x: 0, y: 0, layout: "row", gap: 8 }] }).catch(reportError)} />
         }>
             <div className="steps-list" style={{ marginTop: 8 }}>
-              {groups.map(group => <OverlayGroupPanel key={group.id} group={group} items={profile.overlay_items} timers={availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item)).filter(item => item.type === "timer")} gameExe={profileExe}
+              {groups.map(group => <OverlayGroupPanel key={group.id} group={group} items={resolvedOverlayItems.filter(({ own }) => own).map(({ item }) => item)} timers={availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item), groups).filter(item => item.type === "timer")} gameExe={profileExe}
                 onSave={async (next, members) => { await saveProfile(saveOverlayGroup(profile, next, members)); }}
                 onEnabledChange={async value => { onDb(await api.setProfilePartEnabled(profile.id, "overlay", value, group.id)); }}
+                onDuplicate={async () => { await saveProfile(duplicateOverlayGroup(profile, group, resolvedOverlayItems.map(({ item }) => item), uid)); }}
                 onDelete={profile.overlay_groups.some(candidate => candidate.id === group.id) ? async () => {
-                  if (!confirm(`Delete overlay "${group.name || "Overlay"}" and its parts?`)) return;
+                  if (!await confirmDialog(`Delete overlay "${group.name || "Overlay"}" and its parts?`)) return;
                   onDb(await api.upsertGame(removeOverlayGroup(folder, profileId, group.id)));
                 } : undefined}
                 onAdd={type => addOverlay(type, group.id)}
@@ -1858,7 +1850,12 @@ export default function App() {
       { label: "Copy to…", onClick: () => setModal({ type: "copyProfile", sourceGameId: folderId, profile: p }) },
       { label: "Edit states…", onClick: () => { setSelection({ kind: "profile", folderId, profileId: p.id }); setStatesFor(p.id); } },
       { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!).catch(e => reportError(e)) },
-      { label: "Delete profile", danger: true, onClick: async () => { if (!confirm(`Delete profile "${p.name}"?`)) return; try { handleDb(await api.deleteProfile(folderId, p.id)); } catch (e) { reportError(e); } } },
+      { label: "Delete profile", danger: true, onClick: async () => {
+        try {
+          if (!await confirmDialog(`Delete profile "${p.name}"?`)) return;
+          handleDb(await api.deleteProfile(folderId, p.id));
+        } catch (e) { reportError(e); }
+      } },
     ];
   }
 
@@ -1889,13 +1886,17 @@ export default function App() {
       { label: "Export folder", onClick: () => exportScope(folder).catch(e => reportError(e)) },
       ...(hasProcessTarget ? [
         { label: "Kill process", onClick: async () => {
-          if (!confirm(`Force-kill "${targetExe}"?`)) return;
-          try { await api.killGame(targetExe); } catch (e) { reportError(e); }
+          try {
+            if (!await confirmDialog(`Force-kill "${targetExe}"?`)) return;
+            await api.killGame(targetExe);
+          } catch (e) { reportError(e); }
         } },
       ] : []),
       ...(!isGlobalFolder ? [{ label: "Delete folder", danger: true, onClick: async () => {
-        if (!confirm(`Delete folder "${folder.name}" and all its profiles?`)) return;
-        try { handleDb(await api.deleteGame(folder.id)); } catch (e) { reportError(e); }
+        try {
+          if (!await confirmDialog(`Delete folder "${folder.name}" and all its profiles?`)) return;
+          handleDb(await api.deleteGame(folder.id));
+        } catch (e) { reportError(e); }
       } }] : []),
     ];
   }
@@ -1985,22 +1986,6 @@ export default function App() {
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error copying hotkey: ${e}`); }
-  }
-
-  async function handleCopyOverlayItem(sourceGameId: string, sourceProfileId: string, item: OverlayItem, targetGameId: string, targetProfileId: string) {
-    try {
-      const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
-      const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
-      const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
-      const copy = {
-        ...item,
-        id: uid(),
-        name: isSameProfile ? copyName(item.name, item.type) : item.name,
-      };
-      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, overlay_items: [...profile.overlay_items, copy] }));
-      handleDb(updated);
-      setModal(null);
-    } catch (e) { reportError(`Error copying overlay item: ${e}`); }
   }
 
   async function handleCopyState(sourceGameId: string, _sourceProfileId: string, state: ProfileState, targetGameId: string, _targetProfileId: string) {
@@ -2153,14 +2138,8 @@ export default function App() {
         const folder = db.scopes.find(folder => folder.id === gameId)!;
         const profile = folder.profiles.find(profile => profile.id === profileId)!;
         return <OverlayItemModal initial={item} gameExe={gameExe} states={states}
-          groups={resolveOverlayGroups(folder.profiles, profile)} timers={availableOverlayItems(folder.profiles, profile.overlay_items).filter(item => item.type === "timer")}
+          groups={resolveOverlayGroups(folder.profiles, profile)} timers={availableOverlayItems(folder.profiles, resolveOverlayItems(folder.profiles, profile).map(({ item }) => item), resolveOverlayGroups(folder.profiles, profile)).filter(item => item.type === "timer")}
           onSave={it => handleOverlayItemSave(gameId, profileId, index, it)}
-          onClose={() => setModal(null)} />;
-      })()}
-      {modal?.type === "copyOverlayItem" && (() => {
-        const { sourceGameId, sourceProfileId, item } = modal;
-        return <CopyToProfileModal games={db.scopes} title="Copy Widget To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
-          onSave={(targetGameId, targetProfileId) => handleCopyOverlayItem(sourceGameId, sourceProfileId, item, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "profileState" && (() => {

@@ -8,6 +8,8 @@ class BindingHost {
         this.bindings := Map()
         this.criteria := Map()
         this.releases := Map()
+        this.consumed := Map()
+        this.triggerGuards := Map()
         this.targets := Map()
         this.focus := ""
         this.visible := false
@@ -44,6 +46,7 @@ class BindingHost {
                 if !bindings.Has(key)
                     bindings[key] := []
                 binding["profile"] := profile
+                this.GuardTrigger(binding["chord"])
                 insertion := bindings[key].Length + 1
                 for index, previous in bindings[key] {
                     previousSpecific := previous["profile"]["target"] != "*"
@@ -141,10 +144,57 @@ class BindingHost {
         return IsObject(this.Find(key))
     }
 
+    TriggerKey(chord) {
+        keys := StrSplit(chord, " ")
+        return keys[keys.Length]
+    }
+
+    GuardTrigger(chord) {
+        key := this.TriggerKey(chord)
+        if this.triggerGuards.Has(key)
+            return
+        ; Register before plain-key variants. A consumed physical press stays consumed
+        ; across modifier changes, completed/cancelled behaviors, and profile reloads.
+        criterion := this.Consumes.Bind(this, key)
+        HotIf criterion
+        try {
+            Hotkey "$*" key, this.IgnoreRepeat.Bind(this), "On I0"
+            Hotkey "$*" key " up", this.Release.Bind(this, key), "On I0"
+        } finally HotIf()
+        this.triggerGuards[key] := criterion
+    }
+
+    Consumes(key, *) {
+        return this.consumed.Has(key)
+    }
+
+    PhysicalOwnsOutput(key) {
+        if !GetKeyState(key, "P")
+            return false
+        ; A consumed trigger never reached the app. Its physical hold cannot own
+        ; an output sent by a behavior, even when named E instead of SC012.
+        scan := GetKeySC(key)
+        for trigger in this.consumed
+            if key = trigger || (scan && scan = GetKeySC(trigger))
+                return false
+        return true
+    }
+
+    IgnoreRepeat(*) {
+    }
+
+    ResetInput() {
+        this.consumed.Clear()
+    }
+
     Activate(key, *) {
         binding := this.Find(key)
         if !IsObject(binding)
             return
+        trigger := this.TriggerKey(binding["chord"])
+        if this.consumed.Has(trigger)
+            return
+        this.consumed[trigger] := true
         profile := binding["profile"]
         if binding["toggle"] {
             ToggleEnabled(profile["id"])
@@ -158,6 +208,8 @@ class BindingHost {
         global behaviorRuntime
         if GetKeyState(key, "P")
             return
+        if this.consumed.Has(key)
+            this.consumed.Delete(key)
         behaviorRuntime.ReleaseTrigger(key)
     }
 
