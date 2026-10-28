@@ -38,8 +38,10 @@ struct WindowClientBounds {
 #[cfg(target_os = "windows")]
 impl WindowClientBounds {
     /// Physical pixels relative to the overlay client; the webview applies its own DPI scale.
-    fn overlay_origin(self, position: tauri::PhysicalPosition<i32>) -> (i32, i32, i32, i32) {
-        (self.left - position.x, self.top - position.y, self.width, self.height)
+    fn overlay_origin(self, position: tauri::PhysicalPosition<i32>, minimized: bool) -> Option<(i32, i32, i32, i32)> {
+        // Minimized clients can retain their size while reporting an off-screen origin.
+        if minimized || self.width <= 0 || self.height <= 0 { return None; }
+        Some((self.left - position.x, self.top - position.y, self.width, self.height))
     }
 }
 
@@ -56,7 +58,7 @@ mod overlay_position_tests {
             (-2560, -1440, 4480, 2520),
         ] {
             let bounds = WindowClientBounds { left, top, width, height };
-            assert_eq!(bounds.overlay_origin(PhysicalPosition::new(left, top)), (0, 0, width, height));
+            assert_eq!(bounds.overlay_origin(PhysicalPosition::new(left, top), false), Some((0, 0, width, height)));
         }
     }
 
@@ -64,13 +66,24 @@ mod overlay_position_tests {
     fn app_origin_preserves_physical_pixels_relative_to_the_actual_overlay() {
         let bounds = WindowClientBounds { left: -2240, top: -1260, width: 1920, height: 1080 };
         assert_eq!(
-            bounds.overlay_origin(PhysicalPosition::new(-2560, -1440)),
-            (320, 180, 1920, 1080),
+            bounds.overlay_origin(PhysicalPosition::new(-2560, -1440), false),
+            Some((320, 180, 1920, 1080)),
         );
         assert_eq!(
-            bounds.overlay_origin(PhysicalPosition::new(-2400, -1300)),
-            (160, 40, 1920, 1080),
+            bounds.overlay_origin(PhysicalPosition::new(-2400, -1300), false),
+            Some((160, 40, 1920, 1080)),
         );
+    }
+
+    #[test]
+    fn minimized_and_empty_clients_cannot_position_an_overlay() {
+        let position = PhysicalPosition::new(0, 0);
+        let minimized = WindowClientBounds { left: -32000, top: -32000, width: 1920, height: 1080 };
+        assert_eq!(minimized.overlay_origin(position, true), None);
+        for (width, height) in [(0, 1080), (1920, 0), (-1, 1080)] {
+            let bounds = WindowClientBounds { left: 100, top: 200, width, height };
+            assert_eq!(bounds.overlay_origin(position, false), None);
+        }
     }
 }
 
@@ -605,25 +618,25 @@ fn get_global_viewport() -> WindowClientBounds {
 }
 
 #[tauri::command]
-fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
+fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>, folder_id: String) -> Result<Option<(i32, i32, i32, i32)>, String> {
     #[cfg(target_os = "windows")]
     {
         let db = config::load_db(&state.db_path)?;
-        let selected = state.runtime.lock().unwrap().snapshot().config.profile_id;
-        let Some(target) = selected.and_then(|id| db.games.iter().find(|game| game.id == id).map(|game| game.exe.clone())) else { return Ok((0, 0, 0, 0)); };
-        let bounds = if is_global_game_exe(&target) {
-            get_global_viewport()
+        let Some(game) = db.games.iter().find(|game| game.id == folder_id) else { return Ok(None); };
+        let (bounds, minimized) = if is_global_game_exe(&game.exe) {
+            (get_global_viewport(), false)
         } else {
-            get_game_client_bounds(&target)?
+            let Some(hwnd) = find_window_by_exe(&game.exe) else { return Ok(None); };
+            (get_window_client_bounds(hwnd)?, unsafe { winapi::um::winuser::IsIconic(hwnd) != 0 })
         };
         let position = window.inner_position().map_err(|e| e.to_string())?;
-        Ok(bounds.overlay_origin(position))
+        Ok(bounds.overlay_origin(position, minimized))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (window, state);
-        Ok((0, 0, 0, 0))
+        let _ = (window, state, folder_id);
+        Ok(None)
     }
 }
 

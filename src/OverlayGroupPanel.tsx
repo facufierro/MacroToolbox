@@ -8,7 +8,7 @@ import type { OverlayGroup, OverlayItem } from "./types";
 const PART_ICONS = { timer: "clock", icon: "image", bar: "chart-simple", text: "font" } as const;
 const PART_LABELS = { timer: "Timer", icon: "Icon", bar: "Bar", text: "Text" } as const;
 
-export function OverlayGroupPanel({ group, items, timers, gameExe, children, onSave, onEnabledChange, onDelete, onAdd, onHotkey }: {
+export function OverlayGroupPanel({ group, items, timers, gameExe, children, onSave, onEnabledChange, onDuplicate, onDelete, onAdd, onHotkey }: {
   group: OverlayGroup;
   items: OverlayItem[];
   timers: OverlayItem[];
@@ -16,6 +16,7 @@ export function OverlayGroupPanel({ group, items, timers, gameExe, children, onS
   children: ReactNode;
   onSave: (group: OverlayGroup, members: string[]) => Promise<void>;
   onEnabledChange: (enabled: boolean) => Promise<void>;
+  onDuplicate: () => Promise<void>;
   onDelete?: () => Promise<void>;
   onAdd: (type: OverlayItem["type"]) => void;
   onHotkey: () => void;
@@ -44,6 +45,12 @@ export function OverlayGroupPanel({ group, items, timers, gameExe, children, onS
     catch (error) { reportError(error); }
     finally { setSaving(false); }
   }
+  async function duplicate() {
+    setSaving(true);
+    try { await onDuplicate(); }
+    catch (error) { reportError(error); }
+    finally { setSaving(false); }
+  }
   return <fieldset className={`overlay-group${group.disabled ? " overlay-group--disabled" : ""}`} aria-label={group.name || "Overlay"} disabled={saving}>
     <div className="section-head overlay-group__head">
       <h3>{group.name || "Overlay"}</h3>
@@ -51,6 +58,7 @@ export function OverlayGroupPanel({ group, items, timers, gameExe, children, onS
       <div className="section-head__actions">
         <IconButton icon="plus" label="Add hotkey" className="btn btn--ghost btn--sm" onClick={onHotkey} />
         <IconButton showLabel icon="gear" label="Settings" className="btn btn--ghost btn--sm" aria-expanded={editing} onClick={() => editing ? setEditing(false) : edit()} />
+        <IconButton icon="copy" label="Duplicate overlay" className="icon-btn" onClick={duplicate} />
         {onDelete && <IconButton icon="trash-can" label="Delete overlay" className="icon-btn icon-btn--danger" onClick={() => onDelete().catch(error => reportError(error))} />}
         <EnableSwitch enabled={!group.disabled} label={`${group.name || "Overlay"} enabled`} onChange={value => onEnabledChange(value).catch(error => reportError(error))} />
       </div>

@@ -1,14 +1,27 @@
 import "./overlayParts.css";
-import type { CSSProperties } from "react";
-import type { OverlayItem } from "./types";
+import { Children, type CSSProperties, type ReactNode } from "react";
+import type { OverlayGroup, OverlayItem } from "./types";
 import { getOverlayItemPosition } from "./overlayPosition";
+
+export function OverlayGroupView({ group, origin, children }: { group: OverlayGroup; origin: [number, number, number, number]; children: ReactNode }) {
+  const flow = group.layout === "row" || group.layout === "column";
+  return <div style={{ position: "absolute",
+    ...getOverlayItemPosition({ x: group.x ?? 0, y: group.y ?? 0 }, origin),
+    ...(flow ? { display: "flex", flexDirection: group.layout as "row" | "column", alignItems: "center", gap: group.gap ?? 8 } : {}) }}>
+    {flow ? Children.map(children, (child, index) => index === 0 ? child :
+      <div className={`ov-flow-slot ov-flow-slot--${group.layout}`}>{child}</div>) : children}
+  </div>;
+}
 
 export function OverlayItemView({ item, origin, remainingMs, value, flow, onMount }: { item: OverlayItem; origin: [number, number, number, number]; remainingMs: number | null; value?: number; flow?: boolean; onMount: (el: HTMLElement | null) => void }) {
   // Put position on the wrapper so getBoundingClientRect() returns real bounds for hit-testing.
   // Inner components get an empty style so they don't double-apply the offset.
-  const pos: CSSProperties = flow ? { position: "relative", flexShrink: 0 } : {
-    position: "absolute",
-    ...getOverlayItemPosition(item, origin),
+  const pos: CSSProperties = {
+    display: "flex",
+    ...(flow ? { position: "relative", flexShrink: 0 } : {
+      position: "absolute",
+      ...getOverlayItemPosition(item, origin),
+    }),
   };
   switch (item.type) {
     case "timer": return <div ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;
@@ -25,7 +38,7 @@ function TimerView({ item, style, remainingMs }: { item: OverlayItem & { type: "
   const color = ms === 0 ? "#f87171" : item.color;
 
   return (
-    <div style={{ ...style, color, fontSize: item.font_size }} className={`ov-timer${ms === 0 ? " ov-timer--done" : ""}`}>
+    <div style={{ ...style, color, fontSize: item.font_size }} className={`ov-timer${item.show_background === false ? " ov-timer--no-background" : ""}${ms === 0 ? " ov-timer--done" : ""}`}>
       <div className="ov-timer__time">{m}:{s}</div>
     </div>
   );
