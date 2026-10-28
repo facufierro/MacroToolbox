@@ -1,7 +1,8 @@
 ; One executor owns all node trees. A tick advances ready branches without sleeping
 ; through another branch's delay, hold, or input wait.
 class BehaviorExecutor {
-    __New() {
+    __New(physicalOwner := 0) {
+        this.physicalOwner := physicalOwner
         this.runs := Map()
         this.latches := Map()
         this.nextId := 0
@@ -139,7 +140,7 @@ class BehaviorExecutor {
                 task.held := true
                 keys := RegExReplace(node["key"], "[,\s]+", " ")
                 task.keys := HoldKeyList(keys)
-                HoldChordDown(task.id, keys, "", execution.modifiers, false)
+                HoldChordDown(task.id, keys, "", execution.modifiers, false, this.physicalOwner)
                 duration := Integer(node.Get("duration", "30"))
                 task.due := now + duration
                 if kind = "press" && duration <= 6 {
@@ -184,7 +185,7 @@ class BehaviorExecutor {
                 task.keys := task.mouse.modifiers
                 if task.keys.Length {
                     task.held := true
-                    HoldChordDown(task.id, StrJoinKeys(task.keys), "", execution.modifiers, false)
+                    HoldChordDown(task.id, StrJoinKeys(task.keys), "", execution.modifiers, false, this.physicalOwner)
                     task.due := A_TickCount + 30
                 }
             }
@@ -244,13 +245,13 @@ class BehaviorExecutor {
         failure := 0
         if task.held {
             task.held := false
-            try HoldChordUp(task.id)
+            try HoldChordUp(task.id, this.physicalOwner)
             catch Error as caught {
                 failure := caught
                 ; A delivery failure must not abandon the other branches. Ownership
                 ; has already been decremented; retry only this task's unshared ups.
                 for key in task.keys
-                    if !heldOutputCounts.Has(key) && syntheticDown.Has(key) && !GetKeyState(key, "P") && !(key = "RCtrl" && copilotCtrlHeld)
+                    if !heldOutputCounts.Has(key) && syntheticDown.Has(key) && !PhysicalOwnsOutput(key, this.physicalOwner) && !(key = "RCtrl" && copilotCtrlHeld)
                         try SendOwnedKeyUp(key, true)
             }
         }

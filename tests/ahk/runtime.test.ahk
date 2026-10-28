@@ -1,4 +1,5 @@
 global behaviorRuntime := BehaviorExecutor(), runtimeActions := [], nativePosts := [], testOnPost := 0
+global testHotkeys := [], testHotCriterion := 0
 RunRuntimeTest("parallel branches make progress while a sibling holds", TestParallelHold)
 RunRuntimeTest("sequences wait for their previous action", TestStructuredSequence)
 RunRuntimeTest("focus loss cancels delays and releases owned keys", TestRuntimeFocusLoss)
@@ -28,17 +29,30 @@ RunRuntimeTest("fresh presses replace pending delays and release the previous ru
 RunRuntimeTest("holding a trigger does not restart its behavior", TestHeldTriggerLatch)
 RunRuntimeTest("physical releases clear every matching latch and preserve unrelated chords", TestCompletedChordRelease)
 RunRuntimeTest("retriggering during input delivery cannot resume the cancelled activation", TestRetriggerDuringDelivery)
-FileAppend("All 29 structured runtime tests passed.`n", "*")
+RunRuntimeTest("modified triggers consume repeats and release after their modifier goes up", TestModifiedTriggerConsumption.Bind(false))
+RunRuntimeTest("a consumed modified trigger cannot fall through to its plain-key behavior", TestModifiedTriggerConsumption.Bind(true))
+RunRuntimeTest("stopping a behavior still consumes its original trigger release", TestStoppedTriggerConsumption)
+RunRuntimeTest("releasing a chord prefix does not leak its activating key", TestChordTriggerConsumption)
+RunRuntimeTest("hook recovery clears consumed presses whose releases were lost", TestConsumedTriggerRecovery)
+RunRuntimeTest("E sends complete taps while its cast waits for a click", TestConsumedSelfPress.Bind(false))
+RunRuntimeTest("a quick E release preserves its configured tap duration", TestConsumedSelfPress.Bind(true))
+RunRuntimeTest("consumed E preserves other behaviors holding the same output", TestConsumedSharedOutput)
+RunRuntimeTest("consumed E preserves independent physical keys and modifiers", TestConsumedIndependentOutput)
+RunRuntimeTest("failed delivery of a consumed key still releases its output", TestConsumedOutputFailure)
+FileAppend("All 39 structured runtime tests passed.`n", "*")
 ExitApp 0
 
 RunRuntimeTest(name, test) {
-    global runtimeActions, nativePosts, testOnPost
+    global runtimeActions, nativePosts, testOnPost, testHotkeys, testHotCriterion, behaviorRuntime
     runtimeActions := []
     nativePosts := []
     testOnPost := 0
+    testHotkeys := []
+    testHotCriterion := 0
     RunTest(name, test)
     Assert(behaviorRuntime.runs.Count = 0, name " left a running behavior")
     behaviorRuntime.Stop()
+    behaviorRuntime := BehaviorExecutor()
 }
 
 Action(type, fields*) {
@@ -463,9 +477,231 @@ TestScriptSectionOwnership() {
     Assert(!behaviorRuntime.runs.Count, "calling-section disable left its script work running")
 }
 
-TestHotkey(*) {
+TriggerTestHost(plain := false, chord := "SC013", steps := 0) {
+    global behaviorRuntime
+    if !IsObject(steps)
+        steps := [Action("press", "key", "NumpadEnter"), Action("send", "text", "!trade rep"),
+            Action("press", "key", "NumpadEnter"), Action("press", "key", "Tab"),
+            Action("startoverlay", "itemId", "rep", "restart", true)]
+    binding := Map("key", "$<!SC013", "trigger", chord = "SC013" ? "lalt r" : "lalt q r", "modifiers", "!", "chord", chord,
+        "prerequisites", chord = "SC013" ? "" : "q", "specificity", chord = "SC013" ? 0 : 1, "exact", true,
+        "toggle", false, "section", "hotkeys", "steps", steps)
+    bindings := [binding]
+    if plain
+        bindings.Push(Map("key", "$*SC013", "trigger", "r", "modifiers", "", "chord", "SC013",
+            "prerequisites", "", "specificity", 0, "exact", false, "toggle", false,
+            "section", "hotkeys", "steps", [Action("press", "key", "r")]))
+    host := BindingHost()
+    host.Apply([Map("id", "profile", "target", "Game.exe", "armed", true, "revision", "same", "bindings", bindings)])
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    return host
 }
-TestHotIf(*) {
+
+SelfTriggerTestHost(steps, wildcard := false) {
+    global behaviorRuntime
+    binding := Map("key", wildcard ? "$*SC012" : "$SC012", "trigger", "e", "modifiers", "", "chord", "SC012",
+        "prerequisites", "", "specificity", 0, "exact", !wildcard, "toggle", false, "section", "hotkeys", "steps", steps)
+    host := BindingHost()
+    host.Apply([Map("id", "profile", "target", "Game.exe", "armed", true, "revision", "same", "bindings", [binding])])
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    return host
+}
+
+TestConsumedSelfPress(quick) {
+    global testHeldKeys, testWaitQueue, testRawPacket
+    host := SelfTriggerTestHost([Action("press", "key", "e", "duration", "80"), Action("waitfor", "key", "LButton"),
+        Action("startoverlay", "itemId", "timer", "restart", true)])
+    loop 2 {
+        testHeldKeys := Map("e", true, "SC012", true)
+        testWaitQueue := [InputBatch([])]
+        DispatchTestHotkey("$SC012")
+        if quick {
+            testHeldKeys := Map()
+            DispatchTestHotkey("$*SC012 up")
+            Assert(testEvents.Length = (A_Index - 1) * 2 + 1, "physical E release shortened its configured tap")
+        }
+        Sleep 130
+        Assert(testEvents.Length = A_Index * 2 && testEvents[A_Index * 2]["keys"] = "{blind}{e up}",
+            "consuming E's physical release left its configured E press stuck down")
+        Assert(testInputCallbacks.Count = 1, "E did not reach its click wait")
+        testHeldKeys := Map()
+        DispatchTestHotkey("$*SC012 up")
+    }
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}", "{blind}{e downr}", "{blind}{e up}"])
+    testRawPacket := InputEvent("LButton", true)["raw"]
+    for callback in testInputCallbacks
+        callback.Call(0, 42, 0xFF, A_ScriptHwnd)
+    AwaitRuns()
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].id = "timer", "repeated E presses left stale casts waiting")
+}
+
+TestConsumedSharedOutput() {
+    global testHeldKeys
+    host := SelfTriggerTestHost([Action("hold", "key", "e")])
+    testHeldKeys := Map("e", true, "SC012", true, "q", true)
+    DispatchTestHotkey("$SC012")
+    StartBehaviorRun("other", [Action("hold", "key", "e")], "", "Game.exe", "", "q")
+    Sleep 60
+    AssertKeys(["{blind}{e downr}"])
+    Assert(heldOutputCounts["e"] = 2, "E lost a shared hold owner")
+    behaviorRuntime.Cancel("profile:e")
+    testHeldKeys["e"] := false
+    testHeldKeys["SC012"] := false
+    DispatchTestHotkey("$*SC012 up")
+    Assert(testEvents.Length = 1 && heldOutputCounts["e"] = 1, "E released another behavior's output")
+    testHeldKeys["q"] := false
+    AwaitRuns()
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}"])
+}
+
+TestConsumedIndependentOutput() {
+    global testHeldKeys
+    host := SelfTriggerTestHost([Action("press", "key", "e x rctrl lshift lwin")], true)
+    testHeldKeys := Map("e", true, "SC012", true, "x", true, "RCtrl", true, "LShift", true, "LWin", true)
+    DispatchTestHotkey("$*SC012")
+    AwaitRuns()
+    AssertKeys(["{blind}{e downr}", "{blind}{x downr}", "{blind}{e up}"])
+    for key in ["x", "RCtrl", "LShift", "LWin"]
+        Assert(testHeldKeys[key], "consuming E altered independent physical " key)
+    testHeldKeys["e"] := false
+    testHeldKeys["SC012"] := false
+    DispatchTestHotkey("$*SC012 up")
+}
+
+TestConsumedOutputFailure() {
+    global testHeldKeys, testOnSend
+    host := SelfTriggerTestHost([Action("press", "key", "e")])
+    testHeldKeys := Map("e", true, "SC012", true)
+    testOnSend := FailConsumedDown
+    DispatchTestHotkey("$SC012")
+    AwaitRuns()
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}"])
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "failed E delivery was not reported")
+    testHeldKeys := Map()
+    DispatchTestHotkey("$*SC012 up")
+}
+
+FailConsumedDown(keys) {
+    global testOnSend
+    if InStr(keys, "{e downr}") {
+        testOnSend := 0
+        throw Error("simulated E delivery failure")
+    }
+}
+
+TestModifiedTriggerConsumption(plain) {
+    global testHeldKeys, testLogicalKeys
+    testHeldKeys := Map("LAlt", true, "SC013", true)
+    host := TriggerTestHost(plain)
+    DispatchTestHotkey("$<!SC013")
+    Assert(testEvents.Length = 1, "modified trigger did not start its configured command")
+    ; Sending the command neutralizes Alt; releasing Alt physically has the same effect.
+    testLogicalKeys["LAlt"] := false
+    testHeldKeys["LAlt"] := false
+    repeatEvent := DispatchTestHotkey("$*SC013")
+    Assert(IsObject(repeatEvent) && !repeatEvent.passthrough, "Alt+R leaked a plain R repeat after Alt was released")
+    AwaitRuns()
+    AssertKeys(["{blind!}{numpadenter downr}", "{blind!}{numpadenter up}", "{text}!trade rep",
+        "{blind!}{numpadenter downr}", "{blind!}{numpadenter up}", "{blind!}{tab downr}", "{blind!}{tab up}"])
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].id = "rep", "suppression altered the configured command")
+    count := testEvents.Length
+    DispatchTestHotkey("$*SC013")
+    Assert(testEvents.Length = count, "a completed macro replayed while R stayed held")
+    testHeldKeys["SC013"] := false
+    releaseEvent := DispatchTestHotkey("$*SC013 up")
+    Assert(IsObject(releaseEvent) && !releaseEvent.passthrough, "Alt+R leaked its R release to the app")
+    testHeldKeys["SC013"] := true
+    fresh := DispatchTestHotkey("$*SC013")
+    if plain {
+        Assert(IsObject(fresh), "fresh R did not activate its configured plain-key behavior")
+        AwaitRuns()
+        Assert(testEvents[count + 1]["keys"] = "{blind}{r downr}", "fresh plain R sent the wrong output")
+    } else
+        Assert(!IsObject(fresh), "fresh plain R remained blocked after releasing Alt+R")
+    testHeldKeys["SC013"] := false
+    DispatchTestHotkey("$*SC013 up")
+}
+
+TestStoppedTriggerConsumption() {
+    global testHeldKeys
+    testHeldKeys := Map("LAlt", true, "SC013", true)
+    host := TriggerTestHost(false,, [Action("hold", "key", "x")])
+    DispatchTestHotkey("$<!SC013")
+    behaviorRuntime.Stop()
+    testHeldKeys["LAlt"] := false
+    testHeldKeys["SC013"] := false
+    releaseEvent := DispatchTestHotkey("$*SC013 up")
+    Assert(IsObject(releaseEvent) && !releaseEvent.passthrough, "stopping the behavior leaked its consumed key-up")
+    testHeldKeys["SC013"] := true
+    Assert(!IsObject(DispatchTestHotkey("$*SC013")), "stopping a behavior blocked a later plain R")
+}
+
+TestChordTriggerConsumption() {
+    global testHeldKeys
+    testHeldKeys := Map("LAlt", true, "q", true, "SC013", true)
+    host := TriggerTestHost(false, "q SC013", [Action("hold", "key", "x")])
+    DispatchTestHotkey("$<!SC013")
+    testHeldKeys["q"] := false
+    prefixRelease := DispatchTestHotkey("$*q up")
+    Assert(IsObject(prefixRelease) && prefixRelease.passthrough, "the unconsumed chord prefix was blocked")
+    AwaitRuns()
+    testHeldKeys["LAlt"] := false
+    repeatEvent := DispatchTestHotkey("$*SC013")
+    Assert(IsObject(repeatEvent) && !repeatEvent.passthrough, "releasing a chord prefix leaked the held activating key")
+    testHeldKeys["SC013"] := false
+    releaseEvent := DispatchTestHotkey("$*SC013 up")
+    Assert(IsObject(releaseEvent) && !releaseEvent.passthrough, "the chord's activating key-up leaked")
+}
+
+TestConsumedTriggerRecovery() {
+    global testHeldKeys
+    testHeldKeys := Map("LAlt", true, "SC013", true)
+    host := TriggerTestHost(false,, [Action("sleep", "ms", "1000")])
+    DispatchTestHotkey("$<!SC013")
+    behaviorRuntime.Stop()
+    testHeldKeys["LAlt"] := false
+    host.ResetInput()
+    Assert(!IsObject(DispatchTestHotkey("$*SC013")), "hook recovery left the old trigger consumed")
+}
+
+; Model HotIf variant selection without installing hooks or injecting global input.
+TestHotkey(key, callback := "", options := "", *) {
+    global testHotkeys, testHotCriterion
+    identity := StrReplace(StrReplace(key, "$"), "~")
+    for item in testHotkeys
+        if item.key = identity && item.criterion = testHotCriterion {
+            if IsObject(callback)
+                item.callback := callback
+            if !IsObject(callback) && (callback = "On" || callback = "Off")
+                item.enabled := callback = "On"
+            return
+        }
+    if IsObject(callback)
+        testHotkeys.Push({key: identity, criterion: testHotCriterion, callback: callback,
+            enabled: !InStr(options, "Off"), passthrough: InStr(key, "~") != 0})
+}
+TestHotIf(criterion := 0, *) {
+    global testHotCriterion
+    testHotCriterion := criterion
+}
+DispatchTestHotkey(key) {
+    identity := StrReplace(StrReplace(key, "$"), "~")
+    fallback := 0
+    for item in testHotkeys {
+        if item.key != identity || !item.enabled
+            continue
+        if !IsObject(item.criterion) {
+            fallback := item
+            continue
+        }
+        if item.criterion.Call(key) {
+            item.callback.Call(key)
+            return item
+        }
+    }
+    if IsObject(fallback)
+        fallback.callback.Call(key)
+    return fallback
 }
 
 TestRuntimeAction(profile, kind, id, value := "") {

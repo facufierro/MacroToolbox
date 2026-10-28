@@ -21,6 +21,8 @@ The bottom console opens for new errors from the app, overlay, cloud backup, and
 - Target folders own application targets and shared state definitions. Profiles own their behaviors, overlay items, scripts, and running work.
 - `press` taps a key combination. `hold` and `repeat` last until trigger release. A sequence waits for each action; a parallel group advances independent branches and completes when every branch finishes.
 - Pressing a hotkey again after releasing it replaces that hotkey's pending activation, including click waits and delays. Its configured key presses or text are sent again; the cancelled activation releases its inputs and input observers. Holding the trigger does not restart the behavior.
+- A matched hotkey consumes its activating key's repeats and release until that key is released, even if its modifiers are released first or its behavior has already finished. A later plain press works normally.
+- Sending the trigger itself still produces a complete configured press. Its intercepted physical hold does not extend the output; independent physical keys and shared output owners remain held.
 - Trigger release completes holds/repeats and permits trailing sequence actions. Focus loss cancels running behaviors and releases their inputs. Shared states and countdowns continue.
 - Disabling a profile cancels its work, stops its scripts, and removes its overlay timers. Folder-owned shared states remain available to other profiles.
 - App lifecycle handlers use the same actions. Handlers dispatched while the target is unfocused may update state, overlays, and window properties; input actions require target focus. Event/API holds have the target/profile lifetime.

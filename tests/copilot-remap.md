@@ -12,10 +12,17 @@ After rebuilding and restarting MacroToolbox, verify these with the physical key
    continuously until that release, without repeating or sticking.
 5. Hold physical Right Ctrl, Win, or Shift independently while using Copilot. The
    remap should retain those keys until their own releases.
+6. In the target game, compare physical Right Ctrl with Copilot for the same
+   shortcut. Press the second key immediately after Copilot as well as after a
+   several-second hold. Repeat with Shift, then release in either order. Both
+   timings should produce the Ctrl action without Start, an extra Shift, or a
+   plain-key action. Repeat the browser shortcuts after the game checks.
 
 The isolated input-owner tests run with
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-ahk-behavior.ps1 -Engine copilot`.
-They exercise the production state transitions with an in-memory input sink and do
-not install keyboard hooks or inject input. They also validate the production
-hotkey declarations without running them. The physical checks above cover the
+They exercise the production state transitions, including delayed F23 recognition,
+physical presses and quick taps arriving between modifier transitions, and
+restoration of the caller's key timing, with an in-memory input sink. They do not
+install keyboard hooks or inject input. They also validate the production hotkey
+declarations without running them. The physical checks above cover the
 Windows shell and the target keyboard's compound Copilot sequence.
