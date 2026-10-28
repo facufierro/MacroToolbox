@@ -28,7 +28,7 @@
             {
                 "name": "$(package) Build",
                 "color": "#4ade80",
-                "command": "powershell -NoProfile -ExecutionPolicy Bypass -File '${workspaceFolder}\\.vscode\\scripts\\run-action.ps1' -ActionName '$(package) Build' -CommandText 'powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1'",
+                "command": "powershell -NoProfile -ExecutionPolicy Bypass -File '${workspaceFolder}\\.vscode\\scripts\\run-action.ps1' -ActionName '$(package) Build' -CommandText 'powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\package-release.ps1 -PrepareTests'",
                 "tooltip": "Package a release build via scripts/package-release.ps1",
                 "singleInstance": true,
                 "focus": true

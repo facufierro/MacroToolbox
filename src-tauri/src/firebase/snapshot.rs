@@ -55,7 +55,7 @@ pub fn capture(database: Database) -> Result<Capture, String> {
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
     let snapshot: Snapshot =
         serde_json::from_slice(bytes).map_err(|_| "Cloud backup has an invalid format.")?;
-    if snapshot.format != 1 || snapshot.database.version != config::CURRENT_DB_VERSION {
+    if snapshot.format != 1 || !(4..=config::CURRENT_DB_VERSION).contains(&snapshot.database.version) {
         return Err("This backup requires a different MacroToolbox version.".into());
     }
     if snapshot.files.keys().cloned().collect::<BTreeSet<_>>() != linked_paths(&snapshot.database) {
@@ -120,6 +120,9 @@ impl Snapshot {
             }
         }
         config::ensure_global_folder(&mut self.database);
+        config::normalize_states(&mut self.database);
+        config::normalize_overlays(&mut self.database);
+        self.database.version = config::CURRENT_DB_VERSION;
         Ok(self.database)
     }
 }

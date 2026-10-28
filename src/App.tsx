@@ -1,3 +1,4 @@
+import { Icon, IconButton } from "./Icon";
 import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
@@ -5,10 +6,18 @@ import { open as openDialog, save as saveDialog, ask } from "@tauri-apps/plugin-
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { api } from "./api";
+import { useErrorReporter } from "./AppConsole";
 import { CloudSettings } from "./CloudSettings";
+import { KeyInput, useBindingRecorder } from "./KeyInput";
+import { EnableSwitch } from "./EnableSwitch";
+import { ProfileSection } from "./ProfileSection";
+import { OverlayGroupPanel } from "./OverlayGroupPanel";
+import { BehaviorStepsEditor, GotoInput } from "./BehaviorEditor";
+import { mapScriptActions, withReferencedScripts, carryReferencedScripts, removeScriptReferences } from "./scriptReferences";
+import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step } from "./behaviors";
 import { allowsExtraModifiers } from "./hotkeyModifiers";
-import { availableStates, carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
-import { availableOverlayItems, mapOverlayActions, removeOverlayItem } from "./overlayItems";
+import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
+import { availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, removeOverlayGroup, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
 import type {
   Database,
   Scope,
@@ -17,6 +26,8 @@ import type {
   BehaviorEvent,
   BehaviorEventKind,
   OverlayItem,
+  OverlayGroup,
+  OverlayTarget,
   ProfileState,
   Script,
   ProfileKind,
@@ -27,8 +38,8 @@ type Modal =
   | { type: "addGame" }
   | { type: "editGame"; game: Scope }
   | { type: "profileSettings"; gameId: string; profile: Profile; isNew: boolean }
-  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string; states: ProfileState[]; overlays: OverlayItem[] }
-  | { type: "editEvent"; gameId: string; profileId: string; index: number | null; event: BehaviorEvent; eventKinds: BehaviorEventKind[]; gameExe: string; states: ProfileState[]; overlays: OverlayItem[] }
+  | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string; states: ProfileState[]; overlays: OverlayTarget[] }
+  | { type: "editEvent"; gameId: string; profileId: string; index: number | null; event: BehaviorEvent; eventKinds: BehaviorEventKind[]; gameExe: string; states: ProfileState[]; overlays: OverlayTarget[] }
   | { type: "copyHotkey"; sourceGameId: string; sourceProfileId: string; hotkey: Hotkey }
   | { type: "setParent"; gameId: string; profile: Profile }
   | { type: "copyProfile"; sourceGameId: string; profile: Profile }
@@ -49,7 +60,7 @@ function uid() {
 
 /** A folder owns one app target shared by all of its profiles. */
 function blankGame(): Scope {
-  return { id: uid(), name: "", exe: "", image: null, profiles: [] };
+  return { id: uid(), name: "", exe: "", image: null, profiles: [], states: [] };
 }
 
 /** A profile owns the behaviors that run against its folder's app target. */
@@ -82,22 +93,23 @@ function blankScript(): Script { return { id: uid(), name: "", enabled: true, tr
 type LegacyProfileExport = Profile & { exe?: string };
 type LegacyScopeExport = Omit<Scope, "exe" | "profiles"> & { exe?: string; profiles: LegacyProfileExport[] };
 
-function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, string>, stateIds?: Map<string, string>, itemIds?: Map<string, string>): Profile {
+function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, string>, stateIds?: Map<string, string>, itemIds?: Map<string, string>, scriptIds?: Map<string, string>, groupIds?: Map<string, string>): Profile {
   const { exe: _legacyExe, ...profileData } = profile;
   const stateMap = stateIds ?? new Map(profile.states.map(s => [s.id, uid()]));
   const stateId = (id: string) => stateMap.get(id) ?? id;
   const itemMap = itemIds ?? new Map(profile.overlay_items.map(item => [item.id, uid()]));
-  const remapBehavior = (behavior: string) => mapOverlayActions(mapStateActions(behavior, stateId), id => itemMap.get(id) ?? id);
-  const groupMap = new Map((profile.overlay_groups ?? []).map(g => [g.id, uid()]));
-  return {
+  const scriptMap = scriptIds ?? new Map((profile.scripts ?? []).map(script => [script.id, uid()]));
+  const remapBehavior = (behavior: string) => mapScriptActions(mapStateActions(behavior, stateId), id => scriptMap.get(id) ?? id);
+  const groupMap = groupIds ?? new Map((profile.overlay_groups ?? []).map(g => [g.id, uid()]));
+  const mapped: Profile = {
     ...profileData,
     id: profileIds?.get(profile.id) ?? uid(),
     armed: false,
     parent_id: profile.parent_id ? (profileIds?.get(profile.parent_id) ?? profile.parent_id) : null,
     events: (profile.events ?? []).map(event => ({ ...event, behavior: remapBehavior(event.behavior) })),
-    scripts: (profile.scripts ?? []).map(s => ({ ...s, id: uid() })),
+    scripts: (profile.scripts ?? []).map(s => ({ ...s, id: scriptMap.get(s.id)! })),
     states: profile.states.map(s => ({ ...s, id: stateMap.get(s.id)! })),
-    overlay_groups: (profile.overlay_groups ?? []).map(g => ({ ...g, id: groupMap.get(g.id)! })),
+    overlay_groups: profile.overlay_groups ?? [],
     hotkeys: profile.hotkeys.map(h => ({
       ...h,
       behavior: remapBehavior(h.behavior),
@@ -105,25 +117,34 @@ function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, 
     })),
     overlay_items: profile.overlay_items.map(item => ({
       ...item,
-      id: itemMap.get(item.id)!,
       state_id: item.state_id ? stateId(item.state_id) : null,
-      group_id: item.group_id ? (groupMap.get(item.group_id) ?? null) : null,
       ...(item.type === "timer" && item.timer_state_id
         ? { timer_state_id: stateId(item.timer_state_id) }
         : {}),
     })),
   };
+  return remapOverlayReferences(mapped, id => itemMap.get(id) ?? groupMap.get(id) ?? id);
 }
 
-async function exportProfile(profile: Profile, profiles: Profile[]) {
+function materializeProfile(profile: Profile, profiles: Profile[]): Profile {
+  return { ...profile, parent_id: null,
+    hotkeys: resolveHotkeys(profiles, profile).map(({ hotkey }) => hotkey),
+    events: resolveEvents(profiles, profile).map(({ event }) => event),
+    overlay_items: resolveOverlayItems(profiles, profile).map(({ item }) => item),
+    overlay_groups: resolveOverlayGroups(profiles, profile),
+  };
+}
+
+async function exportProfile(profile: Profile, folder: Scope) {
+  const profiles = folder.profiles;
   const path = await saveDialog({
     title: "Export Profile",
     defaultPath: `${profile.name || "profile"}.hkm-profile`,
     filters: [{ name: "HKM Profile", extensions: ["hkm-profile"] }],
   });
   if (!path) return;
-  const states = availableStates(profiles, resolveStates(profiles, profile).map(({ state }) => state));
-  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data: withReferencedStates(profile, states) }, null, 2));
+  const states = folder.states;
+  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data: withReferencedScripts(withReferencedStates(withReferencedOverlayParts(materializeProfile(profile, profiles), profiles), states), profiles.flatMap(profile => profile.scripts)) }, null, 2));
 }
 
 async function exportScope(scope: Scope) {
@@ -159,11 +180,13 @@ async function importScope(): Promise<Scope[] | null> {
   if (raw.type !== "scope") throw new Error("File is not a scope export");
   const scope = raw.data as LegacyScopeExport;
   const profileIds = new Map(scope.profiles.map(profile => [profile.id, uid()]));
-  const stateIds = new Map(scope.profiles.flatMap(profile => profile.states.map(state => [state.id, uid()] as const)));
+  const stateIds = new Map([...(scope.states ?? []), ...scope.profiles.flatMap(profile => profile.states ?? [])].map(state => [state.id, uid()] as const));
   const itemIds = new Map(scope.profiles.flatMap(profile => profile.overlay_items.map(item => [item.id, uid()] as const)));
+  const scriptIds = new Map(scope.profiles.flatMap(profile => (profile.scripts ?? []).map(script => [script.id, uid()] as const)));
+  const groupIds = new Map(scope.profiles.flatMap(profile => (profile.overlay_groups ?? []).map(group => [group.id, uid()] as const)));
   let entries = scope.profiles.map(profile => ({
     target: typeof scope.exe === "string" ? scope.exe.trim() : (profile.exe ?? "").trim(),
-    profile: remapProfileIds(profile, profileIds, stateIds, itemIds),
+    profile: remapProfileIds(profile, profileIds, stateIds, itemIds, scriptIds, groupIds),
   }));
 
   const allProfiles = entries.map(entry => entry.profile);
@@ -204,6 +227,7 @@ async function importScope(): Promise<Scope[] | null> {
       : `${scope.name} (${isGlobalExe(group.exe) ? "Any app" : group.exe || "No app"})`,
     exe: group.exe,
     profiles: group.profiles,
+    states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));
 }
 
@@ -220,211 +244,6 @@ function formatDuration(ms: number | null) {
 function stateNameById(states: ProfileState[], stateId: string | null | undefined) {
   if (!stateId) return null;
   return states.find(state => state.id === stateId)?.name ?? null;
-}
-
-function sideModifier(code: string): string | null {
-  const map: Record<string, string> = {
-    ControlLeft: "lctrl",
-    ControlRight: "rctrl",
-    ShiftLeft: "lshift",
-    ShiftRight: "rshift",
-    AltLeft: "lalt",
-    AltRight: "ralt",
-    MetaLeft: "lwin",
-    MetaRight: "rwin",
-  };
-  return map[code] ?? null;
-}
-
-function bindingModifiers(
-  e: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean },
-  activeSideModifiers: Set<string> = new Set(),
-) {
-  const mods: string[] = [];
-  // AltGr (RAlt on non-US layouts) arrives as a synthetic LCtrl held together with
-  // RAlt — drop that phantom Ctrl so AltGr combos record as plain ralt.
-  const altGr = activeSideModifiers.has("ralt");
-  const isHeld = (mod: string) => activeSideModifiers.has(mod) && !(altGr && mod === "lctrl");
-  const addSideOrGeneric = (left: string, right: string, generic: string, active: boolean) => {
-    const sides = [left, right].filter(isHeld);
-    if (sides.length) mods.push(...sides);
-    else if (active) mods.push(generic);
-  };
-  addSideOrGeneric("lctrl", "rctrl", "ctrl", e.ctrlKey && !altGr);
-  addSideOrGeneric("lshift", "rshift", "shift", e.shiftKey);
-  addSideOrGeneric("lalt", "ralt", "alt", e.altKey);
-  addSideOrGeneric("lwin", "rwin", "win", e.metaKey);
-  return mods;
-}
-
-function toAhkKey(e: KeyboardEvent, activeSideModifiers: Set<string>): string {
-  const mods = bindingModifiers(e, activeSideModifiers);
-  const keyMap: Record<string, string> = {
-    " ": "Space", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
-    PageUp: "PgUp", PageDown: "PgDn", Enter: "Enter", Escape: "Esc", Tab: "Tab",
-    Backspace: "Backspace", Delete: "Del", Insert: "Ins", Home: "Home", End: "End",
-    PrintScreen: "PrintScreen", NumLock: "NumLock", CapsLock: "CapsLock",
-  };
-  // Unlike e.key, e.code retains the keypad position. Keep keypad operators named so they
-  // do not collapse into the corresponding main-keyboard character.
-  const keypadKeys: Record<string, string> = {
-    NumpadDivide: "NumpadDiv",
-    NumpadMultiply: "NumpadMult",
-    NumpadSubtract: "NumpadSub",
-    NumpadAdd: "NumpadAdd",
-    NumpadEnter: "NumpadEnter",
-  };
-  let key = keypadKeys[e.code] ?? (/^Numpad[0-9]$/.test(e.code) ? e.code : e.key);
-  if (key in keyMap) key = keyMap[key];
-  else if (/^F\d+$/.test(key)) key = key.toLowerCase();
-  else if (key.length === 1) {
-    // Record the typed character when it has an AHK name, so the binding means the key
-    // label the user sees — on QWERTZ pressing Z must record "z", not the US position
-    // "y". The backend resolves it back through the active layout. Shift transforms
-    // (Shift+5 → "%"), punctuation, and characters with no AHK name (Cyrillic "й")
-    // fall back to the physical e.code position.
-    if (/^[a-z0-9]$/i.test(key)) key = key.toLowerCase();
-    else {
-      const punctCodes: Record<string, string> = {
-        Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Slash: "/", Backslash: "\\",
-        BracketLeft: "[", BracketRight: "]", Backquote: "`", Minus: "-", Equal: "=",
-      };
-      const codeMatch = e.code.match(/^(Key|Digit)(.+)$/);
-      key = codeMatch ? codeMatch[2].toLowerCase() : (punctCodes[e.code] ?? key.toLowerCase());
-    }
-  }
-  return [...mods, key].join(" ");
-}
-
-function toAhkMouseButton(e: MouseEvent, activeSideModifiers: Set<string>): string {
-  const buttonMap: Record<number, string> = {
-    0: "LButton",
-    1: "MButton",
-    2: "RButton",
-    3: "XButton1",
-    4: "XButton2",
-  };
-  const button = buttonMap[e.button];
-  if (!button) return "";
-  return [...bindingModifiers(e, activeSideModifiers), button].join(" ");
-}
-
-function useBindingRecorder(recording: boolean, onCapture: (value: string) => void, allowChord = false) {
-  const onCaptureRef = useRef(onCapture);
-  const activeSideModifiersRef = useRef<Set<string>>(new Set());
-  onCaptureRef.current = onCapture;
-
-  useEffect(() => {
-    if (!recording) return;
-
-    const heldInputs = new Map<string, string>();
-    const chordInputs: string[] = [];
-    const chordModifiers: string[] = [];
-    const rememberModifiers = (mods: string[]) => {
-      for (const mod of mods) {
-        if (!chordModifiers.includes(mod)) chordModifiers.push(mod);
-      }
-    };
-    const capture = (value: string) => {
-      if (value) onCaptureRef.current(value);
-    };
-    const rememberInput = (id: string, value: string) => {
-      if (heldInputs.has(id)) return;
-      const parts = value.split(/\s+/);
-      const key = parts.pop();
-      if (!key) return;
-      rememberModifiers(parts);
-      heldInputs.set(id, key);
-      chordInputs.push(key);
-    };
-    const releaseInput = (id: string) => {
-      if (!heldInputs.delete(id) || heldInputs.size > 0 || chordInputs.length === 0) return;
-      capture([...chordModifiers, ...chordInputs].join(" "));
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      const sideMod = sideModifier(e.code);
-      if (sideMod) {
-        activeSideModifiersRef.current.add(sideMod);
-        if (allowChord && !chordModifiers.includes(sideMod)) chordModifiers.push(sideMod);
-        return;
-      }
-      const value = toAhkKey(e, activeSideModifiersRef.current);
-      if (allowChord) rememberInput(`key:${e.code}`, value);
-      else capture(value);
-    };
-    const keyUpHandler = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      const sideMod = sideModifier(e.code);
-      if (sideMod) {
-        activeSideModifiersRef.current.delete(sideMod);
-        if (allowChord && chordInputs.length === 0 && activeSideModifiersRef.current.size === 0) {
-          const modifiers = chordModifiers.includes("ralt")
-            ? chordModifiers.filter(mod => mod !== "lctrl")
-            : chordModifiers;
-          capture(modifiers.join(" "));
-        }
-        return;
-      }
-      if (allowChord) releaseInput(`key:${e.code}`);
-    };
-    const mouseDownHandler = (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      const value = toAhkMouseButton(e, activeSideModifiersRef.current);
-      if (allowChord) rememberInput(`mouse:${e.button}`, value);
-      else capture(value);
-    };
-    const mouseUpHandler = (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (allowChord) releaseInput(`mouse:${e.button}`);
-    };
-    const contextMenuHandler = (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    };
-
-    window.addEventListener("keydown", keyHandler, true);
-    window.addEventListener("keyup", keyUpHandler, true);
-    window.addEventListener("mousedown", mouseDownHandler, true);
-    window.addEventListener("mouseup", mouseUpHandler, true);
-    window.addEventListener("contextmenu", contextMenuHandler, true);
-    return () => {
-      activeSideModifiersRef.current.clear();
-      window.removeEventListener("keydown", keyHandler, true);
-      window.removeEventListener("keyup", keyUpHandler, true);
-      window.removeEventListener("mousedown", mouseDownHandler, true);
-      window.removeEventListener("mouseup", mouseUpHandler, true);
-      window.removeEventListener("contextmenu", contextMenuHandler, true);
-    };
-  }, [recording, allowChord]);
-}
-
-function KeyInput({ value, onChange, placeholder = "Key", allowChord = false }: {
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  allowChord?: boolean;
-}) {
-  const [recording, setRecording] = useState(false);
-  useBindingRecorder(recording, key => {
-    onChange(key);
-    setRecording(false);
-  }, allowChord);
-
-  return recording ? (
-    <div className="key-recording">
-      {allowChord ? "Hold the key/button combination, then release…" : "Press any key or mouse button…"}
-    </div>
-  ) : (
-    <div className="input-row" style={{ margin: 0, flex: 1 }}>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
-      <button className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} title="Record key">⌨</button>
-    </div>
-  );
 }
 
 type ResolvedProfileEntry<T> = { value: T; own: boolean };
@@ -515,51 +334,7 @@ function TargetChip({ exe }: { exe: string }) {
 }
 
 function ArmSwitch({ armed, size, onChange }: { armed: boolean; size?: "lg"; onChange: (a: boolean) => void }) {
-  return (
-    <label className={`scope-toggle ${size === "lg" ? "" : "scope-toggle--sm"}`}
-      title={armed ? "Armed" : "Off"} onClick={e => e.stopPropagation()}>
-      <input type="checkbox" checked={armed} onChange={e => onChange(e.target.checked)} />
-      <span className="scope-toggle__track" aria-hidden="true" />
-    </label>
-  );
-}
-
-function PopoverMenu({ items, trigger = "⋯", title = "More" }: {
-  items: { label: string; danger?: boolean; onClick: () => void }[]; trigger?: string; title?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (btnRef.current?.contains(t) || menuRef.current?.contains(t)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
-  }, [open]);
-  return (
-    <>
-      <button ref={btnRef} className="icon-btn" title={title} onClick={e => {
-        e.stopPropagation();
-        const r = btnRef.current?.getBoundingClientRect();
-        if (r) setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
-        setOpen(o => !o);
-      }}>{trigger}</button>
-      {open && createPortal(
-        <div ref={menuRef} className="menu menu--fixed" style={{ top: pos.top, right: pos.right }}>
-          {items.map((it, i) => (
-            <button key={i} className={it.danger ? "menu--danger" : ""}
-              onClick={e => { e.stopPropagation(); setOpen(false); it.onClick(); }}>{it.label}</button>
-          ))}
-        </div>, document.body)}
-    </>
-  );
+  return <EnableSwitch enabled={armed} size={size} label="Profile enabled" onChange={onChange} />;
 }
 
 type CtxItem = { label: string; danger?: boolean; onClick: () => void };
@@ -601,8 +376,8 @@ function EmptyState({ title, hint, action, secondary }: {
       {hint && <p>{hint}</p>}
       {(action || secondary) && (
         <div style={{ display: "flex", gap: 8 }}>
-          {action && <button className="btn btn--primary" onClick={action.onClick}>{action.label}</button>}
-          {secondary && <button className="btn btn--ghost" onClick={secondary.onClick}>{secondary.label}</button>}
+          {action && <IconButton icon="plus" label={action.label}  className="btn btn--primary" onClick={action.onClick} />}
+          {secondary && <IconButton icon="file-import" label={secondary.label}  className="btn btn--ghost" onClick={secondary.onClick} />}
         </div>
       )}
     </div>
@@ -623,6 +398,7 @@ function Resizer({ onPointerDown }: { onPointerDown: (e: ReactPointerEvent) => v
 }
 
 function useLibraryWidth(savedWidth?: number | null) {
+  const reportError = useErrorReporter();
   const [w, setW] = useState(() => {
     const s = Number(localStorage.getItem("libW"));
     return s >= 240 && s <= 520 ? s : 300;
@@ -638,7 +414,7 @@ function useLibraryWidth(savedWidth?: number | null) {
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      void api.setLibraryWidth(Math.round(wRef.current)).catch(e => alert(`Could not save sidebar width: ${e}`));
+      void api.setLibraryWidth(Math.round(wRef.current)).catch(e => reportError(`Could not save sidebar width: ${e}`));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -656,7 +432,6 @@ function ProfileRow({ profile, folderExe, openExes, selected, onSelect, onToggle
       onClick={onSelect} onContextMenu={onContext} title={profile.name}>
       <StatusDot armed={profile.armed} active={profileAppActive(folderExe, openExes)} />
       <span className="profile-row__name">{profile.name || "Untitled"}</span>
-      <span className="target-chip">{profile.kind.charAt(0).toUpperCase() + profile.kind.slice(1)}</span>
       <ArmSwitch armed={profile.armed} onChange={onToggleArmed} />
     </button>
   );
@@ -671,37 +446,22 @@ function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfile
   onModal: (m: Modal) => void;
 }) {
   const newProfile = (kind: ProfileKind) => onModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
-  const typeItems = [
-    { label: "Hotkeys profile", onClick: () => newProfile("hotkeys") },
-    ...(hasSpecificAppTarget(folder.exe) ? [{ label: "Events profile", onClick: () => newProfile("events") }] : []),
-    { label: "Scripts profile", onClick: () => newProfile("scripts") },
-    { label: "Overlay profile", onClick: () => newProfile("overlay") },
-  ];
   return (
     <div className={`folder-group ${open ? "folder-group--open" : ""}`}>
       <div className="folder-group__head-row" onContextMenu={e => onFolderContext(e, folder)}>
         <button className="folder-group__head" onClick={onToggle}>
-          <span className="folder-group__caret" />
+          <span className="folder-group__caret"><Icon name="chevron-right" /></span>
           <span className="folder-group__name">{folder.name || "Unnamed"}</span>
         </button>
-        <PopoverMenu trigger="+" title="New profile" items={typeItems} />
+        <IconButton icon="plus" label="New profile" className="icon-btn" onClick={() => newProfile("hotkeys")} />
       </div>
-      {open && (
+      {open && visibleProfiles.length > 0 && (
         <div className="folder-group__profiles">
           {visibleProfiles.map(p => (
             <ProfileRow key={p.id} profile={p} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
               onSelect={() => onSelectProfile(p.id)} onToggleArmed={a => onToggleArmed(p.id, a)}
               onContext={e => onProfileContext(e, folder.id, p)} />
           ))}
-          {folder.profiles.length === 0 && (
-            <div className="folder-group__empty">
-              <span>New profile:</span>
-              <button className="link-btn" onClick={() => newProfile("hotkeys")}>Hotkeys</button>
-              {hasSpecificAppTarget(folder.exe) && <button className="link-btn" onClick={() => newProfile("events")}>Events</button>}
-              <button className="link-btn" onClick={() => newProfile("scripts")}>Scripts</button>
-              <button className="link-btn" onClick={() => newProfile("overlay")}>Overlay</button>
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -717,6 +477,7 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
   onFolderContext: (e: ReactMouseEvent, folder: Scope) => void;
   onDb: (db: Database) => void; onModal: (m: Modal) => void;
 }) {
+  const reportError = useErrorReporter();
   const q = query.trim().toLowerCase();
   const filtering = q !== "";
   const match = (p: Profile, folder: Scope) =>
@@ -745,18 +506,17 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
         {db.scopes.length > 0 && groups.length === 0 && <div className="library__empty">No matches</div>}
       </div>
       <div className="library__footer">
-        <button className="btn btn--ghost btn--full" onClick={() => onModal({ type: "addGame" })}>New folder</button>
-        <button className="btn btn--ghost btn--full" onClick={async () => {
+        <IconButton icon="folder-plus" label="New folder" className="btn btn--ghost btn--full" onClick={() => onModal({ type: "addGame" })} />
+        <IconButton icon="file-import" label="Import folder" className="btn btn--ghost btn--full" onClick={async () => {
           try {
             const scopes = await importScope();
             if (!scopes) return;
             let updated: Database | null = null;
             for (const scope of scopes) updated = await api.upsertGame(scope);
             if (updated) onDb(updated);
-          } catch (e) { alert(String(e)); }
-        }}>Import folder</button>
-        <button className={`btn btn--ghost btn--full ${selection.kind === "settings" ? "btn--primary" : ""}`}
-          onClick={() => onSelect({ kind: "settings" })}>Settings</button>
+          } catch (e) { reportError(e); }
+        }} />
+        <IconButton icon="gear" label="Settings" className={`btn btn--ghost btn--full ${selection.kind === "settings" ? "btn--primary" : ""}`} onClick={() => onSelect({ kind: "settings" })} />
       </div>
     </aside>
   );
@@ -768,6 +528,7 @@ function FolderModal({ initial, onSave, onClose }: {
   onSave: (g: Scope) => void;
   onClose: () => void;
 }) {
+  const reportError = useErrorReporter();
   const [name, setName] = useState(initial.name);
   const [image, setImage] = useState<string | null>(initial.image);
   const globalFolder = initial.id === GLOBAL_FOLDER_ID;
@@ -789,7 +550,7 @@ function FolderModal({ initial, onSave, onClose }: {
     try {
       setImage(await api.readImageAsDataUrl(selected as string));
     } catch (e) {
-      alert(`Failed to load image: ${e}`);
+      reportError(`Failed to load image: ${e}`);
     }
   }
 
@@ -803,10 +564,7 @@ function FolderModal({ initial, onSave, onClose }: {
             : <Placeholder />}
         </div>
         {image && (
-          <button className="btn btn--ghost btn--sm" style={{ alignSelf: "flex-start" }}
-            onClick={e => { e.stopPropagation(); setImage(null); }}>
-            ✕ Remove image
-          </button>
+          <IconButton icon="trash-can" label="Remove image"  className="btn btn--ghost btn--sm" style={{ alignSelf: "flex-start" }} onClick={e => { e.stopPropagation(); setImage(null); }} />
         )}
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Folder name" autoFocus />
         <label className="checkbox-row">
@@ -815,22 +573,22 @@ function FolderModal({ initial, onSave, onClose }: {
           <span>Any app</span>
         </label>
         {!anyApp && (
-          <div className="input-row">
-            <input value={exe} onChange={e => setExe(e.target.value)} placeholder="game.exe" />
-            <select value="" onChange={e => { if (e.target.value) setExe(e.target.value); }} title="Pick an open app">
-              <option value="">Open apps…</option>
+          <div className="form-grid form-grid--2">
+            <label>Target app <input value={exe} onChange={e => setExe(e.target.value)} placeholder="game.exe" /></label>
+            <label>Open apps <select value="" onChange={e => { if (e.target.value) setExe(e.target.value); }}>
+              <option value="">Choose app…</option>
               {openExes.map(exeName => <option key={exeName} value={exeName}>{exeName}</option>)}
-            </select>
+            </select></label>
           </div>
         )}
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave({
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" onClick={() => onSave({
             ...initial,
             name,
             exe: globalFolder || anyApp ? GLOBAL_EXE : exe.trim(),
             image,
-          })}>Save</button>
+          })} />
         </div>
       </div>
     </div>
@@ -844,7 +602,6 @@ function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
   onSave: (p: Profile) => void;
   onClose: () => void;
 }) {
-  const kind = initial.kind;
   const [name, setName] = useState(initial.name);
   const [overlayOn, setOverlayOn] = useState(!initial.overlay_disabled);
   const [toggleHotkeysKey, setToggleHotkeysKey] = useState(initial.toggle_hotkeys_key ?? "");
@@ -860,28 +617,21 @@ function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
     };
   }
 
-  const kindLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
 
   return (
     <div className="modal-overlay">
       <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>{isNew ? `New ${kindLabel} Profile` : `${kindLabel} Profile`}</h2>
+        <h2>{isNew ? "New Profile" : "Profile"}</h2>
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Profile name" autoFocus />
-        {kind === "overlay" && (
-          <label className="checkbox-row">
-            <input type="checkbox" checked={overlayOn} onChange={e => setOverlayOn(e.target.checked)} />
-            <span>Show overlay</span>
-          </label>
-        )}
-        {kind === "hotkeys" && (
-          <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} placeholder="Enable-hotkeys key" allowChord />
-        )}
-        {kind === "overlay" && (
-          <KeyInput value={toggleOverlayKey} onChange={setToggleOverlayKey} placeholder="Toggle-overlay key" allowChord />
-        )}
+        <label className="checkbox-row">
+          <input type="checkbox" checked={overlayOn} onChange={e => setOverlayOn(e.target.checked)} />
+          <span>Show overlay</span>
+        </label>
+        <KeyInput value={toggleHotkeysKey} onChange={setToggleHotkeysKey} placeholder="Enable-hotkeys key" allowChord />
+        <KeyInput value={toggleOverlayKey} onChange={setToggleOverlayKey} placeholder="Toggle-overlay key" allowChord />
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()}>Save</button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()} />
         </div>
       </div>
     </div>
@@ -889,71 +639,6 @@ function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
 }
 
 // ── Step types & helpers ──────────────────────────────────────────────────────
-
-type Step =
-  | { type: "press" | "hold" | "waitfor"; key: string }
-  | { type: "mousepress"; key: string }
-  | { type: "repeat"; key: string; interval: string; hold: string }
-  | { type: "goto"; x: string; y: string }
-  | { type: "resolution"; width: string; height: string }
-  | { type: "state"; stateId: string }
-  | { type: "startoverlay"; itemId: string; restart?: boolean }
-  | { type: "sleep"; ms: string }
-  | { type: "send"; text: string }
-  | { type: "borderless" | "fit" | "killprocess" | "lock" | "savecursor" | "restorecursor" | "stretch" };
-
-function parseSteps(behavior: string): Step[] {
-  if (!behavior.trim()) return [];
-  return behavior.split(";").map(s => s.trim()).filter(Boolean).flatMap((s): Step[] => {
-    let m: RegExpMatchArray | null;
-    if ((m = s.match(/^press\((.+)\)$/))) return [{ type: "press" as const, key: m[1] }];
-    if ((m = s.match(/^(?:mousepress|pressalt)\((.+)\)$/))) return [{ type: "mousepress" as const, key: m[1] }];
-    if ((m = s.match(/^hold\((.+)\)$/))) return [{ type: "hold" as const, key: m[1] }];
-    if ((m = s.match(/^waitfor\((.+)\)$/))) return [{ type: "waitfor" as const, key: m[1] }];
-    if ((m = s.match(/^repeat\((.+?),\s*(\d+)(?:,\s*(\d+))?\)$/))) return [{ type: "repeat" as const, key: m[1].trim(), interval: m[2], hold: m[3] ?? "6" }];
-    if ((m = s.match(/^goto\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)$/))) return [{ type: "goto" as const, x: m[1], y: m[2] }];
-    if ((m = s.match(/^resolution\((\d+)\s*,\s*(\d+)\)$/))) return [{ type: "resolution" as const, width: m[1], height: m[2] }];
-    if ((m = s.match(/^state\((.+)\)$/))) return [{ type: "state" as const, stateId: m[1] }];
-    if ((m = s.match(/^startoverlay\((.+)\)$/))) return [{ type: "startoverlay" as const, itemId: m[1] }];
-    if ((m = s.match(/^restartoverlay\((.+)\)$/))) return [{ type: "startoverlay" as const, itemId: m[1], restart: true }];
-    if ((m = s.match(/^sleep\((\d+)\)$/))) return [{ type: "sleep" as const, ms: m[1] }];
-    if ((m = s.match(/^send\((.+)\)$/))) return [{ type: "send" as const, text: m[1] }];
-    if (s === "borderless") return [{ type: "borderless" as const }];
-    if (s === "fit") return [{ type: "fit" as const }];
-    if (s === "killprocess") return [{ type: "killprocess" as const }];
-    if (s === "stretch") return [{ type: "stretch" as const }];
-    if (s === "lock") return [{ type: "lock" as const }];
-    if (s === "savecursor") return [{ type: "savecursor" as const }];
-    if (s === "restorecursor") return [{ type: "restorecursor" as const }];
-    return [];
-  });
-}
-
-function stepsToString(steps: Step[]): string {
-  return steps.map(s => {
-    switch (s.type) {
-      case "press": return `press(${s.key})`;
-      case "mousepress": return `mousepress(${s.key})`;
-      case "hold":  return `hold(${s.key})`;
-      case "waitfor": return `waitfor(${s.key})`;
-      case "repeat": return `repeat(${s.key},${s.interval},${s.hold || "6"})`;
-      case "goto":  return `goto(${s.x},${s.y})`;
-      case "resolution": return `resolution(${s.width},${s.height})`;
-      case "state": return `state(${s.stateId})`;
-      case "startoverlay": return `${s.restart ? "restartoverlay" : "startoverlay"}(${s.itemId})`;
-      case "sleep": return `sleep(${s.ms})`;
-      case "send":  return `send(${s.text})`;
-      default:      return s.type;
-    }
-  }).join(";");
-}
-
-function areStepsValid(steps: Step[]): boolean {
-  return steps.every(step => step.type !== "startoverlay" || !!step.itemId)
-    && steps.every(step => step.type !== "waitfor" || !!step.key.trim())
-    && steps.every(step => step.type !== "resolution" || [step.width, step.height].every(value =>
-    /^\d+$/.test(value) && Number(value) > 0 && Number(value) <= 0xffffffff));
-}
 
 const BEHAVIOR_EVENTS: Array<{ value: BehaviorEventKind; label: string }> = [
   { value: "app_started", label: "App started" },
@@ -969,182 +654,12 @@ function behaviorEventLabel(event: BehaviorEventKind): string {
 
 // ── Step sub-components ───────────────────────────────────────────────────────
 
-function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
-  const [picking, setPicking] = useState(false);
-
-  async function pick() {
-    setPicking(true);
-    try {
-      const [px, py] = await api.pickCoordinate(gameExe);
-      onChange(String(px), String(py));
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setPicking(false);
-    }
-  }
-
-  return (
-    <div className="goto-input">
-      <input type="number" min={0} max={100} step={0.1} value={x} onChange={e => onChange(e.target.value, y)} placeholder="x %" />
-      <input type="number" min={0} max={100} step={0.1} value={y} onChange={e => onChange(x, e.target.value)} placeholder="y %" />
-      <button className="btn btn--ghost btn--sm" onClick={pick} disabled={picking}>
-        {picking ? "Click target window…" : "🎯 Pick"}
-      </button>
-    </div>
-  );
-}
-
-function StepRow({ step, index, total, gameExe, states, overlays, onChange, onDelete, onMove }: {
-  step: Step;
-  index: number;
-  total: number;
-  gameExe: string;
-  states: ProfileState[];
-  overlays: OverlayItem[];
-  onChange: (s: Step) => void;
-  onDelete: () => void;
-  onMove: (dir: -1 | 1) => void;
-}) {
-  return (
-    <div className="step-row">
-      <span className="step-row__type">{step.type}</span>
-      <div className="step-row__params">
-        {(step.type === "press" || step.type === "hold" || step.type === "waitfor") && (
-          <KeyInput
-            value={step.key}
-            onChange={key => onChange({ ...step, key })}
-            allowChord={step.type === "hold" || step.type === "waitfor"}
-          />
-        )}
-        {step.type === "mousepress" && (
-          <select value={step.key} onChange={e => onChange({ ...step, key: e.target.value })} aria-label="Mouse button">
-            <option value="LButton">Left mouse</option>
-            <option value="RButton">Right mouse</option>
-            <option value="MButton">Middle mouse</option>
-            <option value="XButton1">Mouse 4</option>
-            <option value="XButton2">Mouse 5</option>
-          </select>
-        )}
-        {step.type === "repeat" && (
-          <>
-            <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} />
-            <input type="number" min={1} value={step.interval} placeholder="interval ms" title="Interval between presses (ms)"
-              onChange={e => onChange({ ...step, interval: e.target.value })} style={{ width: 90 }} />
-            <input type="number" min={0} value={step.hold} placeholder="hold ms" title="Key-down time per press (ms). Lower it if a game fires too fast; raise it if presses don't register."
-              onChange={e => onChange({ ...step, hold: e.target.value })} style={{ width: 80 }} />
-          </>
-        )}
-        {step.type === "goto" && (
-          <GotoInput x={step.x} y={step.y} gameExe={gameExe} onChange={(x, y) => onChange({ ...step, x, y })} />
-        )}
-        {step.type === "resolution" && (
-          <>
-            <input type="number" min={1} step={1} value={step.width} placeholder="width" aria-label="Resolution width"
-              onChange={e => onChange({ ...step, width: e.target.value })} style={{ width: 90 }} />
-            <input type="number" min={1} step={1} value={step.height} placeholder="height" aria-label="Resolution height"
-              onChange={e => onChange({ ...step, height: e.target.value })} style={{ width: 90 }} />
-          </>
-        )}
-        {step.type === "state" && (
-          <select value={step.stateId} onChange={e => onChange({ ...step, stateId: e.target.value })}>
-            <option value="">Select state</option>
-            {states.map(state => (
-              <option key={state.id} value={state.id}>{state.name}</option>
-            ))}
-          </select>
-        )}
-        {step.type === "startoverlay" && (
-          <>
-            <select value={step.restart ? "restart" : "start"} aria-label="Overlay action"
-              onChange={e => onChange({ ...step, restart: e.target.value === "restart" })}>
-              <option value="start">Start</option>
-              <option value="restart">Restart</option>
-            </select>
-            <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })}>
-              <option value="">Select overlay</option>
-              {overlays.map(item => (
-                <option key={item.id} value={item.id}>{item.name || item.type}</option>
-              ))}
-            </select>
-          </>
-        )}
-        {step.type === "sleep" && (
-          <input type="number" value={step.ms} placeholder="ms"
-            onChange={e => onChange({ ...step, ms: e.target.value })} style={{ width: 90 }} />
-        )}
-        {step.type === "send" && (
-          <input value={step.text} placeholder="text"
-            onChange={e => onChange({ ...step, text: e.target.value })} />
-        )}
-      </div>
-      <div className="step-row__btns">
-        <button className="icon-btn" disabled={index === 0} onClick={() => onMove(-1)}>↑</button>
-        <button className="icon-btn" disabled={index === total - 1} onClick={() => onMove(1)}>↓</button>
-        <button className="icon-btn icon-btn--danger" onClick={onDelete}>×</button>
-      </div>
-    </div>
-  );
-}
-
-function BehaviorStepsEditor({ steps, gameExe, states, overlays, onChange }: {
-  steps: Step[];
-  gameExe: string;
-  states: ProfileState[];
-  overlays: OverlayItem[];
-  onChange: (steps: Step[]) => void;
-}) {
-  function addStep(step: Step) { onChange([...steps, step]); }
-  function removeStep(i: number) { onChange(steps.filter((_, index) => index !== i)); }
-  function updateStep(i: number, step: Step) { onChange(steps.map((current, index) => index === i ? step : current)); }
-  function moveStep(i: number, direction: -1 | 1) {
-    const next = [...steps];
-    const target = i + direction;
-    if (target < 0 || target >= next.length) return;
-    [next[i], next[target]] = [next[target], next[i]];
-    onChange(next);
-  }
-
-  return (
-    <div className="steps-section">
-      <div className="steps-list">
-        {steps.map((step, i) => (
-          <StepRow key={i} step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays}
-            onChange={next => updateStep(i, next)}
-            onDelete={() => removeStep(i)}
-            onMove={direction => moveStep(i, direction)} />
-        ))}
-        {steps.length === 0 && <div className="steps-empty">No steps yet</div>}
-      </div>
-      <div className="step-add-btns">
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "borderless" })}>+ borderless</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "fit" })}>+ fit</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "goto", x: "", y: "" })}>+ goto</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "hold", key: "" })}>+ hold</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "killprocess" })}>+ killprocess</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "lock" })}>+ lock</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "press", key: "" })}>+ press</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "mousepress", key: "LButton" })}>+ mousepress</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "repeat", key: "", interval: "100", hold: "6" })}>+ repeat</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "resolution", width: "", height: "" })}>+ resolution</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "restorecursor" })}>+ restorecursor</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "savecursor" })}>+ savecursor</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "send", text: "" })}>+ send</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "sleep", ms: "" })}>+ sleep</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "state", stateId: states[0]?.id ?? "" })}>+ state</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "startoverlay", itemId: overlays[0]?.id ?? "", restart: true })}>+ startoverlay</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "stretch" })}>+ stretch</button>
-        <button className="btn btn--ghost btn--sm" onClick={() => addStep({ type: "waitfor", key: "" })}>+ waitfor</button>
-      </div>
-    </div>
-  );
-}
-
-function HotkeyModal({ initial, gameExe, states, overlays, onSave, onClose }: {
+function HotkeyModal({ initial, gameExe, states, overlays, scripts, onSave, onClose }: {
   initial: Hotkey;
   gameExe: string;
   states: ProfileState[];
-  overlays: OverlayItem[];
+  overlays: OverlayTarget[];
+  scripts: Script[];
   onSave: (hk: Hotkey) => void;
   onClose: () => void;
 }) {
@@ -1154,10 +669,10 @@ function HotkeyModal({ initial, gameExe, states, overlays, onSave, onClose }: {
   const [recordingTrigger, setRecordingTrigger] = useState(false);
   const [steps, setSteps] = useState<Step[]>(() => {
     const parsed = parseSteps(initial.behavior);
-    if (initial.state_id && !parsed.some(step => step.type === "state")) {
+    if (initial.state_id) {
       return [...parsed, { type: "state", stateId: initial.state_id }];
     }
-    return parsed;
+    return parsed.length || initial.trigger ? parsed : [{ type: "press", key: "" }];
   });
 
   useBindingRecorder(recordingTrigger, key => {
@@ -1177,9 +692,7 @@ function HotkeyModal({ initial, gameExe, states, overlays, onSave, onClose }: {
             ? <div className="key-recording">Hold the key/button combination, then release…</div>
             : <input value={trigger} onChange={e => setTrigger(e.target.value)} placeholder="Trigger" />
           }
-          <button className="btn btn--ghost btn--sm" onClick={() => setRecordingTrigger(r => !r)}>
-            {recordingTrigger ? "Cancel" : "⌨ Record"}
-          </button>
+          <IconButton showLabel icon={recordingTrigger ? "arrow-left" : "keyboard"} label={recordingTrigger ? "Cancel recording" : "Record hotkey"} className="btn btn--ghost btn--sm" onClick={() => setRecordingTrigger(r => !r)} />
         </div>
 
         <label className="checkbox-row">
@@ -1187,32 +700,29 @@ function HotkeyModal({ initial, gameExe, states, overlays, onSave, onClose }: {
           <span>Allow extra modifiers</span>
         </label>
 
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} onChange={setSteps} />
 
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary"
-            disabled={!areStepsValid(steps)}
-            onClick={() => trigger.trim() && areStepsValid(steps) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })}>
-            Save
-          </button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!areStepsValid(steps)} onClick={() => trigger.trim() && areStepsValid(steps) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })} />
         </div>
       </div>
     </div>
   );
 }
 
-function EventModal({ initial, eventKinds, gameExe, states, overlays, onSave, onClose }: {
+function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, onSave, onClose }: {
   initial: BehaviorEvent;
   eventKinds: BehaviorEventKind[];
   gameExe: string;
   states: ProfileState[];
-  overlays: OverlayItem[];
+  overlays: OverlayTarget[];
+  scripts: Script[];
   onSave: (event: BehaviorEvent) => void;
   onClose: () => void;
 }) {
   const [event, setEvent] = useState(initial.event);
-  const [steps, setSteps] = useState<Step[]>(() => parseSteps(initial.behavior));
+  const [steps, setSteps] = useState<Step[]>(() => initial.behavior ? parseSteps(initial.behavior) : [{ type: "press", key: "" }]);
   const behavior = stepsToString(steps);
 
   return (
@@ -1224,11 +734,10 @@ function EventModal({ initial, eventKinds, gameExe, states, overlays, onSave, on
             <option key={candidate.value} value={candidate.value}>{candidate.label}</option>
           ))}
         </select>
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} onChange={setSteps} />
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" disabled={!behavior || !areStepsValid(steps)}
-            onClick={() => behavior && areStepsValid(steps) && onSave({ event, behavior })}>Save</button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!behavior || !areStepsValid(steps)} onClick={() => behavior && areStepsValid(steps) && onSave({ event, behavior })} />
         </div>
       </div>
     </div>
@@ -1252,8 +761,8 @@ function SetParentModal({ profiles, current, onSave, onClose }: {
           {options.map(p => <option key={p.id} value={p.id}>Inherit from {p.name}</option>)}
         </select>
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave(parentId || null)}>Save</button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" onClick={() => onSave(parentId || null)} />
         </div>
       </div>
     </div>
@@ -1279,11 +788,8 @@ function CopyProfileModal({ games, sourceProfile, onSave, onClose }: {
         </select>
         <input value={name} onChange={e => setName(e.target.value)} placeholder="Profile name" />
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary"
-            onClick={() => targetGameId && name.trim() && onSave(targetGameId, name.trim())}>
-            Copy
-          </button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="copy" label="Copy" className="btn btn--primary" onClick={() => targetGameId && name.trim() && onSave(targetGameId, name.trim())} />
         </div>
       </div>
     </div>
@@ -1297,7 +803,9 @@ function CopyToProfileModal({
   sourceProfileId,
   onSave,
   onClose,
+  folderOnly = false,
 }: {
+  folderOnly?: boolean;
   games: Scope[];
   title: string;
   sourceGameId: string;
@@ -1324,17 +832,15 @@ function CopyToProfileModal({
             <option key={game.id} value={game.id}>Copy to {game.name}</option>
           ))}
         </select>
-        <select value={targetProfileId} onChange={e => setTargetProfileId(e.target.value)} disabled={targetProfiles.length === 0}>
+        {!folderOnly && <select value={targetProfileId} onChange={e => setTargetProfileId(e.target.value)} disabled={targetProfiles.length === 0}>
           {targetProfiles.map(profile => (
             <option key={profile.id} value={profile.id}>Into {profile.name}</option>
           ))}
           {targetProfiles.length === 0 && <option value="">No profiles</option>}
-        </select>
+        </select>}
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => targetGameId && targetProfileId && onSave(targetGameId, targetProfileId)} disabled={!targetProfileId}>
-            Copy
-          </button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="copy" label="Copy" className="btn btn--primary" onClick={() => targetGameId && (folderOnly || targetProfileId) && onSave(targetGameId, targetProfileId)} disabled={!targetGameId || (!folderOnly && !targetProfileId)} />
         </div>
       </div>
     </div>
@@ -1378,24 +884,21 @@ function hotkeyLabel(hotkey: Hotkey): string {
   return hotkey.name.trim() ? `${hotkey.name} - hotkey` : "hotkey";
 }
 
-function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayItem[]): string {
-  const description = behavior.replace(/state\(([^)]+)\)/g, (_, stateId: string) => {
-    return `state(${stateNameById(states, stateId) ?? stateId})`;
-  }).replace(/(startoverlay|restartoverlay)\(([^)]+)\)/g, (_, action: string, itemId: string) => {
-    const item = overlays.find(item => item.id === itemId);
-    return `${action}(${item ? item.name || item.type : "Missing overlay"})`;
+function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayTarget[]): string {
+  return describeBehavior(behavior, id => stateNameById(states, id) ?? id, id => {
+    const item = overlays.find(item => item.id === id);
+    return item ? item.name || (item.type === "group" ? "Overlay" : item.type) : "Missing overlay";
   });
-  return description || "No behavior";
 }
 
-function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayItem[]): string {
+function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayTarget[]): string {
   return behaviorDesc(hotkey.behavior, states, overlays);
 }
 
 function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDelete, onOverride }: {
   hotkey: Hotkey;
   states: ProfileState[];
-  overlays: OverlayItem[];
+  overlays: OverlayTarget[];
   inherited: boolean;
   onEdit?: () => void;
   onCopy?: () => void;
@@ -1410,14 +913,14 @@ function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDele
       <div className="step-row__btns">
         {inherited ? (
           <>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
           </>
         ) : (
           <>
-            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+            <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
           </>
         )}
       </div>
@@ -1428,7 +931,7 @@ function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDele
 function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOverride }: {
   event: BehaviorEvent;
   states: ProfileState[];
-  overlays: OverlayItem[];
+  overlays: OverlayTarget[];
   inherited: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -1440,11 +943,11 @@ function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOver
       <span className="overlay-item-desc">{behaviorDesc(event.behavior, states, overlays)}</span>
       <div className="step-row__btns">
         {inherited ? (
-          <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+          <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
         ) : (
           <>
-            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
-            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+            <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
+            <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
           </>
         )}
       </div>
@@ -1452,7 +955,7 @@ function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOver
   );
 }
 
-function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onOverride }: {
+function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onOverride, onMove, first, last }: {
   item: OverlayItem;
   states: ProfileState[];
   inherited: boolean;
@@ -1460,22 +963,29 @@ function OverlayItemRow({ item, states, inherited, onEdit, onCopy, onDelete, onO
   onCopy?: () => void;
   onDelete?: () => void;
   onOverride?: () => void;
+  onMove?: (direction: -1 | 1) => void;
+  first?: boolean;
+  last?: boolean;
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
       <span className={`overlay-type-badge overlay-type-badge--${item.type}`}>{overlayItemLabel(item)}</span>
       <span className="overlay-item-desc">{overlayItemDesc(item, states)}</span>
       <div className="step-row__btns">
+        {onMove && <>
+          <IconButton icon="arrow-up" label="Move up"  className="icon-btn" disabled={first} onClick={() => onMove(-1)} />
+          <IconButton icon="arrow-down" label="Move down"  className="icon-btn" disabled={last} onClick={() => onMove(1)} />
+        </>}
         {inherited ? (
           <>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
           </>
         ) : (
           <>
-            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+            <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
           </>
         )}
       </div>
@@ -1498,14 +1008,14 @@ function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
       <div className="step-row__btns">
         {inherited ? (
           <>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn" title="Override" onClick={onOverride}>✎</button>
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
           </>
         ) : (
           <>
-            <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
-            <button className="icon-btn" title="Copy" onClick={onCopy}>⧉</button>
-            <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+            <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
+            <IconButton icon="copy" label="Copy" className="icon-btn" onClick={onCopy} />
+            <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
           </>
         )}
       </div>
@@ -1513,17 +1023,22 @@ function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
   );
 }
 
-function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
+function OverlayItemModal({ initial, gameExe, states, groups, timers, onSave, onClose }: {
   initial: OverlayItem;
   gameExe: string;
   states: ProfileState[];
+  groups: OverlayGroup[];
+  timers: OverlayItem[];
   onSave: (item: OverlayItem) => void;
   onClose: () => void;
 }) {
+  const reportError = useErrorReporter();
   const [name, setName] = useState(initial.name);
   const [x, setX] = useState(String(initial.x));
   const [y, setY] = useState(String(initial.y));
   const [stateId, setStateId] = useState(initial.state_id ?? "");
+  const [groupId, setGroupId] = useState(initial.group_id ?? "");
+  const [visibleTimerId, setVisibleTimerId] = useState(initial.visible_while_timer_id ?? "");
 
   const [mins, setMins]         = useState(String(initial.type === "timer" ? Math.floor(initial.duration_ms / 60000) : 1));
   const [secs, setSecs]         = useState(String(initial.type === "timer" ? Math.floor((initial.duration_ms % 60000) / 1000) : 0));
@@ -1549,7 +1064,7 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
   async function browseIcon() {
     const selected = await openDialog({ title: "Select Icon", filters: [{ name: "Image", extensions: ["png","jpg","jpeg","webp","gif","ico"] }], multiple: false, directory: false });
     if (!selected) return;
-    try { setSrc(await api.readImageAsDataUrl(selected as string)); } catch (e) { alert(String(e)); }
+    try { setSrc(await api.readImageAsDataUrl(selected as string)); } catch (e) { reportError(e); }
   }
 
   function build(): OverlayItem {
@@ -1559,7 +1074,8 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
       x: parseFloat(x)||0,
       y: parseFloat(y)||0,
       state_id: stateId || null,
-      group_id: initial.group_id ?? null,
+      group_id: groupId || null,
+      visible_while_timer_id: visibleTimerId || null,
     };
     const timerMs = ((parseInt(mins)||0)*60 + (parseInt(secs)||0)) * 1000;
     switch (initial.type) {
@@ -1574,51 +1090,65 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
 
   return (
     <div className="modal-overlay">
-      <div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal modal--overlay-item" onClick={e => e.stopPropagation()}>
         <h2>{typeLabel}</h2>
 
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="Name" />
-
-        <select value={showOnlyRunning ? "@running" : stateId} aria-label="Visibility" onChange={e => {
+        <div className="form-grid form-grid--2">
+          <label>Name <input value={name} onChange={e => setName(e.target.value)} /></label>
+          <label>Overlay <select value={groupId} onChange={event => setGroupId(event.target.value)}>
+            {groups.map(group => <option key={group.id} value={group.id}>{group.name || "Overlay"}</option>)}
+          </select></label>
+        </div>
+        <label>Show part <select value={visibleTimerId ? `@timer:${visibleTimerId}` : showOnlyRunning ? "@running" : stateId} onChange={e => {
+          const timer = e.target.value.startsWith("@timer:");
+          setVisibleTimerId(timer ? e.target.value.slice(7) : "");
           setShowOnlyRunning(e.target.value === "@running");
-          setStateId(e.target.value === "@running" ? "" : e.target.value);
+          setStateId(timer || e.target.value === "@running" ? "" : e.target.value);
         }}>
           <option value="">Always visible</option>
           {initial.type === "timer" && <option value="@running">Only while running</option>}
+          {timers.filter(timer => timer.id !== initial.id).map(timer => <option key={timer.id} value={`@timer:${timer.id}`}>While {timer.name || "Timer"} is running</option>)}
           {states.map(state => (
             <option key={state.id} value={state.id}>Visible with {state.name}</option>
           ))}
-        </select>
+        </select></label>
 
-        <GotoInput x={x} y={y} gameExe={gameExe} onChange={(nx, ny) => { setX(nx); setY(ny); }} />
+        {(!groupId || !groups.some(group => group.id === groupId && (group.layout === "row" || group.layout === "column"))) && <fieldset className="overlay-item-form__section">
+          <legend>Position</legend>
+          <GotoInput x={x} y={y} gameExe={gameExe} onChange={(nx, ny) => { setX(nx); setY(ny); }} />
+        </fieldset>}
 
-        {initial.type === "timer" && <>
+        {initial.type === "timer" && <fieldset className="overlay-item-form__section">
+          <legend>Timer</legend>
           <label className="checkbox-row">
             <input type="checkbox" checked={startWithOverlay} onChange={e => setStartWithOverlay(e.target.checked)} />
             <span>Start with overlay</span>
           </label>
           <div className="form-grid form-grid--2">
-            <div className="duration-input">
-              <input type="number" value={mins} onChange={e => setMins(e.target.value)} placeholder="min" min={0} />
+            <div className="form-field" role="group" aria-label="Duration"><span>Duration</span><div className="duration-input">
+              <input aria-label="Minutes" type="number" value={mins} onChange={e => setMins(e.target.value)} placeholder="min" min={0} />
               <span>m</span>
-              <input type="number" value={secs} onChange={e => setSecs(e.target.value)} placeholder="sec" min={0} max={59} />
+              <input aria-label="Seconds" type="number" value={secs} onChange={e => setSecs(e.target.value)} placeholder="sec" min={0} max={59} />
               <span>s</span>
-            </div>
-            <input type="number" value={timerFontSize} onChange={e => setTimerFontSize(e.target.value)} placeholder="Font size" />
+            </div></div>
+            <label>Font size (px) <input type="number" value={timerFontSize} onChange={e => setTimerFontSize(e.target.value)} /></label>
           </div>
-          <div className="color-input">
-            <input className="color-input__swatch" type="color" value={timerColor} onChange={e => setTimerColor(e.target.value)} />
-            <input value={timerColor} onChange={e => setTimerColor(e.target.value)} placeholder="#RRGGBB" />
+          <div className="form-grid form-grid--2">
+            <div className="form-field" role="group" aria-label="Timer color"><span>Color</span><div className="color-input">
+              <input aria-label="Choose timer color" className="color-input__swatch" type="color" value={timerColor} onChange={e => setTimerColor(e.target.value)} />
+              <input aria-label="Timer color" value={timerColor} onChange={e => setTimerColor(e.target.value)} placeholder="#RRGGBB" />
+            </div></div>
+            <label>Timer source <select value={timerStateId} onChange={e => setTimerStateId(e.target.value)}>
+              <option value="">Use fixed duration above</option>
+              {states.filter(state => !!state.duration_ms).map(state => (
+                <option key={state.id} value={state.id}>Use timer from {state.name}</option>
+              ))}
+            </select></label>
           </div>
-          <select value={timerStateId} onChange={e => setTimerStateId(e.target.value)}>
-            <option value="">Use fixed duration above</option>
-            {states.filter(state => !!state.duration_ms).map(state => (
-              <option key={state.id} value={state.id}>Use timer from {state.name}</option>
-            ))}
-          </select>
-        </>}
+        </fieldset>}
 
-        {initial.type === "icon" && <>
+        {initial.type === "icon" && <fieldset className="overlay-item-form__section">
+          <legend>Image</legend>
           <div className="image-picker" onClick={browseIcon}>
             {src ? (
               <img
@@ -1632,39 +1162,44 @@ function OverlayItemModal({ initial, gameExe, states, onSave, onClose }: {
               />
             ) : <Placeholder />}
           </div>
-          {src && <button className="btn btn--ghost btn--sm modal-inline-action" onClick={() => setSrc(null)}>✕ Remove</button>}
-          <div className="form-grid form-grid--2">
-            <input type="number" value={iw} onChange={e => setIw(e.target.value)} placeholder="Width" />
-            <input type="number" value={ih} onChange={e => setIh(e.target.value)} placeholder="Height" />
+          <div className="input-row">
+            <IconButton showLabel icon="folder-open" label={src ? "Change image" : "Choose image"} className="btn btn--ghost btn--sm" onClick={browseIcon} />
+            {src && <IconButton icon="trash-can" label="Remove image" className="btn btn--ghost btn--sm" onClick={() => setSrc(null)} />}
           </div>
-        </>}
+          <div className="form-grid form-grid--2">
+            <label>Width (px) <input type="number" value={iw} onChange={e => setIw(e.target.value)} /></label>
+            <label>Height (px) <input type="number" value={ih} onChange={e => setIh(e.target.value)} /></label>
+          </div>
+        </fieldset>}
 
-        {initial.type === "bar" && <>
+        {initial.type === "bar" && <fieldset className="overlay-item-form__section">
+          <legend>Bar</legend>
           <div className="form-grid form-grid--3">
-            <input type="number" value={bw} onChange={e => setBw(e.target.value)} placeholder="Width" />
-            <input type="number" value={bh} onChange={e => setBh(e.target.value)} placeholder="Height" />
-            <input type="number" value={maxVal} onChange={e => setMaxVal(e.target.value)} placeholder="Max" />
+            <label>Width (px) <input type="number" value={bw} onChange={e => setBw(e.target.value)} /></label>
+            <label>Height (px) <input type="number" value={bh} onChange={e => setBh(e.target.value)} /></label>
+            <label>Maximum value <input type="number" value={maxVal} onChange={e => setMaxVal(e.target.value)} /></label>
           </div>
-          <div className="color-input">
-            <input className="color-input__swatch" type="color" value={barColor} onChange={e => setBarColor(e.target.value)} />
-            <input value={barColor} onChange={e => setBarColor(e.target.value)} placeholder="#RRGGBB" />
-          </div>
-        </>}
+          <div className="form-field" role="group" aria-label="Bar color"><span>Color</span><div className="color-input">
+            <input aria-label="Choose bar color" className="color-input__swatch" type="color" value={barColor} onChange={e => setBarColor(e.target.value)} />
+            <input aria-label="Bar color" value={barColor} onChange={e => setBarColor(e.target.value)} placeholder="#RRGGBB" />
+          </div></div>
+        </fieldset>}
 
-        {initial.type === "text" && <>
-          <input value={content} onChange={e => setContent(e.target.value)} placeholder="Text" />
+        {initial.type === "text" && <fieldset className="overlay-item-form__section">
+          <legend>Text</legend>
+          <label>Content <input value={content} onChange={e => setContent(e.target.value)} /></label>
           <div className="form-grid form-grid--2">
-            <input type="number" value={fontSize} onChange={e => setFontSize(e.target.value)} placeholder="Font size" />
-            <div className="color-input">
-              <input className="color-input__swatch" type="color" value={txtColor} onChange={e => setTxtColor(e.target.value)} />
-              <input value={txtColor} onChange={e => setTxtColor(e.target.value)} placeholder="#RRGGBB" />
-            </div>
+            <label>Font size (px) <input type="number" value={fontSize} onChange={e => setFontSize(e.target.value)} /></label>
+            <div className="form-field" role="group" aria-label="Text color"><span>Color</span><div className="color-input">
+              <input aria-label="Choose text color" className="color-input__swatch" type="color" value={txtColor} onChange={e => setTxtColor(e.target.value)} />
+              <input aria-label="Text color" value={txtColor} onChange={e => setTxtColor(e.target.value)} placeholder="#RRGGBB" />
+            </div></div>
           </div>
-        </>}
+        </fieldset>}
 
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave(build())}>Save</button>
+          <button type="button" className="btn btn--secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn--primary" onClick={() => onSave(build())} disabled={!groupId}>Save</button>
         </div>
       </div>
     </div>
@@ -1704,8 +1239,8 @@ function StateModal({ initial, onSave, onClose }: {
         </div>
 
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()}>Save</button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()} />
         </div>
       </div>
     </div>
@@ -1733,9 +1268,9 @@ function ScriptRow({ script, onEdit, onToggle, onDelete }: {
       <span className="overlay-type-badge overlay-type-badge--text">{script.name || "Unnamed"} - script</span>
       <span className="overlay-item-desc">{scriptTriggerDesc(script)} · {scriptLanguageLabel(script)} · {script.source === "path" ? "file" : "inline"}</span>
       <div className="step-row__btns">
-        <button className="icon-btn" title={script.enabled ? "Disable" : "Enable"} onClick={onToggle}>{script.enabled ? "◉" : "○"}</button>
-        <button className="icon-btn" title="Edit" onClick={onEdit}>✏</button>
-        <button className="icon-btn icon-btn--danger" title="Delete" onClick={onDelete}>✕</button>
+        <IconButton icon={script.enabled ? "toggle-on" : "toggle-off"} label={script.enabled ? "Disable script" : "Enable script"} aria-pressed={script.enabled} className="icon-btn" onClick={onToggle} />
+        <IconButton icon="pen" label="Edit" className="icon-btn" onClick={onEdit} />
+        <IconButton icon="trash-can" label="Delete" className="icon-btn icon-btn--danger" onClick={onDelete} />
       </div>
     </div>
   );
@@ -1804,7 +1339,7 @@ function ScriptModal({ initial, onSave, onClose }: {
           <div className="input-row">
             <input value={path} onChange={e => setPath(e.target.value)}
               placeholder={`C:\\path\\to\\script.${language === "autohotkey" ? "ahk" : "py"}`} />
-            <button className="btn btn--ghost" onClick={browse}>Browse…</button>
+            <IconButton showLabel icon="folder-open" label="Browse…" className="btn btn--ghost" onClick={browse} />
           </div>
         )}
 
@@ -1814,8 +1349,8 @@ function ScriptModal({ initial, onSave, onClose }: {
         </label>
 
         <div className="modal__actions">
-          <button className="btn btn--ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()}>Save</button>
+          <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" onClick={() => onSave(build())} disabled={!name.trim()} />
         </div>
       </div>
     </div>
@@ -1824,25 +1359,31 @@ function ScriptModal({ initial, onSave, onClose }: {
 
 // ── Game detail view ──────────────────────────────────────────────────────────
 
-function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates, onContext, onDb, onModal }: {
+function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }: {
   folder: Scope;
   profile: Profile;
   showStates: boolean;
-  onShowStates: () => void;
-  onExitStates: () => void;
   onContext: (e: ReactMouseEvent) => void;
   onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
 }) {
+  const reportError = useErrorReporter();
   const profileId = profile.id;
   const profileExe = folder.exe;
   const eventTargetAvailable = hasSpecificAppTarget(profileExe);
 
   async function setArmed(armed: boolean) {
-    try { onDb(await api.setProfileArmed(profile.id, armed)); } catch (e) { alert(String(e)); }
+    try { onDb(await api.setProfileArmed(profile.id, armed)); } catch (e) { reportError(e); }
   }
   async function saveProfile(updated: Profile) {
     onDb(await api.upsertProfile(folder.id, updated));
+  }
+  function setSectionEnabled(part: "hotkeys" | "events" | "scripts" | "overlay", value: boolean) {
+    api.setProfilePartEnabled(profile.id, part, value).then(onDb).catch(error => reportError(error));
+  }
+  async function setStatesEnabled(value: boolean) {
+    try { onDb(await api.setProfilePartEnabled(profile.id, "states", value)); }
+    catch (error) { reportError(error); }
   }
   async function deleteHotkey(index: number) {
     onDb(await api.upsertProfile(folder.id, { ...profile, hotkeys: profile.hotkeys.filter((_, i) => i !== index) }));
@@ -1851,15 +1392,37 @@ function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates
     onDb(await api.upsertProfile(folder.id, { ...profile, events: profile.events.filter((_, i) => i !== index) }));
   }
   async function saveScripts(scripts: Script[]) {
-    try { onDb(await api.upsertProfile(folder.id, { ...profile, scripts })); } catch (e) { alert(String(e)); }
+    try {
+      let next = { ...folder, profiles: folder.profiles.map(candidate => candidate.id === profile.id ? { ...profile, scripts } : candidate) };
+      for (const removed of profile.scripts.filter(script => !scripts.some(candidate => candidate.id === script.id))) next = removeScriptReferences(next, removed.id);
+      onDb(await api.upsertGame(next));
+    } catch (e) { reportError(e); }
   }
 
   const resolvedHotkeys = resolveHotkeys(folder.profiles, profile);
   const resolvedEvents = resolveEvents(folder.profiles, profile);
-  const resolvedStates = resolveStates(folder.profiles, profile);
+  const resolvedStates = folder.states.map(state => ({ state, own: true }));
   const resolvedOverlayItems = resolveOverlayItems(folder.profiles, profile);
-  const stateOptions = availableStates(folder.profiles, resolvedStates.map(({ state }) => state));
-  const overlayOptions = availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item));
+  const stateOptions = folder.states;
+  const groups = resolveOverlayGroups(folder.profiles, profile);
+  const overlayOptions = availableOverlayTargets(folder.profiles, resolvedOverlayItems.map(({ item }) => item), groups);
+  function addOverlay(type: OverlayItem["type"], groupId: string) {
+    const factories = { timer: blankTimer, icon: blankIcon, bar: blankBar, text: blankText };
+    onModal({ type: "overlayItem", gameId: folder.id, profileId, index: null,
+      item: { ...factories[type](), group_id: groupId }, gameExe: profileExe, states: stateOptions });
+  }
+  function renderOverlayItem({ item, own }: { item: OverlayItem; own: boolean }) {
+    const ownIndex = own ? profile.overlay_items.findIndex(candidate => candidate.id === item.id) : -1;
+    const siblings = profile.overlay_items.filter(candidate => (candidate.group_id ?? null) === (item.group_id ?? null));
+    return <OverlayItemRow key={item.id} item={item} states={stateOptions} inherited={!own}
+      onMove={own ? direction => { saveProfile(moveOverlayPart(profile, item.id, direction)).catch(error => reportError(error)); } : undefined}
+      first={siblings[0]?.id === item.id} last={siblings[siblings.length - 1]?.id === item.id}
+      onEdit={own ? () => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: ownIndex, item, gameExe: profileExe, states: stateOptions }) : undefined}
+      onCopy={() => onModal({ type: "copyOverlayItem", sourceGameId: folder.id, sourceProfileId: profileId, item })}
+      onDelete={own ? async () => { onDb(await api.upsertGame(removeOverlayItem(folder, profileId, item.id))); } : undefined}
+      onOverride={!own ? async () => { await saveProfile({ ...profile, overlay_items: [...profile.overlay_items, { ...item }] }); } : undefined} />;
+  }
+
 
   return (
     <div className="editor">
@@ -1870,48 +1433,15 @@ function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates
             <TargetChip exe={profileExe} />
           </div>
           <div style={{ flex: 1 }} />
-          {!showStates && profile.kind !== "scripts" && (
-            <button className="btn btn--ghost btn--sm" onClick={onShowStates}>States</button>
-          )}
+          <IconButton icon="gear" label="Profile settings" className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "profileSettings", gameId: folder.id, profile, isNew: false })} />
           <ArmSwitch armed={profile.armed} size="lg" onChange={setArmed} />
         </div>
       </div>
 
       <div className="editor__content">
-        {showStates ? (
-          <>
-            <div className="section-head">
-              <button className="btn btn--ghost btn--sm" onClick={onExitStates}>‹ Back</button>
-              <h3 style={{ flex: 1 }}>States</h3>
-              <button className="btn btn--primary btn--sm" onClick={() => onModal({ type: "profileState", gameId: folder.id, profileId, index: null, state: blankState() })}>+ State</button>
-            </div>
-            <div className="steps-list">
-              {resolvedStates.map(({ state, own }) => {
-                const ownIndex = own ? profile.states.findIndex(candidate => candidate.id === state.id) : -1;
-                return (
-                  <StateRow key={state.id} state={state} inherited={!own}
-                    onEdit={own ? () => onModal({ type: "profileState", gameId: folder.id, profileId, index: ownIndex, state }) : undefined}
-                    onCopy={() => onModal({ type: "copyState", sourceGameId: folder.id, sourceProfileId: profileId, state })}
-                    onDelete={own ? async () => {
-                      onDb(await api.upsertGame(removeProfileState(folder, profileId, state.id)));
-                    } : undefined}
-                    onOverride={!own ? async () => {
-                      onDb(await api.upsertProfile(folder.id, { ...profile, states: [...profile.states, { ...state }] }));
-                    } : undefined} />
-                );
-              })}
-              {resolvedStates.length === 0 && <div className="steps-empty">No states yet</div>}
-            </div>
-          </>
-        ) : profile.kind === "hotkeys" ? (
-          <>
-            <div className="section-head">
-              <h3>Hotkeys</h3>
-              <button className="btn btn--primary btn--sm"
-                onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", allow_extra_modifiers: false, state_id: null }, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}>
-                + Hotkey
-              </button>
-            </div>
+        <ProfileSection title="Hotkeys" defaultExpanded enabled={!profile.hotkeys_disabled} onChange={value => setSectionEnabled("hotkeys", value)} actions={<>
+<IconButton icon="plus" label="Add hotkey" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", allow_extra_modifiers: false, state_id: null }, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })} />
+        </>}>
             <div className="steps-list">
               {resolvedHotkeys.map(({ hotkey: hk, own }, i) => {
                 const ownIndex = own ? profile.hotkeys.findIndex(h => h.trigger === hk.trigger) : -1;
@@ -1925,24 +1455,17 @@ function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates
               })}
               {resolvedHotkeys.length === 0 && <div className="steps-empty">No hotkeys yet</div>}
             </div>
-          </>
-        ) : profile.kind === "events" ? (
-          <>
-            <div className="section-head">
-              <h3>Events</h3>
-              <button className="btn btn--primary btn--sm"
-                disabled={!eventTargetAvailable || profile.events.length >= BEHAVIOR_EVENTS.length}
-                title={!eventTargetAvailable ? "Events require a specific app target" : undefined}
-                onClick={() => {
+
+        </ProfileSection>
+        <ProfileSection title="Events" defaultExpanded enabled={!profile.events_disabled} onChange={value => setSectionEnabled("events", value)} actions={<>
+<IconButton icon="plus" label="Add event" className="btn btn--primary btn--sm" disabled={!eventTargetAvailable || profile.events.length >= BEHAVIOR_EVENTS.length} onClick={() => {
                   const eventKinds = BEHAVIOR_EVENTS.map(candidate => candidate.value)
                     .filter(event => !profile.events.some(existing => existing.event === event));
                   if (eventKinds.length === 0) return;
                   onModal({ type: "editEvent", gameId: folder.id, profileId, index: null,
                     event: { event: eventKinds[0], behavior: "" }, eventKinds, gameExe: profileExe, states: stateOptions, overlays: overlayOptions });
-                }}>
-                + Event
-              </button>
-            </div>
+                }} />
+        </>}>
             {!eventTargetAvailable && <div className="steps-empty">Events require a folder with a specific app target.</div>}
             <div className="steps-list">
               {resolvedEvents.map(({ event, own }) => {
@@ -1958,16 +1481,32 @@ function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates
               })}
               {resolvedEvents.length === 0 && eventTargetAvailable && <div className="steps-empty">No events yet</div>}
             </div>
-          </>
-        ) : profile.kind === "scripts" ? (
-          <>
-            <div className="section-head">
-              <h3>Scripts</h3>
-              <button className="btn btn--primary btn--sm"
-                onClick={() => onModal({ type: "script", gameId: folder.id, profileId, index: null, script: blankScript() })}>
-                + Script
-              </button>
+
+        </ProfileSection>
+        <ProfileSection title="Overlays" defaultExpanded enabled={!profile.overlay_disabled} onChange={value => setSectionEnabled("overlay", value)} actions={
+          <IconButton icon="plus" label="Add overlay" className="btn btn--ghost btn--sm" onClick={() => saveProfile({ ...profile, overlay_groups: [...profile.overlay_groups, { id: uid(), name: "", x: 0, y: 0, layout: "row", gap: 8 }] }).catch(reportError)} />
+        }>
+            <div className="steps-list" style={{ marginTop: 8 }}>
+              {groups.map(group => <OverlayGroupPanel key={group.id} group={group} items={profile.overlay_items} timers={availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item)).filter(item => item.type === "timer")} gameExe={profileExe}
+                onSave={async (next, members) => { await saveProfile(saveOverlayGroup(profile, next, members)); }}
+                onEnabledChange={async value => { onDb(await api.setProfilePartEnabled(profile.id, "overlay", value, group.id)); }}
+                onDelete={profile.overlay_groups.some(candidate => candidate.id === group.id) ? async () => {
+                  if (!confirm(`Delete overlay "${group.name || "Overlay"}" and its parts?`)) return;
+                  onDb(await api.upsertGame(removeOverlayGroup(folder, profileId, group.id)));
+                } : undefined}
+                onAdd={type => addOverlay(type, group.id)}
+                onHotkey={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null,
+                  hotkey: { name: group.name, trigger: "", behavior: stepsToString([{ type: "startoverlay", itemId: group.id, restart: true }]), allow_extra_modifiers: false, state_id: null },
+                  gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}>
+                {resolvedOverlayItems.filter(({ item }) => item.group_id === group.id).map(renderOverlayItem)}
+              </OverlayGroupPanel>)}
+              {resolvedOverlayItems.length === 0 && groups.length === 0 && <div className="steps-empty">No overlays yet</div>}
             </div>
+
+        </ProfileSection>
+        <ProfileSection title="Scripts" enabled={!profile.scripts_disabled} onChange={value => setSectionEnabled("scripts", value)} actions={<>
+<IconButton icon="plus" label="Add script" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "script", gameId: folder.id, profileId, index: null, script: blankScript() })} />
+        </>}>
             <div className="steps-list">
               {profile.scripts.map((script, i) => (
                 <ScriptRow key={script.id} script={script}
@@ -1975,39 +1514,30 @@ function ProfileEditor({ folder, profile, showStates, onShowStates, onExitStates
                   onToggle={() => saveScripts(profile.scripts.map((s, idx) => idx === i ? { ...s, enabled: !s.enabled } : s))}
                   onDelete={() => saveScripts(profile.scripts.filter((_, idx) => idx !== i))} />
               ))}
-              {profile.scripts.length === 0 && <div className="steps-empty">No scripts yet — scripts run from their own folder.</div>}
+              {profile.scripts.length === 0 && <div className="steps-empty">No scripts yet</div>}
             </div>
-          </>
-        ) : (
-          <>
-            <div className="section-head">
-              <h3>Overlay</h3>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: null, item: blankTimer(), gameExe: profileExe, states: stateOptions })}>Timer</button>
-                <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: null, item: blankIcon(),  gameExe: profileExe, states: stateOptions })}>Icon</button>
-                <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: null, item: blankBar(),   gameExe: profileExe, states: stateOptions })}>Bar</button>
-                <button className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: null, item: blankText(),  gameExe: profileExe, states: stateOptions })}>Text</button>
-              </div>
-            </div>
-            <div className="steps-list" style={{ marginTop: 8 }}>
-              {resolvedOverlayItems.map(({ item, own }) => {
-                const ownIndex = own ? profile.overlay_items.findIndex(candidate => candidate.id === item.id) : -1;
+
+        </ProfileSection>
+        <ProfileSection title="States" reveal={showStates} enabled={!folder.states_disabled} onChange={setStatesEnabled} actions={<>
+<IconButton icon="plus" label="Add state" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "profileState", gameId: folder.id, profileId, index: null, state: blankState() })} />
+        </>}>
+            <div className="steps-list">
+              {resolvedStates.map(({ state, own }) => {
+                const ownIndex = folder.states.findIndex(candidate => candidate.id === state.id);
                 return (
-                  <OverlayItemRow key={item.id} item={item} states={stateOptions} inherited={!own}
-                    onEdit={own ? () => onModal({ type: "overlayItem", gameId: folder.id, profileId, index: ownIndex, item, gameExe: profileExe, states: stateOptions }) : undefined}
-                    onCopy={() => onModal({ type: "copyOverlayItem", sourceGameId: folder.id, sourceProfileId: profileId, item })}
+                  <StateRow key={state.id} state={state} inherited={!own}
+                    onEdit={own ? () => onModal({ type: "profileState", gameId: folder.id, profileId, index: ownIndex, state }) : undefined}
+                    onCopy={() => onModal({ type: "copyState", sourceGameId: folder.id, sourceProfileId: profileId, state })}
                     onDelete={own ? async () => {
-                      onDb(await api.upsertGame(removeOverlayItem(folder, profileId, item.id)));
+                      onDb(await api.upsertGame(removeProfileState(folder, profileId, state.id)));
                     } : undefined}
-                    onOverride={!own ? async () => {
-                      onDb(await api.upsertProfile(folder.id, { ...profile, overlay_items: [...profile.overlay_items, { ...item }] }));
-                    } : undefined} />
+                    />
                 );
               })}
-              {resolvedOverlayItems.length === 0 && <div className="steps-empty">No overlay items yet</div>}
+              {resolvedStates.length === 0 && <div className="steps-empty">No states yet</div>}
             </div>
-          </>
-        )}
+
+        </ProfileSection>
       </div>
     </div>
   );
@@ -2020,6 +1550,7 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
   onDb: (db: Database) => void;
   onCheckUpdates: () => Promise<string | null>;
 }) {
+  const reportError = useErrorReporter();
   const [ahkExe, setAhkExe] = useState(db.settings.ahk_exe);
   const [pythonExe, setPythonExe] = useState(db.settings.python_exe ?? "");
   const [openToTray, setOpenToTray] = useState(db.settings.open_to_tray);
@@ -2042,8 +1573,8 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
     try {
       const latest = await onCheckUpdates();
       setUpdateStatus(latest ? `Update ${latest} is available.` : "You're up to date.");
-    } catch {
-      setUpdateStatus("Could not check for updates.");
+    } catch (error) {
+      reportError(`Could not check for updates: ${error}`);
     }
     setChecking(false);
   }
@@ -2081,7 +1612,7 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
       onDb(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch (e) { alert(`Error saving settings: ${e}`); }
+    } catch (e) { reportError(`Error saving settings: ${e}`); }
   }
 
   return (
@@ -2089,11 +1620,11 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
       <h2>Settings</h2>
       <div className="input-row">
         <input value={ahkExe} onChange={e => setAhkExe(e.target.value)} placeholder="AutoHotkey v2 executable path" />
-        <button className="btn btn--ghost" onClick={browse}>Browse…</button>
+        <IconButton showLabel icon="folder-open" label="Browse…" className="btn btn--ghost" onClick={browse} />
       </div>
       <div className="input-row">
         <input value={pythonExe} onChange={e => setPythonExe(e.target.value)} placeholder="Python executable path" />
-        <button className="btn btn--ghost" onClick={browsePython}>Browse…</button>
+        <IconButton showLabel icon="folder-open" label="Browse…" className="btn btn--ghost" onClick={browsePython} />
       </div>
       <label className="checkbox-row">
         <input type="checkbox" checked={openToTray} onChange={e => setOpenToTray(e.target.checked)} />
@@ -2108,13 +1639,11 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
         <span>Launch on startup</span>
       </label>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button className="btn btn--primary" onClick={save}>Save</button>
+        <IconButton icon="check" label="Save" className="btn btn--primary" onClick={save} />
         {saved && <span style={{ color: "var(--success)", fontSize: "0.88rem" }}>✓ Saved</span>}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button className="btn btn--ghost" onClick={checkForUpdates} disabled={checking}>
-          {checking ? "Checking…" : "Check for Updates"}
-        </button>
+        <IconButton showLabel icon={checking ? "spinner" : "rotate"} label={checking ? "Checking for updates" : "Check for updates"} spin={checking} className="btn btn--ghost" onClick={checkForUpdates} disabled={checking} />
         {updateStatus && <span style={{ fontSize: "0.88rem" }}>{updateStatus}</span>}
       </div>
       <CloudSettings />
@@ -2134,7 +1663,9 @@ function semverGt(a: string, b: string): boolean {
 }
 
 export default function App() {
+  const reportError = useErrorReporter();
   const [db, setDb] = useState<Database | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>({ kind: "empty" });
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -2154,23 +1685,29 @@ export default function App() {
   const { w: libW, onPointerDown: onResize } = useLibraryWidth(db?.settings.library_width);
 
   const loadDb = useCallback(async () => {
-    const data = await api.getDatabase();
-    const legacyWidth = Number(localStorage.getItem("libW"));
-    if (data.settings.library_width == null && legacyWidth >= 240 && legacyWidth <= 520) {
-      await api.setLibraryWidth(Math.round(legacyWidth));
-      data.settings.library_width = Math.round(legacyWidth);
+    setLoadFailed(false);
+    try {
+      const data = await api.getDatabase();
+      const legacyWidth = Number(localStorage.getItem("libW"));
+      if (data.settings.library_width == null && legacyWidth >= 240 && legacyWidth <= 520) {
+        await api.setLibraryWidth(Math.round(legacyWidth));
+        data.settings.library_width = Math.round(legacyWidth);
+      }
+      localStorage.removeItem("libW");
+      setDb(data);
+    } catch (error) {
+      setLoadFailed(true);
+      throw error;
     }
-    localStorage.removeItem("libW");
-    setDb(data);
   }, []);
 
   useEffect(() => {
     const subscription = listen("firebase-restored", () => {
       setModal(null); setCtx(null); setStatesFor(null); setSelection({ kind: "empty" });
-      void loadDb().catch(e => alert(`Could not refresh restored settings: ${e}`));
+      void loadDb().catch(e => reportError(`Could not refresh restored settings: ${e}`));
     });
     return () => { void subscription.then(unlisten => unlisten()); };
-  }, [loadDb]);
+  }, [loadDb, reportError]);
 
   // Check for updates against the latest GitHub release. Returns the new version (and shows
   // the banner) if one is available, null when up to date; throws on network failure. A
@@ -2207,7 +1744,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadDb();
+    void loadDb().catch(reportError);
     const poll = async () => {
       try { setOpenExes(new Set((await api.listOpenExecutables()).map(e => e.toLowerCase()))); } catch { /* ignore */ }
     };
@@ -2242,7 +1779,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       unlistenShown.then(f => f());
     };
-  }, [loadDb, checkUpdate]);
+  }, [loadDb, checkUpdate, reportError]);
 
   // Suppress the browser's native right-click menu (this is a desktop app), but keep it in
   // text fields so paste still works.
@@ -2274,7 +1811,7 @@ export default function App() {
       await api.downloadAndInstallUpdate(updateInfo.downloadUrl);
     } catch (e) {
       setUpdating(false);
-      alert(`Update failed: ${e}`);
+      reportError(`Update failed: ${e}`);
     }
   }
 
@@ -2306,7 +1843,7 @@ export default function App() {
   }
 
   async function toggleArmed(profileId: string, armed: boolean) {
-    try { handleDb(await api.setProfileArmed(profileId, armed)); } catch (e) { alert(String(e)); }
+    try { handleDb(await api.setProfileArmed(profileId, armed)); } catch (e) { reportError(e); }
   }
 
   function selectProfile(sel: Selection) {
@@ -2319,9 +1856,9 @@ export default function App() {
       { label: "Settings", onClick: () => setModal({ type: "profileSettings", gameId: folderId, profile: p, isNew: false }) },
       { label: p.parent_id ? "Change parent" : "Inherit from…", onClick: () => setModal({ type: "setParent", gameId: folderId, profile: p }) },
       { label: "Copy to…", onClick: () => setModal({ type: "copyProfile", sourceGameId: folderId, profile: p }) },
-      ...(p.kind !== "scripts" ? [{ label: "Edit states…", onClick: () => { setSelection({ kind: "profile", folderId, profileId: p.id }); setStatesFor(p.id); } }] : []),
-      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!.profiles).catch(e => alert(String(e))) },
-      { label: "Delete profile", danger: true, onClick: async () => { if (!confirm(`Delete profile "${p.name}"?`)) return; try { handleDb(await api.deleteProfile(folderId, p.id)); } catch (e) { alert(String(e)); } } },
+      { label: "Edit states…", onClick: () => { setSelection({ kind: "profile", folderId, profileId: p.id }); setStatesFor(p.id); } },
+      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!).catch(e => reportError(e)) },
+      { label: "Delete profile", danger: true, onClick: async () => { if (!confirm(`Delete profile "${p.name}"?`)) return; try { handleDb(await api.deleteProfile(folderId, p.id)); } catch (e) { reportError(e); } } },
     ];
   }
 
@@ -2335,33 +1872,30 @@ export default function App() {
     const newProfile = (kind: ProfileKind) => setModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
     const armAll = async (target: boolean) => {
       try { let db: Database | null = null; for (const p of folder.profiles) db = await api.setProfileArmed(p.id, target); if (db) handleDb(db); }
-      catch (e) { alert(String(e)); }
+      catch (e) { reportError(e); }
     };
     const isGlobalFolder = folder.id === GLOBAL_FOLDER_ID;
     const targetExe = folder.exe.trim();
     const hasProcessTarget = targetExe !== "" && !isGlobalExe(targetExe);
     return [
-      { label: "New hotkeys profile", onClick: () => newProfile("hotkeys") },
-      ...(hasSpecificAppTarget(folder.exe) ? [{ label: "New events profile", onClick: () => newProfile("events") }] : []),
-      { label: "New scripts profile", onClick: () => newProfile("scripts") },
-      { label: "New overlay profile", onClick: () => newProfile("overlay") },
+      { label: "New profile", onClick: () => newProfile("hotkeys") },
       { label: "Import profile…", onClick: async () => {
         try { const imported = await importProfile(); if (!imported) return; imported.name = imported.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported)); }
-        catch (e) { alert(String(e)); }
+        catch (e) { reportError(e); }
       } },
       { label: "Arm all", onClick: () => armAll(true) },
       { label: "Disarm all", onClick: () => armAll(false) },
       { label: "Folder settings…", onClick: () => setModal({ type: "editGame", game: folder }) },
-      { label: "Export folder", onClick: () => exportScope(folder).catch(e => alert(String(e))) },
+      { label: "Export folder", onClick: () => exportScope(folder).catch(e => reportError(e)) },
       ...(hasProcessTarget ? [
         { label: "Kill process", onClick: async () => {
           if (!confirm(`Force-kill "${targetExe}"?`)) return;
-          try { await api.killGame(targetExe); } catch (e) { alert(String(e)); }
+          try { await api.killGame(targetExe); } catch (e) { reportError(e); }
         } },
       ] : []),
       ...(!isGlobalFolder ? [{ label: "Delete folder", danger: true, onClick: async () => {
         if (!confirm(`Delete folder "${folder.name}" and all its profiles?`)) return;
-        try { handleDb(await api.deleteGame(folder.id)); } catch (e) { alert(String(e)); }
+        try { handleDb(await api.deleteGame(folder.id)); } catch (e) { reportError(e); }
       } }] : []),
     ];
   }
@@ -2376,7 +1910,7 @@ export default function App() {
     try {
       handleDb(await api.upsertGame(game));
       setModal(null);
-    } catch (e) { alert(`Error saving folder: ${e}`); }
+    } catch (e) { reportError(`Error saving folder: ${e}`); }
   }
 
   async function handleProfileSettingsSave(gameId: string, profile: Profile, isNew: boolean) {
@@ -2384,7 +1918,7 @@ export default function App() {
       handleDb(await api.upsertProfile(gameId, profile));
       setModal(null);
       if (isNew) setSelection({ kind: "profile", folderId: gameId, profileId: profile.id });
-    } catch (e) { alert(`Error saving profile: ${e}`); }
+    } catch (e) { reportError(`Error saving profile: ${e}`); }
   }
 
   async function handleSetParent(gameId: string, profile: Profile, parentId: string | null) {
@@ -2392,7 +1926,7 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, parent_id: parentId });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error setting parent: ${e}`); }
+    } catch (e) { reportError(`Error setting parent: ${e}`); }
   }
 
   async function handleOverlayItemSave(gameId: string, profileId: string, index: number | null, item: OverlayItem) {
@@ -2405,45 +1939,38 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, overlay_items: items });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error saving overlay item: ${e}`); }
+    } catch (e) { reportError(`Error saving overlay item: ${e}`); }
   }
 
-  async function handleStateSave(gameId: string, profileId: string, index: number | null, state: ProfileState) {
+  async function handleStateSave(gameId: string, _profileId: string, index: number | null, state: ProfileState) {
     try {
       const game = db!.scopes.find(g => g.id === gameId)!;
-      const profile = game.profiles.find(p => p.id === profileId)!;
-      const states = [...profile.states];
+      const states = [...game.states];
       if (index === null) states.push(state);
       else states[index] = state;
-      const updated = await api.upsertProfile(gameId, { ...profile, states });
+      const updated = await api.upsertGame({ ...game, states });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error saving state: ${e}`); }
+    } catch (e) { reportError(`Error saving state: ${e}`); }
   }
 
   async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
     try {
-      const copy: Profile = {
-        ...profile,
-        id: uid(),
-        name,
-        armed: false,
-        parent_id: null,
-        scripts: profile.scripts.map(s => ({ ...s, id: uid() })),
-      };
+      const source = db!.scopes.find(folder => folder.id === sourceGameId)!;
+      const portable = withReferencedOverlayParts(materializeProfile(profile, source.profiles), source.profiles);
+      const copy: Profile = { ...remapProfileIds(portable, undefined, new Map()), name, parent_id: null };
       const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, profile.id, targetGameId, copy));
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error copying profile: ${e}`); }
+    } catch (e) { reportError(`Error copying profile: ${e}`); }
   }
 
-  function carryStates(sourceGameId: string, sourceProfileId: string, targetGameId: string, profile: Profile) {
+  function carryStates(sourceGameId: string, _sourceProfileId: string, targetGameId: string, profile: Profile) {
     const source = db!.scopes.find(folder => folder.id === sourceGameId)!;
-    const sourceProfile = source.profiles.find(candidate => candidate.id === sourceProfileId)!;
     const target = db!.scopes.find(folder => folder.id === targetGameId)!;
-    const sourceStates = availableStates(source.profiles, resolveStates(source.profiles, sourceProfile).map(({ state }) => state));
-    const targetStates = availableStates(target.profiles, resolveStates(target.profiles, profile).map(({ state }) => state));
-    return carryReferencedStates(profile, sourceStates, targetStates);
+    const sourceStates = source.states;
+    const targetStates = target.states;
+    return carryReferencedScripts(carryReferencedStates(carryReferencedOverlayParts(profile, source.profiles, target.profiles), sourceStates, targetStates), source.profiles.flatMap(profile => profile.scripts), target.profiles.flatMap(profile => profile.scripts));
   }
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
@@ -2457,7 +1984,7 @@ export default function App() {
       const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] }));
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error copying hotkey: ${e}`); }
+    } catch (e) { reportError(`Error copying hotkey: ${e}`); }
   }
 
   async function handleCopyOverlayItem(sourceGameId: string, sourceProfileId: string, item: OverlayItem, targetGameId: string, targetProfileId: string) {
@@ -2473,23 +2000,22 @@ export default function App() {
       const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, overlay_items: [...profile.overlay_items, copy] }));
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error copying overlay item: ${e}`); }
+    } catch (e) { reportError(`Error copying overlay item: ${e}`); }
   }
 
-  async function handleCopyState(sourceGameId: string, sourceProfileId: string, state: ProfileState, targetGameId: string, targetProfileId: string) {
+  async function handleCopyState(sourceGameId: string, _sourceProfileId: string, state: ProfileState, targetGameId: string, _targetProfileId: string) {
     try {
       const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
-      const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
-      const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
+      const isSameProfile = sourceGameId === targetGameId || game.states.some(candidate => candidate.id === state.id);
       const copy = {
         ...state,
         id: isSameProfile ? uid() : state.id,
         name: isSameProfile ? copyName(state.name, "State") : state.name,
       };
-      const updated = await api.upsertProfile(targetGameId, { ...profile, states: [...profile.states, copy] });
+      const updated = await api.upsertGame({ ...game, states: [...game.states, copy] });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error copying state: ${e}`); }
+    } catch (e) { reportError(`Error copying state: ${e}`); }
   }
 
   async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
@@ -2502,7 +2028,7 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, hotkeys });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error saving hotkey: ${e}`); }
+    } catch (e) { reportError(`Error saving hotkey: ${e}`); }
   }
 
   async function handleEventSave(gameId: string, profileId: string, index: number | null, event: BehaviorEvent) {
@@ -2515,11 +2041,13 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, events });
       handleDb(updated);
       setModal(null);
-    } catch (e) { alert(`Error saving event: ${e}`); }
+    } catch (e) { reportError(`Error saving event: ${e}`); }
   }
 
   if (!db) {
-    return <div className="loading">Loading…</div>;
+    return <div className="loading">{loadFailed
+      ? <IconButton icon="rotate" label="Retry" className="btn btn--ghost" onClick={() => { void loadDb().catch(reportError); }} />
+      : "Loading…"}</div>;
   }
 
   const selFolder = selection.kind === "profile" ? db.scopes.find(s => s.id === selection.folderId) ?? null : null;
@@ -2533,7 +2061,7 @@ export default function App() {
       for (const scope of scopes) updated = await api.upsertGame(scope);
       if (updated) handleDb(updated);
     }
-    catch (e) { alert(String(e)); }
+    catch (e) { reportError(e); }
   }
 
   return (
@@ -2542,13 +2070,10 @@ export default function App() {
         <div className="update-banner">
           <span>Update available: <strong>{updateInfo.version}</strong></span>
           {updateInfo.downloadUrl && (
-            <button className="btn btn--primary btn--sm" disabled={updating} onClick={runUpdate}>
-              {updating ? "Downloading…" : "Update Now"}
-            </button>
+            <IconButton showLabel icon={updating ? "spinner" : "download"} label={updating ? "Downloading update" : "Install update"} spin={updating} className="btn btn--primary btn--sm" disabled={updating} onClick={runUpdate} />
           )}
-          <button className="btn btn--ghost btn--sm" disabled={updating}
-            onClick={() => openUrl(updateInfo.notesUrl).catch(() => {})}>Release Notes</button>
-          <button className="btn btn--ghost btn--sm" disabled={updating} onClick={() => { dismissedUpdate.current = updateInfo.version; setUpdateInfo(null); }}>Dismiss</button>
+          <IconButton showLabel icon="arrow-up-right-from-square" label="Release Notes" className="btn btn--ghost btn--sm" disabled={updating} onClick={() => openUrl(updateInfo.notesUrl).catch(() => {})} />
+          <IconButton icon="xmark" label="Dismiss" className="btn btn--ghost btn--sm" disabled={updating} onClick={() => { dismissedUpdate.current = updateInfo.version; setUpdateInfo(null); }} />
         </div>
       )}
       <div className="layout__body">
@@ -2563,7 +2088,7 @@ export default function App() {
           )}
           {selProfile && selFolder && (
             <ProfileEditor key={selProfile.id} folder={selFolder} profile={selProfile}
-              showStates={statesFor === selProfile.id} onShowStates={() => setStatesFor(selProfile.id)} onExitStates={() => setStatesFor(null)}
+              showStates={statesFor === selProfile.id}
               onContext={e => onProfileContext(e, selFolder.id, selProfile)}
               onDb={handleDb} onModal={setModal} />
           )}
@@ -2594,13 +2119,13 @@ export default function App() {
       })()}
       {modal?.type === "editHotkey" && (() => {
         const { gameId, profileId: pid, index, hotkey, gameExe, states, overlays } = modal;
-        return <HotkeyModal initial={hotkey} gameExe={gameExe} states={states} overlays={overlays}
+        return <HotkeyModal initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
           onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editEvent" && (() => {
         const { gameId, profileId: pid, index, event, eventKinds, gameExe, states, overlays } = modal;
-        return <EventModal initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays}
+        return <EventModal initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
           onSave={next => handleEventSave(gameId, pid, index, next)}
           onClose={() => setModal(null)} />;
       })()}
@@ -2625,7 +2150,10 @@ export default function App() {
       })()}
       {modal?.type === "overlayItem" && (() => {
         const { gameId, profileId, index, item, gameExe, states } = modal;
+        const folder = db.scopes.find(folder => folder.id === gameId)!;
+        const profile = folder.profiles.find(profile => profile.id === profileId)!;
         return <OverlayItemModal initial={item} gameExe={gameExe} states={states}
+          groups={resolveOverlayGroups(folder.profiles, profile)} timers={availableOverlayItems(folder.profiles, profile.overlay_items).filter(item => item.type === "timer")}
           onSave={it => handleOverlayItemSave(gameId, profileId, index, it)}
           onClose={() => setModal(null)} />;
       })()}
@@ -2643,7 +2171,7 @@ export default function App() {
       })()}
       {modal?.type === "copyState" && (() => {
         const { sourceGameId, sourceProfileId, state } = modal;
-        return <CopyToProfileModal games={db.scopes} title="Copy State To Profile" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
+        return <CopyToProfileModal folderOnly games={db.scopes} title="Copy State To Folder" sourceGameId={sourceGameId} sourceProfileId={sourceProfileId}
           onSave={(targetGameId, targetProfileId) => handleCopyState(sourceGameId, sourceProfileId, state, targetGameId, targetProfileId)}
           onClose={() => setModal(null)} />;
       })()}
@@ -2657,9 +2185,8 @@ export default function App() {
             const scripts = index === null
               ? [...profile.scripts, next]
               : profile.scripts.map((s, i) => i === index ? next : s);
-            try { handleDb(await api.upsertProfile(gameId, { ...profile, scripts })); }
-            catch (e) { alert(String(e)); }
-            setModal(null);
+            try { handleDb(await api.upsertProfile(gameId, { ...profile, scripts })); setModal(null); }
+            catch (e) { reportError(e); }
           }}
           onClose={() => setModal(null)} />;
       })()}

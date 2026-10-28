@@ -1,394 +1,103 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  applyOverlayConfig, applyRuntimeEvent, clearRuntimeState, dismissOverlayItem, EMPTY_RUNTIME, getTimerRemaining, isItemVisible,
-  applyOverlaySessionConfig, applyOverlaySessionEvent, dismissOverlaySessionItem, EMPTY_OVERLAY_SESSIONS, getActiveOverlaySession,
-} from "../src/overlayRuntime.ts";
+import { EMPTY_RUNTIME, getTimerRemaining, isItemVisible, acceptSnapshot } from "../src/overlayRuntime.ts";
 
-function item(id, stateId, type = "text") {
-  const base = { id, name: id, x: 25, y: 75, state_id: stateId };
-  if (type === "timer") return { ...base, type, duration_ms: 10000, timer_state_id: stateId, color: "#fff", font_size: 22 };
-  if (type === "icon") return { ...base, type, src: "icon.png", w: 24, h: 24 };
-  return { ...base, type, content: id, color: "#fff", font_size: 16 };
-}
+const timer = { type: "timer", id: "timer", name: "Timer", x: 0, y: 0, state_id: null, timer_state_id: null, duration_ms: 1000, show_only_running: true };
+const config = items => ({ profile_id: "folder", items, states: [{ id: "buff", name: "Buff", duration_ms: 5000 }], hotkeys: [] });
 
-function config(duration = null) {
-  return {
-    items: [item("timer", "buff", "timer"), item("icon", "buff", "icon"), item("label", "buff"), item("other", "other"), item("always", null)],
-    states: [{ id: "buff", name: "Buff active", duration_ms: duration }, { id: "other", name: "Other", duration_ms: null }],
-    hotkeys: [],
-  };
-}
-
-const trigger = (cfg, state, stateId, now) => applyRuntimeEvent(cfg, state, { event: "state_triggered", state_id: stateId }, now);
-const visibleIds = (cfg, state, now) => cfg.items.filter(item => isItemVisible(cfg, item, state, now)).map(item => item.id);
-
-test("one shared state shows and hides its timer, icon, and label together", () => {
-  const cfg = config();
-  assert.deepEqual(visibleIds(cfg, EMPTY_RUNTIME, 100), ["always"]);
-  const active = trigger(cfg, EMPTY_RUNTIME, "buff", 100);
-  assert.deepEqual(visibleIds(cfg, active, 100), ["timer", "icon", "label", "always"]);
-  const off = trigger(cfg, active, "buff", 200);
-  assert.deepEqual(visibleIds(cfg, off, 200), ["always"]);
-  assert.deepEqual(EMPTY_RUNTIME, { flags: {}, timers: {}, itemTimers: {}, hiddenItems: {} });
+test("a delayed initial response cannot overwrite a newer runtime event", () => {
+  const current = { config: config([timer]), runtime: EMPTY_RUNTIME, revision: 10 };
+  assert.equal(acceptSnapshot(current, { ...current, revision: 9 }), current);
 });
 
-test("dismissal clears the shared toggle state and its next trigger restores every linked item", () => {
-  const cfg = config();
-  const active = trigger(cfg, trigger(cfg, EMPTY_RUNTIME, "other", 90), "buff", 100);
-  const dismissed = clearRuntimeState(active, cfg.items[1].state_id, 200);
-  assert.deepEqual(visibleIds(cfg, dismissed, 200), ["other", "always"]);
-  assert.deepEqual(visibleIds(cfg, trigger(cfg, dismissed, "buff", 300), 300), ["timer", "icon", "label", "other", "always"]);
-  assert.equal(active.flags.buff, true);
+test("the overlay renders backend deadlines without restarting them", () => {
+  const cfg = config([timer]);
+  const snapshot = { ...EMPTY_RUNTIME, itemTimers: { timer: 1200 } };
+  assert.equal(getTimerRemaining(cfg, timer, snapshot, 200), 1000);
+  assert.equal(getTimerRemaining(cfg, timer, snapshot, 700), 500);
+  assert.equal(getTimerRemaining(cfg, timer, snapshot, 1400), 0);
+  assert.equal(isItemVisible(cfg, timer, snapshot, 700), true);
+  assert.equal(isItemVisible(cfg, timer, snapshot, 1400), false);
+  assert.equal(snapshot.itemTimers.timer, 1200);
 });
 
-test("dismissal stops a timed state and reactivation starts a fresh shared countdown", () => {
-  const cfg = config(10000);
-  const active = trigger(cfg, EMPTY_RUNTIME, "buff", 100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 2100), 8000);
-  const dismissed = clearRuntimeState(active, "buff", 2200);
-  assert.equal(dismissed.timers.buff, undefined);
-  assert.deepEqual(visibleIds(cfg, dismissed, 2200), ["always"]);
-  const restarted = trigger(cfg, dismissed, "buff", 5000);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], restarted, 5000), 10000);
-  assert.equal(isItemVisible(cfg, cfg.items[0], restarted, 14999), true);
-  assert.equal(isItemVisible(cfg, cfg.items[0], restarted, 15000), false);
+test("linked timers use the one shared state deadline", () => {
+  const linked = { ...timer, timer_state_id: "buff" };
+  const cfg = config([linked]);
+  const snapshot = { ...EMPTY_RUNTIME, timers: { buff: 5200 }, itemTimers: { timer: 999 } };
+  assert.equal(getTimerRemaining(cfg, linked, snapshot, 200), 5000);
+  assert.equal(getTimerRemaining(cfg, linked, snapshot, 4000), 1200);
 });
 
-test("timed triggers restart the deadline and expiry does not reactivate the state", () => {
-  const cfg = config(1000);
-  const state = trigger(cfg, trigger(cfg, EMPTY_RUNTIME, "buff", 0), "buff", 750);
-  assert.equal(state.timers.buff, 1750);
-  assert.equal(isItemVisible(cfg, cfg.items[0], state, 1749), true);
-  assert.equal(isItemVisible(cfg, cfg.items[0], state, 1750), false);
-  const expired = applyRuntimeEvent(cfg, state, { event: "unknown" }, 2000);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], expired, 2000), 0);
-  assert.equal(isItemVisible(cfg, cfg.items[0], expired, 2000), false);
+test("visibility respects both shared state and explicit item stopping", () => {
+  const icon = { type: "icon", id: "icon", state_id: "buff" };
+  const cfg = config([icon]);
+  assert.equal(isItemVisible(cfg, icon, EMPTY_RUNTIME, 100), false);
+  const running = { ...EMPTY_RUNTIME, timers: { buff: 200 } };
+  assert.equal(isItemVisible(cfg, icon, running, 100), true);
+  assert.equal(isItemVisible(cfg, icon, running, 201), false);
+  assert.equal(isItemVisible(cfg, icon, { ...running, hiddenItems: { icon: true } }, 100), false);
 });
 
-test("legacy hotkey state bindings use the same transitions and can reactivate dismissed items", () => {
-  const cfg = { ...config(), hotkeys: [{ trigger: "F1", state_id: "buff" }] };
-  const event = { event: "hotkey_triggered", hotkey_trigger: " f1 " };
-  const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, event, 100);
-  const dismissed = clearRuntimeState(active, "buff", 200);
-  const restored = applyRuntimeEvent(cfg, dismissed, event, 300);
-  assert.equal(isItemVisible(cfg, cfg.items[0], restored, 300), true);
+test("idle and expired always-visible timers retain their display behavior", () => {
+  const always = { ...timer, show_only_running: false };
+  const cfg = config([always]);
+  assert.equal(isItemVisible(cfg, always, EMPTY_RUNTIME, 100), true);
+  assert.equal(getTimerRemaining(cfg, always, EMPTY_RUNTIME, 100), 1000);
+  assert.equal(getTimerRemaining(cfg, always, { ...EMPTY_RUNTIME, itemTimers: { timer: 50 } }, 100), 0);
 });
 
-test("unknown state IDs do nothing and profile changes reset state", () => {
-  const cfg = config();
-  const active = trigger(cfg, EMPTY_RUNTIME, "buff", 100);
-  assert.deepEqual(trigger(cfg, active, "missing", 200), active);
-  for (const event of ["profile_activated", "profile_deactivated"]) {
-    assert.deepEqual(applyRuntimeEvent(cfg, active, { event }, 200), EMPTY_RUNTIME);
+test("an icon can follow a timer directly without a shared state", () => {
+  const icon = { type: "icon", id: "icon", visible_while_timer_id: "timer" };
+  const cfg = config([timer, icon]);
+  assert.equal(isItemVisible(cfg, icon, EMPTY_RUNTIME, 100), false);
+  const running = { ...EMPTY_RUNTIME, itemTimers: { timer: 1200 } };
+  assert.equal(isItemVisible(cfg, icon, running, 700), true);
+  assert.equal(isItemVisible(cfg, icon, running, 1200), false);
+  assert.equal(isItemVisible(cfg, icon, { ...running, hiddenItems: { timer: true } }, 700), false);
+  assert.equal(isItemVisible(config([icon]), icon, running, 700), false);
+});
+
+test("group visibility follows its timer for every part and respects dismissal", () => {
+  const icon = { type: "icon", id: "icon", group_id: "group" };
+  const groupedTimer = { ...timer, group_id: "group" };
+  const cfg = { ...config([groupedTimer, icon]), groups: [{ id: "group", visible_while_timer_id: "timer" }] };
+  const running = { ...EMPTY_RUNTIME, itemTimers: { timer: 1200 } };
+  for (const item of cfg.items) {
+    assert.equal(isItemVisible(cfg, item, EMPTY_RUNTIME, 100), false);
+    assert.equal(isItemVisible(cfg, item, running, 700), true);
+    assert.equal(isItemVisible(cfg, item, running, 1200), false);
+    assert.equal(isItemVisible(cfg, item, { ...running, hiddenItems: { group: true } }, 700), false);
   }
 });
 
-test("retired group membership does not control state visibility", () => {
-  const cfg = config();
-  cfg.items[0].group_id = "old-group";
-  cfg.items[3].group_id = "old-group";
-  const active = trigger(cfg, trigger(cfg, EMPTY_RUNTIME, "other", 100), "buff", 100);
-  const dismissed = clearRuntimeState(active, "buff", 200);
-  assert.equal(isItemVisible(cfg, cfg.items[3], dismissed, 200), true);
+test("direct timer visibility uses a linked state's deadline and preserves legacy conditions", () => {
+  const linked = { ...timer, timer_state_id: "buff" };
+  const icon = { type: "icon", id: "icon", visible_while_timer_id: "timer", state_id: "other" };
+  const cfg = config([linked, icon]);
+  const running = { ...EMPTY_RUNTIME, timers: { buff: 5000 }, flags: { other: true } };
+  assert.equal(isItemVisible(cfg, icon, running, 4000), true);
+  assert.equal(isItemVisible(cfg, icon, { ...running, flags: {} }, 4000), false);
+  assert.equal(isItemVisible(cfg, icon, running, 5000), false);
 });
 
-const start = (cfg, state, itemId, now) => applyRuntimeEvent(cfg, state, { event: "overlay_started", item_id: itemId }, now);
-function standalone(startWithOverlay = false) {
-  const timer = { ...item("fixed", null, "timer"), start_with_overlay: startWithOverlay };
-  return { items: [timer], states: [], hotkeys: [] };
-}
-
-test("fixed-duration timers start with the overlay only when their checkbox is checked", () => {
-  for (const checked of [false, true]) {
-    const cfg = standalone(checked);
-    const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-    assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 2100), checked ? 8000 : 10000);
-    assert.equal(active.itemTimers.fixed, checked ? 10100 : undefined);
-  }
+test("disabled groups and parts stay hidden without mutating other timers", () => {
+  const icon = { type: "icon", id: "icon", group_id: "group" };
+  const grouped = { ...timer, group_id: "group" };
+  const cfg = { ...config([grouped, icon]), groups: [{ id: "group" }], disabled_items: ["group", "timer", "icon"] };
+  const running = { ...EMPTY_RUNTIME, itemTimers: { timer: 1200 } };
+  assert.equal(isItemVisible(cfg, icon, running, 100), false);
+  assert.equal(isItemVisible(cfg, grouped, running, 100), false);
+  assert.equal(running.itemTimers.timer, 1200);
+  assert.equal(isItemVisible({ ...cfg, disabled_items: [] }, icon, running, 100), true);
 });
 
-test("checking start with overlay on an active overlay starts it immediately without later resets", () => {
-  const before = standalone();
-  const after = standalone(true);
-  const active = applyOverlayConfig(before, after, EMPTY_RUNTIME, 100);
-  assert.equal(getTimerRemaining(after, after.items[0], active, 2100), 8000);
-  const repeated = applyOverlayConfig(after, after, active, 3000);
-  assert.equal(repeated.itemTimers.fixed, 10100);
-  const expired = applyOverlayConfig(after, after, repeated, 12000);
-  assert.equal(getTimerRemaining(after, after.items[0], expired, 12000), 0);
-});
-
-test("manual start counts down an unchecked timer and leaves an already-running countdown intact", () => {
-  const cfg = standalone();
-  const active = start(cfg, EMPTY_RUNTIME, "fixed", 100);
-  const repeated = start(cfg, active, "fixed", 3000);
-  assert.equal(repeated.itemTimers.fixed, 10100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], repeated, 3100), 7000);
-  assert.equal(active.itemTimers.fixed, 10100);
-});
-
-test("expired standalone timers stay at zero and can be started again", () => {
-  const cfg = standalone();
-  const active = start(cfg, EMPTY_RUNTIME, "fixed", 100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 10100), 0);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 12000), 0);
-  const restarted = start(cfg, active, "fixed", 13000);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], restarted, 13000), 10000);
-});
-
-test("manual start restores a dismissed standalone timer with a fresh countdown", () => {
-  const cfg = standalone();
-  const active = start(cfg, EMPTY_RUNTIME, "fixed", 100);
-  const hidden = dismissOverlayItem(cfg, active, cfg.items[0]);
-  assert.equal(isItemVisible(cfg, cfg.items[0], hidden, 200), false);
-  assert.equal(hidden.itemTimers.fixed, undefined);
-  const restored = start(cfg, hidden, "fixed", 300);
-  assert.equal(isItemVisible(cfg, cfg.items[0], restored, 300), true);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], restored, 300), 10000);
-});
-
-test("automatic starts use the linked state as the only countdown authority", () => {
-  const cfg = config(20000);
-  cfg.items[0].start_with_overlay = true;
-  const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-  assert.deepEqual(visibleIds(cfg, active, 100), ["timer", "icon", "label", "always"]);
-  assert.equal(active.timers.buff, 20100);
-  assert.deepEqual(active.itemTimers, {});
-  const repeated = start(cfg, active, "timer", 5000);
-  assert.equal(repeated.timers.buff, 20100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], repeated, 5100), 15000);
-});
-
-test("multiple automatic timers sharing a state start it once", () => {
-  const cfg = config(20000);
-  cfg.items[0].start_with_overlay = true;
-  cfg.items.push({ ...cfg.items[0], id: "second" });
-  const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-  assert.deepEqual(active.timers, { buff: 20100 });
-  assert.deepEqual(active.itemTimers, {});
-});
-
-test("starting an overlay activates its toggle state without toggling it off on a repeated start", () => {
-  const cfg = config();
-  const active = start(cfg, EMPTY_RUNTIME, "icon", 100);
-  assert.equal(active.flags.buff, true);
-  assert.deepEqual(visibleIds(cfg, start(cfg, active, "icon", 300), 300), ["timer", "icon", "label", "always"]);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 1100), 9000);
-});
-
-test("fixed timers linked to visibility states start and recover through the existing state action", () => {
-  const cfg = config();
-  const active = trigger(cfg, EMPTY_RUNTIME, "buff", 100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 2100), 8000);
-  const hidden = dismissOverlayItem(cfg, active, cfg.items[0]);
-  assert.deepEqual(visibleIds(cfg, hidden, 2200), ["always"]);
-  const restored = trigger(cfg, hidden, "buff", 3000);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], restored, 3000), 10000);
-});
-
-test("unknown overlay targets do nothing and deactivation never auto-starts a timer", () => {
-  const cfg = standalone(true);
-  assert.deepEqual(start(cfg, EMPTY_RUNTIME, "missing", 100), EMPTY_RUNTIME);
-  const active = start(cfg, EMPTY_RUNTIME, "fixed", 100);
-  assert.deepEqual(applyRuntimeEvent(cfg, active, { event: "profile_deactivated" }, 200), EMPTY_RUNTIME);
-});
-
-test("assigning a shared state replaces an item's previous standalone dismissal", () => {
-  const before = standalone();
-  const hidden = dismissOverlayItem(before, EMPTY_RUNTIME, before.items[0]);
-  const after = { ...before, items: [{ ...before.items[0], state_id: "buff" }], states: [{ id: "buff", name: "Buff", duration_ms: null }] };
-  const active = trigger(after, hidden, "buff", 100);
-  assert.equal(isItemVisible(after, after.items[0], active, 100), true);
-});
-
-const unfocused = { profile_id: null, items: [], states: [], hotkeys: [] };
-const focus = (sessions, cfg, now) => applyOverlaySessionConfig(sessions, cfg, now);
-const profileConfig = (id, cfg) => ({ ...cfg, profile_id: id });
-
-test("automatic and manually started timers keep their deadlines across repeated focus changes", () => {
-  for (const automatic of [false, true]) {
-    const cfg = profileConfig("game", standalone(automatic));
-    let sessions = focus(EMPTY_OVERLAY_SESSIONS, cfg, 100);
-    if (!automatic) sessions = applyOverlaySessionEvent(sessions, { event: "overlay_started", item_id: "fixed" }, 100);
-    for (const now of [1100, 3100, 5100]) {
-      sessions = focus(sessions, unfocused, now - 500);
-      assert.equal(getActiveOverlaySession(sessions), undefined);
-      sessions = focus(sessions, cfg, now);
-      const active = getActiveOverlaySession(sessions);
-      assert.equal(active.runtime.itemTimers.fixed, 10100);
-      assert.equal(getTimerRemaining(cfg, cfg.items[0], active.runtime, now), 10100 - now);
-    }
-  }
-  assert.deepEqual(EMPTY_OVERLAY_SESSIONS, { activeProfileId: null, profiles: {} });
-});
-
-test("an automatic timer that expires while unfocused stays at zero when focus returns", () => {
-  const cfg = profileConfig("game", standalone(true));
-  const active = focus(EMPTY_OVERLAY_SESSIONS, cfg, 100);
-  const away = focus(active, unfocused, 2100);
-  const returned = getActiveOverlaySession(focus(away, cfg, 15000));
-  assert.equal(returned.runtime.itemTimers.fixed, 10100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], returned.runtime, 15000), 0);
-});
-
-test("shared state countdowns continue to expire while their overlay is unfocused", () => {
-  const cfg = profileConfig("game", config(10000));
-  cfg.items[0].start_with_overlay = true;
-  const active = focus(EMPTY_OVERLAY_SESSIONS, cfg, 100);
-  const away = focus(active, unfocused, 2100);
-  const returned = getActiveOverlaySession(focus(away, cfg, 5100));
-  assert.equal(returned.runtime.timers.buff, 10100);
-  assert.deepEqual(returned.runtime.itemTimers, {});
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], returned.runtime, 5100), 5000);
-  const expired = getActiveOverlaySession(focus(focus(away, unfocused, 12000), cfg, 15000));
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], expired.runtime, 15000), 0);
-  assert.equal(isItemVisible(cfg, cfg.items[0], expired.runtime, 15000), false);
-});
-
-test("dismissed standalone and shared-state items stay dismissed after focus returns", () => {
-  for (const source of [standalone(true), config()]) {
-    const cfg = profileConfig("game", source);
-    cfg.items[0].start_with_overlay = true;
-    const active = focus(EMPTY_OVERLAY_SESSIONS, cfg, 100);
-    const dismissed = dismissOverlaySessionItem(active, cfg.items[0].id);
-    const away = focus(dismissed, unfocused, 200);
-    const returned = getActiveOverlaySession(focus(away, cfg, 300));
-    assert.equal(isItemVisible(cfg, cfg.items[0], returned.runtime, 300), false);
-    assert.deepEqual(returned.runtime, getActiveOverlaySession(dismissed).runtime);
-    assert.equal(isItemVisible(cfg, cfg.items[0], getActiveOverlaySession(active).runtime, 100), true);
-  }
-});
-
-test("switching between overlay profiles preserves independent countdowns even for inherited item IDs", () => {
-  const first = profileConfig("first", standalone(true));
-  const second = profileConfig("second", standalone(true));
-  let sessions = focus(EMPTY_OVERLAY_SESSIONS, first, 100);
-  sessions = focus(sessions, second, 2100);
-  assert.equal(getActiveOverlaySession(sessions).runtime.itemTimers.fixed, 12100);
-  sessions = focus(sessions, first, 4100);
-  assert.equal(getActiveOverlaySession(sessions).runtime.itemTimers.fixed, 10100);
-  sessions = focus(sessions, second, 6100);
-  assert.equal(getActiveOverlaySession(sessions).runtime.itemTimers.fixed, 12100);
-});
-
-test("returning to a profile applies checkbox edits without restarting its existing timers", () => {
-  const before = profileConfig("game", standalone());
-  const after = profileConfig("game", standalone(true));
-  const active = focus(EMPTY_OVERLAY_SESSIONS, before, 100);
-  const away = focus(active, unfocused, 200);
-  const enabled = focus(away, after, 300);
-  assert.equal(getActiveOverlaySession(enabled).runtime.itemTimers.fixed, 10300);
-  const returned = focus(focus(enabled, unfocused, 1000), after, 2000);
-  assert.equal(getActiveOverlaySession(returned).runtime.itemTimers.fixed, 10300);
-});
-
-test("disarming an unfocused profile clears only its session and rearming starts a fresh timer", () => {
-  const first = profileConfig("first", standalone(true));
-  const second = profileConfig("second", standalone(true));
-  const both = focus(focus(EMPTY_OVERLAY_SESSIONS, first, 100), second, 200);
-  const disarmed = applyOverlaySessionEvent(both, { event: "profile_deactivated", profile_id: "first" }, 300);
-  assert.equal(disarmed.activeProfileId, "second");
-  assert.equal(disarmed.profiles.first, undefined);
-  assert.equal(disarmed.profiles.second.runtime.itemTimers.fixed, 10200);
-  assert.equal(both.profiles.first.runtime.itemTimers.fixed, 10100);
-  const rearmed = focus(disarmed, first, 400);
-  assert.equal(getActiveOverlaySession(rearmed).runtime.itemTimers.fixed, 10400);
-  const stopped = applyOverlaySessionEvent(rearmed, { event: "profile_deactivated", profile_id: "first" }, 500);
-  assert.equal(getActiveOverlaySession(stopped), undefined);
-  assert.equal(stopped.profiles.first, undefined);
-});
-
-const restart = (cfg, state, itemId, now) => applyRuntimeEvent(cfg, state, { event: "overlay_restarted", item_id: itemId }, now);
-
-test("running-only timers are hidden before starting, visible during the countdown, and hidden at expiry", () => {
-  const cfg = standalone();
-  cfg.items[0].show_only_running = true;
-  assert.deepEqual(visibleIds(cfg, EMPTY_RUNTIME, 100), []);
-  const active = start(cfg, EMPTY_RUNTIME, "fixed", 200);
-  assert.deepEqual(visibleIds(cfg, active, 200), ["fixed"]);
-  assert.deepEqual(visibleIds(cfg, active, 10199), ["fixed"]);
-  assert.deepEqual(visibleIds(cfg, active, 10200), []);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], active, 10200), 0);
-});
-
-test("legacy always-visible timers retain their idle and expired display", () => {
-  const cfg = standalone();
-  assert.deepEqual(visibleIds(cfg, EMPTY_RUNTIME, 100), ["fixed"]);
-  assert.deepEqual(visibleIds(cfg, start(cfg, EMPTY_RUNTIME, "fixed", 100), 20000), ["fixed"]);
-});
-
-test("automatic starts and live edits use the same running-only visibility", () => {
-  const before = standalone();
-  const after = standalone(true);
-  after.items[0].show_only_running = true;
-  const activated = applyRuntimeEvent(after, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-  assert.deepEqual(visibleIds(after, activated, 100), ["fixed"]);
-  assert.deepEqual(visibleIds(after, activated, 10100), []);
-  const edited = applyOverlayConfig(before, after, EMPTY_RUNTIME, 200);
-  assert.deepEqual(visibleIds(after, edited, 200), ["fixed"]);
-  assert.equal(edited.itemTimers.fixed, 10200);
-});
-
-test("running-only visibility reads the shared countdown instead of the item's fixed duration", () => {
-  const cfg = config(20000);
-  cfg.items[0].show_only_running = true;
-  const active = start(cfg, EMPTY_RUNTIME, "timer", 100);
-  assert.equal(isItemVisible(cfg, cfg.items[0], active, 15000), true);
-  assert.equal(isItemVisible(cfg, cfg.items[0], active, 20100), false);
-  assert.deepEqual(active.itemTimers, {});
-});
-
-test("a toggle visibility state does not keep an expired running-only timer on screen", () => {
-  const cfg = config();
-  cfg.items[0].show_only_running = true;
-  const active = start(cfg, EMPTY_RUNTIME, "timer", 100);
-  assert.equal(active.flags.buff, true);
-  assert.equal(isItemVisible(cfg, cfg.items[0], active, 10100), false);
-  assert.equal(isItemVisible(cfg, cfg.items[1], active, 10100), true);
-});
-
-test("restarting a selected standalone timer resets its countdown without touching other timers", () => {
-  const cfg = standalone(true);
-  cfg.items[0].show_only_running = true;
-  cfg.items.push({ ...cfg.items[0], id: "other" });
-  const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-  const reset = restart(cfg, active, "fixed", 4000);
-  assert.equal(reset.itemTimers.fixed, 14000);
-  assert.equal(reset.itemTimers.other, 10100);
-  assert.equal(active.itemTimers.fixed, 10100);
-  assert.equal(getTimerRemaining(cfg, cfg.items[0], reset, 4000), 10000);
-});
-
-test("restarting a shared countdown updates its single deadline for every linked timer", () => {
-  const cfg = config(20000);
-  cfg.items.push({ ...cfg.items[0], id: "second" });
-  const active = start(cfg, EMPTY_RUNTIME, "timer", 100);
-  const reset = restart(cfg, active, "timer", 4000);
-  assert.deepEqual(reset.timers, { buff: 24000 });
-  assert.deepEqual(reset.itemTimers, {});
-  for (const timer of [cfg.items[0], cfg.items.at(-1)]) {
-    assert.equal(getTimerRemaining(cfg, timer, reset, 4000), 20000);
-  }
-});
-
-test("restarting a dismissed running-only timer shows it and begins a new countdown", () => {
-  const cfg = standalone(true);
-  cfg.items[0].show_only_running = true;
-  const active = applyRuntimeEvent(cfg, EMPTY_RUNTIME, { event: "profile_activated" }, 100);
-  const hidden = dismissOverlayItem(cfg, active, cfg.items[0]);
-  assert.deepEqual(visibleIds(cfg, hidden, 200), []);
-  const reset = restart(cfg, hidden, "fixed", 300);
-  assert.deepEqual(visibleIds(cfg, reset, 300), ["fixed"]);
-  assert.equal(reset.itemTimers.fixed, 10300);
-  assert.deepEqual(restart(cfg, reset, "missing", 400), reset);
-});
-
-test("a running-only timer that expires during Alt-Tab stays hidden on return", () => {
-  const cfg = profileConfig("game", standalone(true));
-  cfg.items[0].show_only_running = true;
-  const active = focus(EMPTY_OVERLAY_SESSIONS, cfg, 100);
-  const returned = getActiveOverlaySession(focus(focus(active, unfocused, 200), cfg, 15000));
-  assert.deepEqual(visibleIds(cfg, returned.runtime, 15000), []);
-  assert.equal(returned.runtime.itemTimers.fixed, 10100);
+test("disabling shared states suppresses linked displays and leaves independent timers running", () => {
+  const linked = { ...timer, id: "linked", timer_state_id: "buff" };
+  const icon = { type: "icon", id: "icon", state_id: "buff" };
+  const cfg = { ...config([timer, linked, icon]), states_disabled: true };
+  const running = { ...EMPTY_RUNTIME, timers: { buff: 5000 }, flags: { buff: true }, itemTimers: { timer: 1200 } };
+  assert.equal(isItemVisible(cfg, icon, running, 100), false);
+  assert.equal(isItemVisible(cfg, linked, running, 100), false);
+  assert.equal(isItemVisible(cfg, timer, running, 100), true);
 });

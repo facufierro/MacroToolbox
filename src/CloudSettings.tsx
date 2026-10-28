@@ -1,3 +1,5 @@
+import { IconButton } from "./Icon";
+import { useErrorReporter } from "./AppConsole";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
@@ -7,21 +9,21 @@ import type { CloudStatus } from "./types";
 import rules from "../firebase/firestore.rules?raw";
 
 export function CloudSettings() {
+  const reportError = useErrorReporter("Cloud");
   const [status, setStatus] = useState<CloudStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [setup, setSetup] = useState(false);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     let active = true;
     const subscription = listen<CloudStatus>("firebase-status", e => { if (active) setStatus(e.payload); });
-    subscription.then(() => api.cloudStatus()).then(s => { if (active) setStatus(s); }).catch(e => { if (active) setError(String(e)); });
-    return () => { active = false; void subscription.then(unlisten => unlisten()); };
-  }, []);
+    subscription.then(() => api.cloudStatus()).then(s => { if (active) setStatus(s); }).catch(e => { if (active) reportError(e); });
+    return () => { active = false; void subscription.then(unlisten => unlisten()).catch(reportError); };
+  }, [reportError]);
   async function run(action: () => Promise<CloudStatus>) {
-    setBusy(true); setError("");
-    try { setStatus(await action()); } catch (e) { setError(String(e)); }
+    setBusy(true);
+    try { setStatus(await action()); } catch (e) { reportError(e); }
     finally { setBusy(false); }
   }
   async function configure() {
@@ -37,7 +39,7 @@ export function CloudSettings() {
     try {
       const path = await save({ defaultPath: "MacroToolbox-Firebase.json", filters: [{ name: "JSON", extensions: ["json"] }] });
       if (path) await api.writeTextFile(path, await api.cloudExportConfig());
-    } catch (e) { setError(String(e)); }
+    } catch (e) { reportError(e); }
   }
   async function choose(choice: "local" | "cloud") {
     const revision = status?.revision ?? null;
@@ -53,20 +55,19 @@ export function CloudSettings() {
     {status?.account && <strong>{status.account}</strong>}
     <p role="status">{status?.configured ? status.message : "Connect Firebase once to enable cloud backup."}</p>
     {status?.savedAt && <small>Last cloud save: {new Date(status.savedAt * 1000).toLocaleString()}</small>}
-    {error && <p role="alert" className="cloud-settings__error">{error}</p>}
     {status?.configured && <div className="cloud-settings__actions">
-      {(!status.account || status.phase === "error") && <button className="btn btn--primary" disabled={working} onClick={() => void run(api.cloudLogin)}>Sign in with Google</button>}
-      {status.phase === "signing_in" && <button className="btn btn--ghost" onClick={() => void api.cloudCancelLogin().catch(e => setError(String(e)))}>Cancel sign-in</button>}
+      {(!status.account || status.phase === "error") && <IconButton showLabel icon="right-to-bracket" label="Sign in with Google" className="btn btn--primary" disabled={working} onClick={() => void run(api.cloudLogin)} />}
+      {status.phase === "signing_in" && <IconButton showLabel icon="arrow-left" label="Cancel sign-in" className="btn btn--secondary" onClick={() => void api.cloudCancelLogin().catch(e => reportError(e))} />}
       {status.account && <>
-        <button className="btn btn--primary" disabled={working} onClick={() => void run(() => api.cloudSync())}>Sync now</button>
-        <button className="btn btn--ghost" disabled={working} onClick={() => void run(api.cloudLogout)}>Sign out</button>
+        <IconButton showLabel icon="rotate" label="Sync now" className="btn btn--primary" disabled={working} onClick={() => void run(() => api.cloudSync())} />
+        <IconButton showLabel icon="right-from-bracket" label="Sign out" className="btn btn--ghost" disabled={working} onClick={() => void run(api.cloudLogout)} />
       </>}
-      {!status.account && <button className="btn btn--ghost" disabled={working} onClick={() => setSetup(!setup)}>Connection settings</button>}
-      <button className="btn btn--ghost" disabled={working} onClick={() => void exportConnection()}>Save connection file</button>
+      {!status.account && <IconButton showLabel icon="gear" label="Connection settings" className="btn btn--ghost" disabled={working} onClick={() => setSetup(!setup)} />}
+      <IconButton showLabel icon="floppy-disk" label="Save connection file" className="btn btn--ghost" disabled={working} onClick={() => void exportConnection()} />
     </div>}
     {status?.phase === "choice" && <div className="cloud-settings__actions">
-      <button className="btn btn--primary" disabled={working || !status.revision} onClick={() => void choose("cloud")}>Restore cloud copy</button>
-      <button className="btn btn--ghost" disabled={working} onClick={() => void choose("local")}>Keep this computer</button>
+      <IconButton showLabel icon="cloud-arrow-down" label="Restore cloud copy" className="btn btn--primary" disabled={working || !status.revision} onClick={() => void choose("cloud")} />
+      <IconButton showLabel icon="desktop" label="Keep this computer" className="btn btn--ghost" disabled={working} onClick={() => void choose("local")} />
     </div>}
     {status && (!status.configured || setup) && <div className="cloud-settings__setup">
       <p>One-time project setup</p>
@@ -76,14 +77,14 @@ export function CloudSettings() {
         <li>In the same project's Google Auth Platform, create a Desktop app client and download its JSON.</li>
       </ol>
       <div className="cloud-settings__actions">
-        <button className="btn btn--ghost" onClick={() => void openUrl("https://console.firebase.google.com/").catch(e => setError(String(e)))}>Open Firebase</button>
-        <button className="btn btn--ghost" onClick={() => void openUrl(`https://console.cloud.google.com/auth/clients${status.projectId ? `?project=${encodeURIComponent(status.projectId)}` : ""}`).catch(e => setError(String(e)))}>Google desktop client</button>
-        <button className="btn btn--ghost" onClick={() => void navigator.clipboard.writeText(rules).then(() => setCopied(true)).catch(e => setError(String(e)))}>{copied ? "Rules copied" : "Copy access rules"}</button>
+        <IconButton showLabel icon="arrow-up-right-from-square" label="Open Firebase" className="btn btn--ghost" onClick={() => void openUrl("https://console.firebase.google.com/").catch(e => reportError(e))} />
+        <IconButton showLabel icon="desktop" label="Google desktop client" className="btn btn--ghost" onClick={() => void openUrl(`https://console.cloud.google.com/auth/clients${status.projectId ? `?project=${encodeURIComponent(status.projectId)}` : ""}`).catch(e => reportError(e))} />
+        <IconButton showLabel icon={copied ? "check" : "copy"} label={copied ? "Rules copied" : "Copy access rules"}  className="btn btn--ghost" onClick={() => void navigator.clipboard.writeText(rules).then(() => setCopied(true)).catch(e => reportError(e))} />
       </div>
       <label>Firebase Web API key (Project settings → General)
         <input value={apiKey} onChange={e => setApiKey(e.target.value)} autoComplete="off" spellCheck={false} placeholder="Paste Web API key" />
       </label>
-      <button className="btn btn--primary" disabled={working} onClick={() => void configure().catch(e => setError(String(e)))}>Import JSON &amp; connect</button>
+      <IconButton showLabel icon="file-import" label="Import JSON & connect" className="btn btn--primary" disabled={working} onClick={() => void configure().catch(e => reportError(e))} />
       <small>A saved MacroToolbox connection file also works here, without entering an API key.</small>
     </div>}
     <small>Changes are checked every 30 seconds while MacroToolbox is running. Offline changes stay on this computer. Installed programs and extra script dependencies must be reinstalled separately.</small>

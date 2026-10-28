@@ -1,24 +1,12 @@
+import { mapBehavior } from "./behaviors.ts";
 import type { Profile, ProfileState, Scope } from "./types";
 
-// Keep local/inherited overrides first; other profiles retain ownership of their definitions.
-export function availableStates(profiles: Profile[], localStates: ProfileState[]) {
-  const states = new Map(localStates.map(state => [state.id, state]));
-  for (const profile of profiles) {
-    for (const state of profile.states) {
-      if (!states.has(state.id)) states.set(state.id, state);
-    }
-  }
-  return [...states.values()];
-}
-
 export function mapStateActions(behavior: string, mapId: (id: string) => string | null) {
-  return behavior.split(";").flatMap(action => {
-    const match = action.trim().match(/^state\((.+)\)$/);
-    if (!match) return [action];
-    const id = match[1].trim();
-    const mapped = mapId(id);
-    return mapped === null ? [] : [mapped === id ? action : `state(${mapped})`];
-  }).join(";");
+  return mapBehavior(behavior, step => {
+    if (step.type !== "state") return step;
+    const stateId = mapId(step.stateId);
+    return stateId === null ? null : { ...step, stateId };
+  });
 }
 
 export function withReferencedStates(profile: Profile, states: ProfileState[]): Profile {
@@ -46,28 +34,14 @@ export function carryReferencedStates(profile: Profile, sourceStates: ProfileSta
   };
 }
 
-export function removeProfileState(scope: Scope, profileId: string, stateId: string): Scope {
-  const profiles = scope.profiles.map(profile => profile.id === profileId
-    ? { ...profile, states: profile.states.filter(state => state.id !== stateId) }
-    : profile);
-  // A legacy copy or an inherited override may still define this state.
-  if (profiles.some(profile => profile.states.some(state => state.id === stateId))) {
-    return { ...scope, profiles };
-  }
+export function removeProfileState(scope: Scope, _profileId: string, stateId: string): Scope {
   const removeAction = (behavior: string) => mapStateActions(behavior, id => id === stateId ? null : id);
-  return {
-    ...scope,
-    profiles: profiles.map(profile => ({
-      ...profile,
-      hotkeys: profile.hotkeys.map(hotkey => ({
-        ...hotkey,
-        state_id: hotkey.state_id === stateId ? null : hotkey.state_id,
-        behavior: removeAction(hotkey.behavior),
-      })),
-      events: profile.events.map(event => ({ ...event, behavior: removeAction(event.behavior) })),
-      overlay_items: profile.overlay_items.map(item => item.type === "timer"
-        ? { ...item, state_id: item.state_id === stateId ? null : item.state_id, timer_state_id: item.timer_state_id === stateId ? null : item.timer_state_id }
-        : { ...item, state_id: item.state_id === stateId ? null : item.state_id }),
-    })),
-  };
+  return { ...scope, states: scope.states.filter(state => state.id !== stateId), profiles: scope.profiles.map(profile => ({
+    ...profile,
+    states: profile.states.filter(state => state.id !== stateId),
+    hotkeys: profile.hotkeys.map(hotkey => ({ ...hotkey, state_id: hotkey.state_id === stateId ? null : hotkey.state_id, behavior: removeAction(hotkey.behavior) })),
+    events: profile.events.map(event => ({ ...event, behavior: removeAction(event.behavior) })),
+    overlay_items: profile.overlay_items.map(item => ({ ...item, state_id: item.state_id === stateId ? null : item.state_id,
+      ...(item.type === "timer" ? { timer_state_id: item.timer_state_id === stateId ? null : item.timer_state_id } : {}) })),
+  })) };
 }

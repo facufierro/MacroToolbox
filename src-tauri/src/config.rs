@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v4 = event-triggered behaviors.
-pub const CURRENT_DB_VERSION: u32 = 4;
+/// older files. v5 moves state definitions into their target folder.
+pub const CURRENT_DB_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -26,6 +26,10 @@ pub struct Game {
     pub image: Option<String>,
     #[serde(default)]
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub states: Vec<ProfileState>,
+    #[serde(default)]
+    pub states_disabled: bool,
 }
 
 /// A user script owned by a profile. It runs either when its hotkey is pressed (while the
@@ -74,7 +78,7 @@ fn default_profile_kind() -> String {
 pub struct Profile {
     pub id: String,
     pub name: String,
-    /// "hotkeys" | "scripts" | "overlay" — what the profile is for (drives the editor UI).
+    /// Legacy category retained for saved configurations. Every profile may contain all parts.
     #[serde(default = "default_profile_kind")]
     pub kind: String,
     #[serde(default)]
@@ -98,6 +102,12 @@ pub struct Profile {
     #[serde(default)]
     pub overlay_disabled: bool,
     #[serde(default)]
+    pub hotkeys_disabled: bool,
+    #[serde(default)]
+    pub events_disabled: bool,
+    #[serde(default)]
+    pub scripts_disabled: bool,
+    #[serde(default)]
     pub toggle_hotkeys_key: Option<String>,
     #[serde(default)]
     pub toggle_overlay_key: Option<String>,
@@ -107,7 +117,34 @@ pub struct Profile {
 pub struct OverlayGroup {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default = "default_group_layout")]
+    pub layout: String,
+    #[serde(default = "default_group_gap")]
+    pub gap: u32,
+    #[serde(default)]
+    pub visible_while_timer_id: Option<String>,
 }
+
+impl Profile {
+    pub fn section_enabled(&self, section: &str) -> bool {
+        match section {
+            "hotkeys" => !self.hotkeys_disabled,
+            "events" => !self.events_disabled,
+            "scripts" => !self.scripts_disabled,
+            "overlay" => !self.overlay_disabled,
+            _ => false,
+        }
+    }
+}
+
+fn default_group_layout() -> String { "free".into() }
+fn default_group_gap() -> u32 { 8 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OverlayConfig {
@@ -115,6 +152,12 @@ pub struct OverlayConfig {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub items: Vec<OverlayItem>,
+    #[serde(default)]
+    pub groups: Vec<OverlayGroup>,
+    #[serde(default)]
+    pub disabled_items: Vec<String>,
+    #[serde(default)]
+    pub states_disabled: bool,
     #[serde(default)]
     pub states: Vec<ProfileState>,
     #[serde(default)]
@@ -167,6 +210,8 @@ pub enum OverlayItem {
         #[serde(default)]
         group_id: Option<String>,
         #[serde(default)]
+        visible_while_timer_id: Option<String>,
+        #[serde(default)]
         timer_state_id: Option<String>,
         #[serde(default)]
         start_with_overlay: bool,
@@ -197,6 +242,8 @@ pub enum OverlayItem {
         #[serde(default)]
         group_id: Option<String>,
         #[serde(default)]
+        visible_while_timer_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
         display_mode: String,
@@ -220,6 +267,8 @@ pub enum OverlayItem {
         #[serde(default)]
         group_id: Option<String>,
         #[serde(default)]
+        visible_while_timer_id: Option<String>,
+        #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
         display_mode: String,
@@ -241,6 +290,8 @@ pub enum OverlayItem {
         state_id: Option<String>,
         #[serde(default)]
         group_id: Option<String>,
+        #[serde(default)]
+        visible_while_timer_id: Option<String>,
         #[serde(default)]
         visible_when: Option<String>,
         #[serde(default = "default_overlay_display_mode")]
@@ -317,6 +368,7 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
 
     if indices.is_empty() {
         db.games.push(Game {
+            states: Vec::new(), states_disabled: false,
             id: GLOBAL_FOLDER_ID.to_string(),
             name: "Global".to_string(),
             exe: "*".to_string(),
@@ -336,7 +388,9 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
     // Merge every duplicate Global folder's profiles into the first, then drop the extras.
     let keep = indices[0];
     let merged: Vec<Profile> = indices.iter().flat_map(|&i| db.games[i].profiles.clone()).collect();
+    let merged_states = indices.iter().flat_map(|&i| db.games[i].states.clone()).collect();
     db.games[keep].profiles = merged;
+    db.games[keep].states = merged_states;
     db.games[keep].exe = "*".to_string();
     for &i in indices.iter().skip(1).rev() {
         db.games.remove(i);
@@ -356,8 +410,16 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
     let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     let (mut db, migrated) = match version {
-        v if v >= CURRENT_DB_VERSION => {
+        v if v > CURRENT_DB_VERSION => return Err(format!("Settings schema v{v} requires a newer MacroToolbox version.")),
+        v if v == CURRENT_DB_VERSION => {
             (serde_json::from_value(value).map_err(|e| e.to_string())?, false)
+        }
+        4 => {
+            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let mut backup = path.as_os_str().to_owned(); backup.push(".v4.bak");
+            std::fs::copy(path, std::path::Path::new(&backup)).map_err(|e| format!("Could not back up settings: {e}"))?;
+            db.version = CURRENT_DB_VERSION;
+            (db, true)
         }
         3 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -385,7 +447,9 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
 
     // Self-heal the always-present global folder, then persist only when something changed.
     let added_global = ensure_global_folder(&mut db);
-    if migrated || added_global {
+    let moved_states = normalize_states(&mut db);
+    let grouped_overlays = normalize_overlays(&mut db);
+    if migrated || added_global || moved_states || grouped_overlays {
         save_db(path, &db)?;
     }
     Ok(db)
@@ -508,6 +572,7 @@ mod legacy_v2 {
                     .map(|index| groups.remove(index).1)
                     .unwrap_or_default();
                 games.push(NewGame {
+                    states: Vec::new(), states_disabled: false,
                     id: game.id.clone(),
                     name: game.name.clone(),
                     exe: "*".to_string(),
@@ -516,6 +581,7 @@ mod legacy_v2 {
                 });
                 for (index, (exe, profiles)) in groups.into_iter().enumerate() {
                     games.push(NewGame {
+                        states: Vec::new(), states_disabled: false,
                         id: split_id(&game.id, index + 2, &reserved, &mut allocated),
                         name: format!("{} ({})", game.name, target_label(&exe)),
                         exe,
@@ -529,6 +595,7 @@ mod legacy_v2 {
             if groups.is_empty() {
                 allocated.insert(game.id.clone());
                 games.push(NewGame {
+                    states: Vec::new(), states_disabled: false,
                     id: game.id,
                     name: game.name,
                     exe: String::new(),
@@ -552,6 +619,7 @@ mod legacy_v2 {
                     game.name.clone()
                 };
                 games.push(NewGame {
+                    states: Vec::new(), states_disabled: false,
                     id,
                     name,
                     exe,
@@ -638,17 +706,89 @@ mod legacy_v1 {
                         p
                     })
                     .collect();
-                super::Game { id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
+                super::Game { states: Vec::new(), states_disabled: false, id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
             })
             .collect();
         NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings }
     }
 }
 
+/// Profile state lists are accepted only as a legacy/import boundary. The folder
+/// is the sole persisted owner, including when the importing profile is disabled.
+pub fn normalize_states(db: &mut Database) -> bool {
+    let mut changed = false;
+    for game in &mut db.games {
+        let mut ids = HashSet::new();
+        game.states.retain(|state| { let keep = ids.insert(state.id.clone()); changed |= !keep; keep });
+        for profile in &mut game.profiles {
+            changed |= !profile.states.is_empty();
+            for state in std::mem::take(&mut profile.states) {
+                if ids.insert(state.id.clone()) { game.states.push(state); }
+            }
+        }
+    }
+    changed
+}
+
+/// Every part belongs to an overlay. Legacy standalone parts keep their identity,
+/// coordinates and action references inside a container with no added offset.
+pub fn normalize_overlays(db: &mut Database) -> bool {
+    let mut changed = false;
+    for game in &mut db.games {
+        let mut visited = HashSet::new();
+        let mut reserved: HashSet<String> = game.profiles.iter().flat_map(|profile|
+            profile.overlay_groups.iter().map(|group| group.id.clone()).chain(profile.overlay_items.iter().map(overlay_item_id))
+        ).collect();
+        for index in 0..game.profiles.len() {
+            changed |= normalize_profile_overlays(&mut game.profiles, index, &mut visited, &mut reserved);
+        }
+    }
+    changed
+}
+
+fn normalize_profile_overlays(profiles: &mut [Profile], index: usize, visited: &mut HashSet<usize>, reserved: &mut HashSet<String>) -> bool {
+    if !visited.insert(index) { return false; }
+    let parent = profiles[index].parent_id.as_ref().and_then(|id| profiles.iter().position(|profile| &profile.id == id));
+    let mut changed = parent.is_some_and(|parent| normalize_profile_overlays(profiles, parent, visited, reserved));
+    let mut groups: HashSet<String> = resolve_profile_overlay_groups(profiles, &profiles[index]).iter().map(|group| group.id.clone()).collect();
+    let inherited: HashMap<String, String> = parent.map(|parent| resolve_profile_overlay_items(profiles, &profiles[parent])).unwrap_or_default().iter().filter_map(|item| match item {
+        OverlayItem::Timer { id, group_id: Some(group), .. } | OverlayItem::Icon { id, group_id: Some(group), .. }
+        | OverlayItem::Bar { id, group_id: Some(group), .. } | OverlayItem::Text { id, group_id: Some(group), .. } => Some((id.clone(), group.clone())),
+        _ => None,
+    }).collect();
+    let profile = &mut profiles[index];
+    for item in &mut profile.overlay_items {
+        let (id, name, group_id) = match item {
+            OverlayItem::Timer { id, name, group_id, .. } | OverlayItem::Icon { id, name, group_id, .. }
+            | OverlayItem::Bar { id, name, group_id, .. } | OverlayItem::Text { id, name, group_id, .. } => (id, name, group_id),
+        };
+        if group_id.as_ref().is_some_and(|id| groups.contains(id)) { continue; }
+        if group_id.is_none() {
+            if let Some(parent_group) = inherited.get(id.as_str()).filter(|id| groups.contains(id.as_str())) {
+                *group_id = Some(parent_group.clone()); changed = true; continue;
+            }
+        }
+        let container = group_id.clone().unwrap_or_else(|| {
+            let mut candidate = format!("overlay:{id}");
+            while reserved.contains(&candidate) { candidate.push('_'); }
+            candidate
+        });
+        reserved.insert(container.clone());
+        groups.insert(container.clone());
+        profile.overlay_groups.push(OverlayGroup { id: container.clone(), name: if name.is_empty() { "Overlay".into() } else { name.clone() },
+            disabled: false, x: 0.0, y: 0.0, layout: "free".into(), gap: default_group_gap(), visible_while_timer_id: None });
+        *group_id = Some(container);
+        changed = true;
+    }
+    changed
+}
+
 pub fn save_db(path: &Path, db: &Database) -> Result<(), String> {
     // Stamp the current version on every write so a fresh default or any caller's db is
     // correctly versioned and never re-migrates on the next load.
     let mut db = db.clone();
+    normalize_states(&mut db);
+    normalize_overlays(&mut db);
     db.version = CURRENT_DB_VERSION;
     let content = serde_json::to_string_pretty(&db).map_err(|e| e.to_string())?;
     // Write to a temp file then rename, so an interrupted write can't corrupt db.json.
@@ -737,20 +877,6 @@ pub fn resolve_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile)
     )
 }
 
-/// Other profiles in the same folder can reference a state without copying its definition.
-pub fn available_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a ProfileState> {
-    let mut states = resolve_profile_states(profiles, profile);
-    let mut ids: HashSet<String> = states.iter().map(|state| state.id.clone()).collect();
-    for owner in profiles {
-        for state in &owner.states {
-            if ids.insert(state.id.clone()) {
-                states.push(state);
-            }
-        }
-    }
-    states
-}
-
 pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a OverlayItem> {
     let mut visited = HashSet::new();
     resolve_profile_entries(
@@ -762,9 +888,108 @@ pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a P
     )
 }
 
+pub fn resolve_profile_overlay_groups<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a OverlayGroup> {
+    resolve_profile_entries(profiles, profile, |current| current.overlay_groups.as_slice(), |group| group.id.clone(), &mut HashSet::new())
+}
+
+pub fn profile_has_overlay(profiles: &[Profile], profile: &Profile) -> bool {
+    !profile.overlay_disabled && !resolve_profile_overlay_items(profiles, profile).is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn overlay_groups_and_direct_timer_visibility_round_trip_with_legacy_defaults() {
+        let profile: Profile = serde_json::from_value(serde_json::json!({
+            "id":"all", "name":"All", "kind":"hotkeys",
+            "overlay_groups":[{"id":"group","name":"Buff"}],
+            "overlay_items":[{"type":"icon","id":"icon","x":0,"y":0,"w":32,"h":32,"src":null,
+                "group_id":"group","visible_while_timer_id":"timer"}]
+        })).unwrap();
+        assert_eq!(profile.overlay_groups[0].layout, "free");
+        assert_eq!(profile.overlay_groups[0].gap, 8);
+        assert_eq!(profile.overlay_groups[0].x, 0.0);
+        let data = serde_json::to_value(&profile).unwrap();
+        assert_eq!(data["overlay_items"][0]["visible_while_timer_id"], "timer");
+        assert!(super::profile_has_overlay(std::slice::from_ref(&profile), &profile));
+    }
+
+    #[test]
+    fn standalone_parts_gain_containers_without_changing_their_ids_positions_or_actions() {
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({"scopes":[{"id":"folder","name":"Folder","profiles":[
+            {"id":"profile","name":"Profile","hotkeys":[{"trigger":"e","behavior":"restartoverlay(timer)"}],
+             "overlay_items":[{"type":"timer","id":"timer","name":"Buff","x":25,"y":70,"duration_ms":5000}]}
+        ]}],"settings":{"ahk_exe":""}})).unwrap();
+        assert!(super::normalize_overlays(&mut db));
+        let profile = &db.games[0].profiles[0];
+        let group = &profile.overlay_groups[0];
+        assert_eq!(group.name, "Buff"); assert_eq!(group.layout, "free");
+        assert_eq!((group.x, group.y), (0.0, 0.0));
+        let part = serde_json::to_value(&profile.overlay_items[0]).unwrap();
+        assert_eq!(part["id"], "timer"); assert_eq!(part["x"].as_f64(), Some(25.0)); assert_eq!(part["y"].as_f64(), Some(70.0));
+        assert_eq!(part["group_id"], group.id); assert_eq!(profile.hotkeys[0].behavior, "restartoverlay(timer)");
+        assert!(!super::normalize_overlays(&mut db));
+    }
+
+    #[test]
+    fn normalization_respects_inherited_containers_even_when_children_are_stored_first() {
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({"scopes":[{"id":"folder","name":"Folder","profiles":[
+            {"id":"child","name":"Child","parent_id":"base","overlay_items":[{"type":"timer","id":"timer","x":40,"y":50,"duration_ms":10000}]},
+            {"id":"base","name":"Base","overlay_items":[{"type":"timer","id":"timer","x":10,"y":20,"duration_ms":5000}]}
+        ]}],"settings":{"ahk_exe":""}})).unwrap();
+        assert!(super::normalize_overlays(&mut db));
+        let profiles = &db.games[0].profiles;
+        assert!(profiles[0].overlay_groups.is_empty());
+        let group = &profiles[1].overlay_groups[0];
+        let child = serde_json::to_value(&profiles[0].overlay_items[0]).unwrap();
+        assert_eq!(child["group_id"], group.id);
+        assert_eq!(super::resolve_profile_overlay_groups(profiles, &profiles[0]).len(), 1);
+        assert!(!super::normalize_overlays(&mut db));
+    }
+
+    #[test]
+    fn normalization_keeps_explicit_membership_and_recovers_missing_container_definitions() {
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({"scopes":[{"id":"folder","name":"Folder","profiles":[
+            {"id":"profile","name":"Profile","overlay_groups":[{"id":"existing","name":"Existing","layout":"column"}],
+             "overlay_items":[{"type":"text","id":"text","group_id":"existing","x":0,"y":0,"font_size":16,"color":"#fff","content":"Label"},
+                 {"type":"timer","id":"timer","group_id":"missing","x":0,"y":0,"duration_ms":5000},
+                 {"type":"timer","id":"other","group_id":"missing","x":0,"y":0,"duration_ms":5000}]}
+        ]}],"settings":{"ahk_exe":""}})).unwrap();
+        assert!(super::normalize_overlays(&mut db));
+        let profile = &db.games[0].profiles[0];
+        assert_eq!(profile.overlay_groups.len(), 2);
+        assert_eq!(profile.overlay_groups[0].layout, "column");
+        assert_eq!(profile.overlay_groups[1].id, "missing");
+        assert!(!super::normalize_overlays(&mut db));
+    }
+
+    #[test]
+    fn legacy_profile_states_move_to_one_folder_definition_even_when_disabled() {
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({"scopes":[{"id":"folder","name":"Folder","profiles":[
+            {"id":"one","name":"One","states":[{"id":"buff","name":"Buff","duration_ms":1000}]},
+            {"id":"two","name":"Two","states":[{"id":"buff","name":"Buff","duration_ms":2000},{"id":"other","name":"Other"}]}
+        ]}],"settings":{"ahk_exe":""}})).unwrap();
+        assert!(super::normalize_states(&mut db));
+        assert_eq!(db.games[0].states.len(), 2);
+        assert_eq!(db.games[0].states[0].duration_ms, Some(1000));
+        assert!(db.games[0].profiles.iter().all(|profile| profile.states.is_empty()));
+        assert!(!super::normalize_states(&mut db));
+    }
+
+    #[test]
+    fn v4_settings_are_backed_up_before_folder_state_migration() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-v4-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":4,"scopes":[{"id":"folder","name":"Folder","profiles":[{"id":"keys","name":"Keys","states":[{"id":"buff","name":"Buff"}]}]}],"settings":{"ahk_exe":""}}).to_string();
+        std::fs::write(&path, &source).unwrap();
+        let migrated = load_db(&path).unwrap();
+        assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
+        assert_eq!(migrated.games[0].states[0].id, "buff");
+        let backup = std::path::PathBuf::from(format!("{}.v4.bak", path.display()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+        std::fs::remove_file(&path).unwrap(); std::fs::remove_file(backup).unwrap();
+    }
 
     #[test]
     fn timer_start_with_overlay_defaults_off_and_round_trips() {
@@ -793,36 +1018,6 @@ mod tests {
         let saved = serde_json::to_value(enabled).unwrap();
         let reloaded: super::OverlayItem = serde_json::from_value(saved).unwrap();
         assert_eq!(serde_json::to_value(reloaded).unwrap()["show_only_running"], true);
-    }
-
-    #[test]
-    fn available_states_share_folder_definitions_and_preserve_overrides() {
-        let profiles: Vec<Profile> = serde_json::from_value(serde_json::json!([
-            {
-                "id": "owner", "name": "Hotkeys", "kind": "hotkeys",
-                "states": [{ "id": "buff", "name": "Buff active", "duration_ms": 10000 }]
-            },
-            {
-                "id": "overlay", "name": "Overlay", "kind": "overlay"
-            },
-            {
-                "id": "override", "name": "Override", "kind": "overlay", "parent_id": "owner",
-                "states": [{ "id": "buff", "name": "Buff override", "duration_ms": 5000 }]
-            }
-        ])).unwrap();
-
-        let shared = super::available_profile_states(&profiles, &profiles[1]);
-        assert_eq!(shared.len(), 1);
-        assert!(std::ptr::eq(shared[0], &profiles[0].states[0]));
-        assert!(profiles[1].states.is_empty());
-
-        let overridden = super::available_profile_states(&profiles, &profiles[2]);
-        assert_eq!(overridden.len(), 1);
-        assert_eq!(overridden[0].duration_ms, Some(5000));
-        assert!(std::ptr::eq(overridden[0], &profiles[2].states[0]));
-
-        let isolated = super::available_profile_states(&profiles[1..2], &profiles[1]);
-        assert!(isolated.is_empty());
     }
 
     #[test]
@@ -863,7 +1058,7 @@ mod tests {
 
         let migrated = load_db(&path).unwrap();
 
-        assert_eq!(migrated.version, 4);
+        assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
         assert!(migrated.games[0].profiles[0].events.is_empty());
         assert!(path.with_extension("json.v3.bak").exists());
         let _ = std::fs::remove_file(path.with_extension("json.v3.bak"));
@@ -893,7 +1088,7 @@ mod tests {
 
         let migrated = legacy_v2::migrate(legacy);
 
-        assert_eq!(migrated.version, 4);
+        assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
         assert_eq!(migrated.games.len(), 2);
         assert_eq!(migrated.games[0].exe, "First.exe");
         assert_eq!(migrated.games[1].exe, "Second.exe");

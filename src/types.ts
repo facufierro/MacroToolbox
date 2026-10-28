@@ -40,6 +40,9 @@ export interface OverlayTrigger {
 export interface OverlayConfig {
   profile_id: string | null;
   items: OverlayItem[];
+  groups?: OverlayGroup[];
+  disabled_items?: string[];
+  states_disabled?: boolean;
   states: ProfileState[];
   hotkeys: OverlayHotkeyStateBinding[];
 }
@@ -53,6 +56,7 @@ interface OverlayItemBase {
   y: number;
   state_id: string | null;
   group_id?: string | null;
+  visible_while_timer_id?: string | null;
   visible_when?: string | null;
   display_mode?: OverlayDisplayMode;
   hotkey_trigger?: string | null;
@@ -65,11 +69,18 @@ export type OverlayItem =
   | (OverlayItemBase & { type: "bar"; w: number; h: number; color: string; max_value: number })
   | (OverlayItemBase & { type: "text"; font_size: number; color: string; content: string });
 
-/** Retained for saved configurations and exports from before state-based dismissal. */
 export interface OverlayGroup {
   id: string;
   name: string;
+  disabled?: boolean;
+  x?: number;
+  y?: number;
+  layout?: "free" | "row" | "column";
+  gap?: number;
+  visible_while_timer_id?: string | null;
 }
+
+export type OverlayTarget = OverlayItem | (OverlayGroup & { type: "group" });
 
 export type ProfileKind = "hotkeys" | "events" | "scripts" | "overlay";
 
@@ -81,12 +92,16 @@ export interface Profile {
   parent_id: string | null;
   hotkeys: Hotkey[];
   events: BehaviorEvent[];
+  /** Portable legacy definitions; normalized into Scope.states by the backend. */
   states: ProfileState[];
   overlay_items: OverlayItem[];
   overlay_triggers: OverlayTrigger[];
   overlay_groups: OverlayGroup[];
   scripts: Script[];
   overlay_disabled?: boolean;
+  hotkeys_disabled?: boolean;
+  events_disabled?: boolean;
+  scripts_disabled?: boolean;
   toggle_hotkeys_key: string | null;
   toggle_overlay_key: string | null;
 }
@@ -109,6 +124,8 @@ export interface Script {
 
 /** A folder owns the application target shared by its profiles. */
 export interface Scope {
+  states: ProfileState[];
+  states_disabled?: boolean;
   id: string;
   name: string;
   exe: string;
