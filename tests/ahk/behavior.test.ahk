@@ -18,6 +18,7 @@ global testOnClick := 0, testClickFailAt := 0
 global testCursor := {x: 450, y: 300}, testClient := {x: 100, y: 50}
 global testNativeTarget := 0, testNativeMessages := []
 global testMoves := [], testDragArmed := false, testDragged := false
+global copilotCtrlHeld := false
 OnError(TestUnhandledError)
 
 RunTest("release precedes trailing delay and press", TestSequence)
@@ -727,7 +728,9 @@ TestMouseMove(x, y, speed := 0) {
     testCursor := {x: x, y: y}
 }
 
-TestTryGetViewportFromApp(&x, &y, &width, &height) {
+TestTryGetViewportFromApp(&x, &y, &width, &height, target := "") {
+    global testViewportTarget
+    testViewportTarget := target
     x := 100
     y := 50
     width := 1000

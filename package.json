@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test.ps1",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

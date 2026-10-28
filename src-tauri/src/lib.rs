@@ -1,10 +1,12 @@
-use serde::Serialize;
 use std::{collections::HashMap, sync::{Mutex, OnceLock}};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
 
 mod ahk;
+mod behavior;
+mod runtime;
+mod protocol;
 mod config;
 mod firebase;
 mod scripts;
@@ -74,94 +76,20 @@ mod overlay_position_tests {
 
 pub struct AppState {
     pub db_access: Mutex<()>,
+    pub runtime: Mutex<runtime::Runtime>,
     pub db_path: std::path::PathBuf,
     pub scripts_path: std::path::PathBuf,
     /// The single always-on AutoHotkey process holding the Copilot remap and every armed
     /// profile's hotkeys and lifecycle events. Regenerated + relaunched
     /// whenever folders or profiles change.
     pub hotkeys_ahk: Mutex<ahk::AhkManager>,
-    pub overlay_config: Mutex<config::OverlayConfig>,
     /// One Windows Job Object per profile (each kill-on-close) holding that profile's launched
     /// script processes. Everything in the job dies when the app process exits — even on a crash
     /// or hard-kill — and when the profile is disarmed, so scripts can never outlive the app.
     #[cfg(target_os = "windows")]
-    pub script_jobs: Mutex<HashMap<String, JobObject>>,
+    pub script_runtime: Mutex<scripts::ScriptRuntime>,
     #[cfg(target_os = "windows")]
     window_transforms: Mutex<HashMap<String, WindowTransformState>>,
-}
-
-/// A Windows Job Object configured to kill every process in it when the job handle closes. The
-/// app holds the only handle, so if the app dies (quit, crash, or `taskkill`) the OS closes the
-/// handle and terminates all the job's script processes and their descendants.
-#[cfg(target_os = "windows")]
-pub struct JobObject(winapi::um::winnt::HANDLE);
-
-#[cfg(target_os = "windows")]
-unsafe impl Send for JobObject {}
-
-#[cfg(target_os = "windows")]
-impl JobObject {
-    fn new() -> Self {
-        use winapi::um::jobapi2::{CreateJobObjectW, SetInformationJobObject};
-        use winapi::um::winnt::{
-            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-        unsafe {
-            let handle = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-            if !handle.is_null() {
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
-                    handle,
-                    JobObjectExtendedLimitInformation,
-                    &mut info as *mut _ as *mut winapi::ctypes::c_void,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-            }
-            JobObject(handle)
-        }
-    }
-
-    fn assign(&self, process: std::os::windows::io::RawHandle) {
-        if self.0.is_null() {
-            return;
-        }
-        use winapi::um::jobapi2::AssignProcessToJobObject;
-        unsafe {
-            AssignProcessToJobObject(self.0, process as winapi::um::winnt::HANDLE);
-        }
-    }
-
-    fn terminate(&self) {
-        if self.0.is_null() {
-            return;
-        }
-        use winapi::um::jobapi2::TerminateJobObject;
-        unsafe {
-            TerminateJobObject(self.0, 1);
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for JobObject {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                winapi::um::handleapi::CloseHandle(self.0);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OverlayEventPayload {
-    event: String,
-    profile_id: Option<String>,
-    hotkey_trigger: Option<String>,
-    state_id: Option<String>,
-    item_id: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -270,8 +198,19 @@ fn get_database(state: State<AppState>) -> Result<Database, String> {
     config::load_db(&state.db_path)
 }
 
-fn save_database(app: &tauri::AppHandle, state: &AppState, db: &Database) -> Result<(), String> {
+fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) -> Result<(), String> {
+    config::normalize_states(db);
+    config::normalize_overlays(db);
+    for game in &db.games {
+        for profile in game.profiles.iter().filter(|profile| profile.armed) {
+            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) { behavior::validate(&behavior::parse(&hotkey.behavior)?)?; }
+            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::parse(&event.behavior)?)?; }
+        }
+    }
     config::save_db(&state.db_path, db)?;
+    state.runtime.lock().unwrap().reconcile(db, runtime::now_ms());
+    prune_script_jobs(state, db);
+    publish_runtime(app);
     app.state::<firebase::Firebase>().mark_pending(app);
     Ok(())
 }
@@ -293,8 +232,8 @@ fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Res
         Some(existing) => *existing = game,
         None => db.games.push(game),
     }
-    save_database(&app, &state, &db)?;
-    sync_hotkeys(&state, &db);
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
@@ -307,8 +246,8 @@ fn delete_game(app: tauri::AppHandle, state: State<AppState>, id: String) -> Res
     }
     let mut db = config::load_db(&state.db_path)?;
     db.games.retain(|g| g.id != id);
-    save_database(&app, &state, &db)?;
-    sync_hotkeys(&state, &db);
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
@@ -323,8 +262,8 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
         Some(existing) => *existing = profile,
         None => game.profiles.push(profile),
     }
-    save_database(&app, &state, &db)?;
-    sync_hotkeys(&state, &db);
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
@@ -335,8 +274,8 @@ fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
-    save_database(&app, &state, &db)?;
-    sync_hotkeys(&state, &db);
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
@@ -357,74 +296,69 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
     if !found {
         return Err("Profile not found".to_string());
     }
-    save_database(&app, &state, &db)?;
-    sync_hotkeys(&state, &db);
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     if !armed {
         kill_profile_scripts(&state, &profile_id);
-        emit_overlay_event(&app, "profile_deactivated", None, None, None, Some(profile_id.clone()));
-        let owns_overlay = state.overlay_config.lock().unwrap().profile_id.as_deref() == Some(profile_id.as_str());
-        if owns_overlay {
-            clear_overlay(&app);
-            set_overlay_visible(&app, false);
-        }
+
     }
     Ok(db)
 }
 
-fn build_overlay_config(profiles: &[Profile], profile: &Profile) -> config::OverlayConfig {
-    config::OverlayConfig {
-        profile_id: Some(profile.id.clone()),
-        items: config::resolve_profile_overlay_items(profiles, profile)
-            .into_iter()
-            .cloned()
-            .collect(),
-        states: config::available_profile_states(profiles, profile)
-            .into_iter()
-            .cloned()
-            .collect(),
-        hotkeys: config::resolve_profile_hotkeys(profiles, profile)
-            .into_iter()
-            .map(|hotkey| config::OverlayHotkeyStateBinding {
-                trigger: hotkey.trigger.clone(),
-                state_id: hotkey.state_id.clone(),
-            })
-            .collect(),
-    }
+fn publish_runtime(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let snapshot = state.runtime.lock().unwrap().snapshot();
+    if let Some(window) = app.get_webview_window("overlay") { let _ = window.emit("overlay-snapshot", snapshot); }
 }
 
-fn send_overlay(app: &tauri::AppHandle, profiles: &[Profile], profile: &Profile, enabled: bool) {
-    let overlay_config = if enabled {
-        build_overlay_config(profiles, profile)
+#[tauri::command]
+fn set_profile_part_enabled(app: tauri::AppHandle, state: State<AppState>, profile_id: String, part: String, group_id: Option<String>, enabled: bool) -> Result<Database, String> {
+    let _access = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    let game = db.games.iter_mut().find(|game| game.profiles.iter().any(|profile| profile.id == profile_id)).ok_or("Profile not found.")?;
+    if let Some(group_id) = group_id {
+        if part != "overlay" { return Err("Groups belong to the overlay section.".into()); }
+        let profile = game.profiles.iter().find(|profile| profile.id == profile_id).unwrap();
+        let mut group = config::resolve_profile_overlay_groups(&game.profiles, profile).into_iter().find(|group| group.id == group_id).ok_or("Group not found.")?.clone();
+        group.disabled = !enabled;
+        let profile = game.profiles.iter_mut().find(|profile| profile.id == profile_id).unwrap();
+        if let Some(existing) = profile.overlay_groups.iter_mut().find(|existing| existing.id == group.id) { *existing = group; }
+        else { profile.overlay_groups.push(group); }
+    } else if part == "states" {
+        game.states_disabled = !enabled;
     } else {
-        config::OverlayConfig::default()
-    };
-    *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.emit("overlay-config", &overlay_config);
+        let profile = game.profiles.iter_mut().find(|profile| profile.id == profile_id).unwrap();
+        match part.as_str() {
+            "hotkeys" => profile.hotkeys_disabled = !enabled,
+            "events" => profile.events_disabled = !enabled,
+            "scripts" => profile.scripts_disabled = !enabled,
+            "overlay" => profile.overlay_disabled = !enabled,
+            _ => return Err("Unknown profile section.".into()),
+        }
     }
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
+#[tauri::command]
+fn get_overlay_snapshot(state: State<AppState>) -> runtime::Snapshot { state.runtime.lock().unwrap().snapshot() }
+
+#[tauri::command]
+fn dismiss_overlay_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    app.state::<AppState>().runtime.lock().unwrap().dismiss(&id)?;
+    publish_runtime(&app);
+    Ok(())
+}
+
+fn send_overlay(app: &tauri::AppHandle, _profiles: &[Profile], profile: &Profile, enabled: bool) {
+    app.state::<AppState>().runtime.lock().unwrap().select_profile(if enabled { Some(&profile.id) } else { None });
+    publish_runtime(app);
 }
 
 fn clear_overlay(app: &tauri::AppHandle) {
-    let overlay_config = config::OverlayConfig::default();
-    *app.state::<AppState>().overlay_config.lock().unwrap() = overlay_config.clone();
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.emit("overlay-config", &overlay_config);
-    }
-}
-
-fn emit_overlay_event(app: &tauri::AppHandle, event: &str, hotkey_trigger: Option<String>, state_id: Option<String>, item_id: Option<String>, profile_id: Option<String>) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.emit(
-            "overlay-event",
-            OverlayEventPayload {
-                event: event.to_string(),
-                profile_id,
-                hotkey_trigger,
-                state_id,
-                item_id,
-            },
-        );
-    }
+    app.state::<AppState>().runtime.lock().unwrap().select_profile(None);
+    publish_runtime(app);
 }
 
 fn set_overlay_visible(app: &tauri::AppHandle, visible: bool) {
@@ -575,7 +509,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[tauri::command]
 fn get_overlay_config(state: State<AppState>) -> config::OverlayConfig {
-    state.overlay_config.lock().unwrap().clone()
+    state.runtime.lock().unwrap().snapshot().config
 }
 
 fn is_global_game_exe(exe: &str) -> bool {
@@ -586,26 +520,44 @@ fn is_global_game_exe(exe: &str) -> bool {
 /// (re)launch the single always-on process. It stays alive even with no armed profiles because
 /// it also owns the Copilot-key remap. Called after any profile/arming change. Note: an edit
 /// the process relaunches — fine because edits happen from the manager UI, not in a game.
-fn sync_hotkeys(state: &AppState, db: &Database) {
-    let mut armed: Vec<ahk::ArmedProfile> = Vec::new();
+fn sync_hotkeys(state: &AppState, db: &Database) -> Result<(), String> {
+    state.runtime.lock().unwrap().reconcile(db, runtime::now_ms());
+    let mut armed: Vec<ahk::ProfileContext> = Vec::new();
     for game in &db.games {
         for profile in &game.profiles {
-            if profile.armed {
-                armed.push(ahk::ArmedProfile {
-                    siblings: &game.profiles,
-                    profile,
-                    exe: &game.exe,
-                });
-            }
+            armed.push(ahk::ProfileContext { siblings: &game.profiles, profile, exe: &game.exe });
         }
     }
 
     let mut mgr = state.hotkeys_ahk.lock().unwrap();
-    let script = ahk::generate_combined_script(&armed);
+    let (profiles, configuration_error) = match ahk::runtime_config(&armed) {
+        Ok(profiles) => (profiles, None),
+        Err(error) if mgr.is_running() => return Err(error),
+        Err(error) => ("[]".to_string(), Some(error)),
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    profiles.hash(&mut hash);
+    let revision = hash.finish().to_string();
+    let config = serde_json::json!({"revision":revision, "profiles":serde_json::from_str::<serde_json::Value>(&profiles).map_err(|e| e.to_string())?}).to_string();
+    mgr.expect_revision(revision);
+    let script = ahk::input_script();
+    let config_pending = state.scripts_path.join("runtime.pending.json");
+    std::fs::write(&config_pending, &config).map_err(|e| format!("Could not write runtime configuration: {e}"))?;
+    std::fs::rename(&config_pending, state.scripts_path.join("runtime.json")).map_err(|e| e.to_string())?;
     let script_path = state.scripts_path.join("hotkeys.ahk");
-    if std::fs::write(&script_path, &script).is_ok() {
-        let _ = mgr.launch(&db.settings.ahk_exe, &script_path);
+    let current = std::fs::read_to_string(&script_path).ok();
+    if current.as_deref() == Some(&script) && mgr.is_running() && mgr.uses_executable(&db.settings.ahk_exe) { return Ok(()); }
+    let pending = state.scripts_path.join("hotkeys.pending.ahk");
+    std::fs::write(&pending, &script).map_err(|e| format!("Could not write input configuration: {e}"))?;
+    mgr.validate(&db.settings.ahk_exe, &pending)?;
+    std::fs::rename(&pending, &script_path).map_err(|e| format!("Could not activate input configuration: {e}"))?;
+    mgr.launch(&db.settings.ahk_exe, &script_path)?;
+    if let Some(error) = configuration_error {
+        mgr.expect_revision("invalid configuration".into());
+        return Err(error);
     }
+    Ok(())
 }
 
 /// Find the profile with the given id and the sibling slice it lives in (for overlay pushes).
@@ -625,7 +577,7 @@ fn push_overlay_for_focus(handle: &tauri::AppHandle, profile_id: Option<String>)
     };
     if let Some(id) = profile_id {
         if let Some((siblings, profile)) = find_profile(&db, &id) {
-            if profile.armed && profile.kind == "overlay" && !profile.overlay_disabled {
+            if profile.armed && config::profile_has_overlay(siblings, profile) {
                 send_overlay(handle, siblings, profile, true);
                 return;
             }
@@ -652,42 +604,13 @@ fn get_global_viewport() -> WindowClientBounds {
     WindowClientBounds { left, top, width, height }
 }
 
-/// The exe whose window the overlay currently belongs to: the foreground app if an armed,
-/// overlay-enabled profile targets it, else "*" if an armed global overlay profile exists.
-#[cfg(target_os = "windows")]
-fn overlay_target_exe(db: &Database) -> Option<String> {
-    if let Some(fg) = foreground_exe() {
-        let matches = db.games.iter().any(|game| {
-            game.exe.eq_ignore_ascii_case(&fg)
-                && game.profiles.iter().any(|profile| {
-                    profile.armed && profile.kind == "overlay" && !profile.overlay_disabled
-                })
-        });
-        if matches {
-            return Some(fg);
-        }
-    }
-    let has_global = db.games.iter().any(|game| {
-        is_global_game_exe(&game.exe)
-            && game.profiles.iter().any(|profile| {
-                profile.armed && profile.kind == "overlay" && !profile.overlay_disabled
-            })
-    });
-    if has_global {
-        return Some(GLOBAL_GAME_EXE.to_string());
-    }
-    None
-}
-
 #[tauri::command]
 fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>) -> Result<(i32, i32, i32, i32), String> {
     #[cfg(target_os = "windows")]
     {
         let db = config::load_db(&state.db_path)?;
-        let target = match overlay_target_exe(&db) {
-            Some(exe) => exe,
-            None => return Ok((0, 0, 0, 0)),
-        };
+        let selected = state.runtime.lock().unwrap().snapshot().config.profile_id;
+        let Some(target) = selected.and_then(|id| db.games.iter().find(|game| game.id == id).map(|game| game.exe.clone())) else { return Ok((0, 0, 0, 0)); };
         let bounds = if is_global_game_exe(&target) {
             get_global_viewport()
         } else {
@@ -705,15 +628,9 @@ fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>) -> R
 }
 
 #[cfg(target_os = "windows")]
-fn get_active_game_viewport(handle: &tauri::AppHandle) -> Result<WindowClientBounds, String> {
-    let state = handle.state::<AppState>();
-    let db = config::load_db(&state.db_path)?;
-    let target = overlay_target_exe(&db)
-        .ok_or_else(|| "No overlay target".to_string())?;
-    if is_global_game_exe(&target) {
-        return Ok(get_global_viewport());
-    }
-    get_game_client_bounds(&target)
+fn get_behavior_viewport(target: &str) -> Result<WindowClientBounds, String> {
+    if is_global_game_exe(target) { return Ok(get_global_viewport()); }
+    get_game_client_bounds(target)
 }
 
 fn decode_query_value(value: &str) -> String {
@@ -753,6 +670,47 @@ fn get_query_param(path: &str, key: &str) -> Option<String> {
         .find_map(|(name, value)| (name == key).then(|| decode_query_value(value)))
 }
 
+fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind: &str, id: &str, value: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let profile = scope.profile.as_str();
+    match kind {
+        "enabled" => {
+            if value != "0" && value != "1" { return Err("Enabled must be 0 or 1.".into()); }
+            let _access = state.db_access.lock().unwrap();
+            let db = config::load_db(&state.db_path)?;
+            state.runtime.lock().unwrap().set_enabled(&db, profile, value == "1", runtime::now_ms())?;
+            if value != "1" { kill_profile_scripts(&state, profile); }
+        }
+        "script" => run_script_for_profile(app, scope, id, if matches!(value, "hotkeys" | "events" | "scripts") { value } else { scope.section() })?,
+        "behavior" => {
+            let _access = state.db_access.lock().unwrap();
+            let db = config::load_db(&state.db_path)?;
+            state.runtime.lock().unwrap().enqueue(&db, scope, value)?;
+        }
+        "error" => { app.emit("runtime-error", value).map_err(|e| e.to_string())?; }
+        _ => state.runtime.lock().unwrap().action(profile, kind, id, value, runtime::now_ms())?,
+    }
+    publish_runtime(app);
+    Ok(())
+}
+
+fn run_script_for_profile(app: &tauri::AppHandle, source: &runtime::ExecutionScope, script_id: &str, caller_section: &str) -> Result<(), String> {
+    let profile_id = source.profile.as_str();
+    let state = app.state::<AppState>();
+    let _access = state.db_access.lock().unwrap();
+    let db = config::load_db(&state.db_path)?;
+    if !source.script_owner.is_empty() && !source.is_active(&db) { return Ok(()); }
+    let game = db.games.iter().find(|game| game.profiles.iter().any(|profile| profile.id == profile_id && profile.armed)).ok_or("Profile is unavailable.")?;
+    if !state.runtime.lock().unwrap().enabled(profile_id) { return Err("Profile is disabled.".into()); }
+    let caller_section = if matches!(caller_section, "hotkeys" | "events" | "scripts") { caller_section } else { "scripts" };
+    if !game.profiles.iter().any(|profile| profile.id == profile_id && profile.section_enabled(caller_section)) { return Ok(()); }
+    let (owner, script) = game.profiles.iter().filter(|profile| profile.armed).find_map(|profile| profile.scripts.iter().find(|script| script.id == script_id && script.enabled).map(|script| (profile, script))).ok_or("Script is disabled or unavailable.")?;
+    if owner.scripts_disabled { return Ok(()); }
+    if !state.runtime.lock().unwrap().enabled(&owner.id) { return Err("Script owner is disabled.".into()); }
+    let scope = runtime::ExecutionScope { profile: profile_id.into(), section: caller_section.into(), script_owner: owner.id.clone() };
+    spawn_tracked_script(&state, &db.settings, script, &scope, &game.exe)
+}
+
 fn start_overlay_listener(handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{OVERLAY_PORT}")).await {
@@ -761,33 +719,50 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
         };
         loop {
             if let Ok((mut stream, _)) = listener.accept().await {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                use tokio::io::AsyncWriteExt;
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut buffer = [0u8; 1024];
-                    let read = stream.read(&mut buffer).await.unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buffer[..read]);
-                    let action = request
-                        .lines()
-                        .next()
-                        .and_then(|line| line.split_whitespace().nth(1))
-                        .unwrap_or("/");
+                    let request = match protocol::read_request(&mut stream).await { Ok(request) => request, Err(_) => return };
+                    let action = request.path.as_str();
                     let route = action.split('?').next().unwrap_or(action);
-                    let (status, body) = if route == "/event" {
-                        let event = get_query_param(action, "type")
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or_else(|| "hotkey_triggered".to_string());
-                        let hotkey_trigger = get_query_param(action, "hotkey_trigger")
-                            .filter(|value| !value.is_empty());
-                        let state_id = get_query_param(action, "state_id")
-                            .filter(|value| !value.is_empty());
-                        let item_id = get_query_param(action, "item_id")
-                            .filter(|value| !value.is_empty());
-                        emit_overlay_event(&handle, &event, hotkey_trigger, state_id, item_id, None);
+                    let (status, body) = if route == "/runtime" && !request.body.is_empty() {
+                        match serde_json::from_slice::<protocol::RuntimeAction>(&request.body) {
+                            Ok(command) => match runtime_action(&handle, &command.scope, &command.kind, &command.id, &command.value) {
+                                Ok(()) => ("200 OK", Vec::new()), Err(error) => ("422 Unprocessable Entity", error.into_bytes()),
+                            },
+                            Err(error) => ("400 Bad Request", error.to_string().into_bytes()),
+                        }
+                    } else if route == "/activated" {
+                        handle.state::<AppState>().hotkeys_ahk.lock().unwrap().activate_revision(get_query_param(action, "revision").unwrap_or_default());
                         ("200 OK", Vec::new())
-                    } else if route == "/script" {
-                        if let Some(id) = get_query_param(action, "id").filter(|v| !v.is_empty()) {
-                            run_script_by_id(&handle, &id);
+                    } else if route == "/commands" {
+                        let commands = handle.state::<AppState>().runtime.lock().unwrap().take_commands();
+                        ("200 OK", serde_json::to_vec(&commands).unwrap_or_default())
+                    } else if route == "/runtime" {
+                        let profile = get_query_param(action, "profile").unwrap_or_default();
+                        let kind = get_query_param(action, "kind").unwrap_or_default();
+                        let id = get_query_param(action, "id").unwrap_or_default();
+                        let value = get_query_param(action, "value").unwrap_or_default();
+                        let scope = runtime::ExecutionScope { profile, section: get_query_param(action, "section").unwrap_or_default(), script_owner: get_query_param(action, "script_owner").unwrap_or_default() };
+                        match runtime_action(&handle, &scope, &kind, &id, &value) {
+                            Ok(()) => ("200 OK", Vec::new()),
+                            Err(error) => ("422 Unprocessable Entity", error.into_bytes()),
+                        }
+                    } else if route == "/runtime-state" {
+                        let profile = get_query_param(action, "profile").unwrap_or_default();
+                        match handle.state::<AppState>().runtime.lock().unwrap().profile_snapshot(&profile) {
+                            Some(snapshot) => ("200 OK", serde_json::to_vec(&snapshot).unwrap_or_default()),
+                            None => ("404 Not Found", b"Profile is unavailable".to_vec()),
+                        }
+                    } else if route == "/target-blur" {
+                        let exe = get_query_param(action, "exe").unwrap_or_default();
+                        let state = handle.state::<AppState>();
+                        if let Ok(db) = config::load_db(&state.db_path) {
+                            for game in &db.games {
+                                if game.exe.eq_ignore_ascii_case(&exe) {
+                                    for profile in &game.profiles { kill_profile_scripts(&state, &profile.id); }
+                                }
+                            }
                         }
                         ("200 OK", Vec::new())
                     } else if route == "/borderless" {
@@ -855,7 +830,7 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             "/viewport" => {
                                 #[cfg(target_os = "windows")]
                                 {
-                                    match get_active_game_viewport(&handle) {
+                                    match get_query_param(action, "exe").or_else(foreground_exe).ok_or_else(|| "No target window".to_string()).and_then(|target| get_behavior_viewport(&target)) {
                                         Ok(bounds) => (
                                             "200 OK",
                                             format!("{},{},{},{}", bounds.left, bounds.top, bounds.width, bounds.height).into_bytes(),
@@ -869,13 +844,7 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                                     ("501 Not Implemented", b"Not supported on this platform".to_vec())
                                 }
                             }
-                            _ => {
-                                if let Some(window) = handle.get_webview_window("overlay") {
-                                    let visible = window.is_visible().unwrap_or(false);
-                                    set_overlay_visible(&handle, !visible);
-                                }
-                                ("200 OK", Vec::new())
-                            }
+                            _ => ("404 Not Found", b"Unknown runtime endpoint".to_vec()),
                         }
                     };
 
@@ -895,7 +864,7 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
 
 #[tauri::command]
 fn get_ahk_status(state: State<AppState>) -> bool {
-    state.hotkeys_ahk.lock().unwrap().is_running()
+    state.hotkeys_ahk.lock().unwrap().is_active()
 }
 
 #[cfg(target_os = "windows")]
@@ -1468,7 +1437,8 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Se
     let mut db = config::load_db(&state.db_path)?;
     settings.library_width = db.settings.library_width;
     db.settings = settings;
-    save_database(&app, &state, &db)?;
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
     sync_autostart(&app, db.settings.launch_on_startup);
     Ok(db)
 }
@@ -1479,7 +1449,7 @@ fn set_library_width(app: tauri::AppHandle, state: State<AppState>, width: u16) 
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     db.settings.library_width = Some(width);
-    save_database(&app, &state, &db)
+    save_database(&app, &state, &mut db)
 }
 
 /// Download the given release installer and launch it, then quit so the installer can
@@ -1520,75 +1490,33 @@ async fn download_and_install_update(app: tauri::AppHandle, url: String) -> Resu
     Ok(())
 }
 
-/// Look up a saved script by id across every scope and run it. Used by the AHK `/script`
-/// route (a hotkey fired) — failures are logged, not surfaced, since there is no UI in the loop.
-/// Spawn a script and place it in its owning profile's kill-on-close Job Object, so it — and
-/// anything it spawns — is bound to the app's lifetime: it dies when the app exits (even a crash
-/// or hard-kill) or when the profile is disarmed, and can never outlive the app.
-fn spawn_tracked_script(state: &AppState, settings: &Settings, script: &Script, profile_id: &str) -> Result<(), String> {
-    let ahk_exe = state
-        .hotkeys_ahk
-        .lock()
-        .unwrap()
-        .executable_path(&settings.ahk_exe);
-    let child = scripts::run_script(
-        &settings.python_exe,
-        &ahk_exe,
-        script,
-        &state.scripts_path,
-    )?;
+fn spawn_tracked_script(state: &AppState, settings: &Settings, script: &Script, scope: &runtime::ExecutionScope, target: &str) -> Result<(), String> {
+    let ahk_exe = state.hotkeys_ahk.lock().unwrap().executable_path(&settings.ahk_exe);
     #[cfg(target_os = "windows")]
+    return state.script_runtime.lock().unwrap().launch(settings, &ahk_exe, script, &state.scripts_path, scope, target);
+    #[cfg(not(target_os = "windows"))]
     {
-        use std::os::windows::io::AsRawHandle;
-        let mut jobs = state.script_jobs.lock().unwrap();
-        let job = jobs.entry(profile_id.to_string()).or_insert_with(JobObject::new);
-        job.assign(child.as_raw_handle());
+        let _ = target;
+        scripts::run_script(&settings.python_exe, &ahk_exe, script, &state.scripts_path, scope).map(|_| ())
     }
-    // The job now owns the process; drop our handle (on Windows it stays in the job, on other
-    // platforms this is the previous fire-and-forget behavior).
-    let _ = (child, profile_id);
-    Ok(())
 }
 
-/// Terminate every script process launched by one profile (used when it is disarmed).
+fn prune_script_jobs(state: &AppState, db: &Database) {
+    #[cfg(target_os = "windows")]
+    state.script_runtime.lock().unwrap().reconcile(db);
+    let _ = (state, db);
+}
+
 fn kill_profile_scripts(state: &AppState, profile_id: &str) {
     #[cfg(target_os = "windows")]
-    {
-        if let Some(job) = state.script_jobs.lock().unwrap().remove(profile_id) {
-            job.terminate(); // dropping the job also closes its handle (kill-on-close)
-        }
-    }
+    state.script_runtime.lock().unwrap().stop_profile(profile_id);
     let _ = (state, profile_id);
 }
 
-/// Terminate every script process we launched (used when the app quits).
 fn kill_all_scripts(state: &AppState) {
     #[cfg(target_os = "windows")]
-    {
-        let jobs: Vec<JobObject> = state.script_jobs.lock().unwrap().drain().map(|(_, j)| j).collect();
-        for job in jobs {
-            job.terminate();
-        }
-    }
+    state.script_runtime.lock().unwrap().clear();
     let _ = state;
-}
-
-fn run_script_by_id(handle: &tauri::AppHandle, id: &str) {
-    let state = handle.state::<AppState>();
-    let db = match config::load_db(&state.db_path) {
-        Ok(db) => db,
-        Err(_) => return,
-    };
-    for game in &db.games {
-        for profile in &game.profiles {
-            if let Some(script) = profile.scripts.iter().find(|s| s.id == id) {
-                if let Err(e) = spawn_tracked_script(&state, &db.settings, script, &profile.id) {
-                    eprintln!("[scripts] {e}");
-                }
-                return;
-            }
-        }
-    }
 }
 
 fn start_watcher(handle: tauri::AppHandle) {
@@ -1615,6 +1543,8 @@ fn start_watcher(handle: tauri::AppHandle) {
             last_tick = now;
 
             let state = handle.state::<AppState>();
+            #[cfg(target_os = "windows")]
+            state.script_runtime.lock().unwrap().reap();
 
             let db = match config::load_db(&state.db_path) {
                 Ok(db) => db,
@@ -1628,7 +1558,7 @@ fn start_watcher(handle: tauri::AppHandle) {
             }
             let running = state.hotkeys_ahk.lock().unwrap().is_running();
             if !running {
-                sync_hotkeys(&state, &db);
+                if let Err(error) = sync_hotkeys(&state, &db) { eprintln!("[runtime] {error}"); }
             }
 
             // Re-assert that the app and its AutoHotkey process stay out of Windows Efficiency
@@ -1716,12 +1646,12 @@ pub fn run() {
 
             app.manage(AppState {
                 db_access: Mutex::new(()),
+                runtime: Mutex::new(runtime::Runtime::default()),
                 db_path: db_path.clone(),
                 scripts_path: scripts_dir,
                 hotkeys_ahk: Mutex::new(ahk::AhkManager::new(resource_dir)),
-                overlay_config: Mutex::new(config::OverlayConfig::default()),
                 #[cfg(target_os = "windows")]
-                script_jobs: Mutex::new(HashMap::new()),
+                script_runtime: Mutex::new(scripts::ScriptRuntime::default()),
                 #[cfg(target_os = "windows")]
                 window_transforms: Mutex::new(HashMap::new()),
             });
@@ -1732,7 +1662,7 @@ pub fn run() {
             {
                 let state = app.state::<AppState>();
                 if let Ok(db) = config::load_db(&state.db_path) {
-                    sync_hotkeys(&state, &db);
+                    if let Err(error) = sync_hotkeys(&state, &db) { eprintln!("[runtime] {error}"); }
                 }
             }
 
@@ -1808,8 +1738,8 @@ pub fn run() {
             // Pre-populate overlay items from the first armed overlay profile; the AHK /focus
             // path swaps to the right one once an app is focused.
             if let Ok(db) = config::load_db(&app.state::<AppState>().db_path) {
-                if let Some(game) = db.games.iter().find(|g| g.profiles.iter().any(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled)) {
-                    if let Some(profile) = game.profiles.iter().find(|p| p.armed && p.kind == "overlay" && !p.overlay_disabled) {
+                if let Some(game) = db.games.iter().find(|g| g.profiles.iter().any(|p| p.armed && config::profile_has_overlay(&g.profiles, p))) {
+                    if let Some(profile) = game.profiles.iter().find(|p| p.armed && config::profile_has_overlay(&game.profiles, p)) {
                         send_overlay(app.handle(), &game.profiles, profile, true);
                     }
                 }
@@ -1825,6 +1755,8 @@ pub fn run() {
             get_database,
             debug_overlay_log,
             get_overlay_config,
+            get_overlay_snapshot,
+            dismiss_overlay_item,
             get_overlay_origin,
             toggle_overlay,
             set_overlay_passthrough,
@@ -1842,6 +1774,7 @@ pub fn run() {
             upsert_profile,
             delete_profile,
             set_profile_armed,
+            set_profile_part_enabled,
             get_ahk_status,
             save_settings,
             set_library_width,
