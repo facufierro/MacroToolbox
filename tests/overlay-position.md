@@ -4,6 +4,7 @@ Without an app build:
 
 ```powershell
 node --experimental-strip-types --test tests/overlay-position.test.mjs
+node --experimental-strip-types --test tests/overlay-input.test.mjs
 node --experimental-strip-types --test tests/overlay-layout.test.mjs
 ```
 
@@ -11,7 +12,9 @@ The layout checks render the actual overlay parts in headless Chrome or Edge.
 They protect matching icon positions with and without timers, centered alignment,
 part hitboxes, layout gaps, and individual position offsets.
 
-Rust regression tests in `lib.rs` protect physical bounds and desktop offsets.
+Rust regression tests in `lib.rs` protect physical bounds and desktop offsets,
+including resizing a native canvas beyond the current desktop, moving its origin
+left and above primary, shrinking it again, and retaining foreground focus.
 Running them requires build authorization:
 
 ```powershell
@@ -27,6 +30,11 @@ is unfocused and repeat; its timer should continue without restarting.
 Repeat at 100%, 125%, 150%, and 200% Windows scaling and on a secondary monitor
 with different scaling positioned left of or above the primary screen. Move the
 app between monitors and confirm the timer continues to follow its client area.
+Start with only the laptop screen, connect another monitor while MacroToolbox is
+running, and move the app onto it. Repeat after rearranging the monitors in Windows
+and after disconnecting the second monitor. The overlay should follow without an
+app restart. Right-click an overlay part on each monitor to confirm dismissal
+still matches its visible hitbox at different display scales.
 Check the Global folder too: 0,0 starts at the virtual desktop's top-left and
 50,50 lands at its center. Icons, bars, and text should use the same positions.
 Compare two overlays with matching positions and matching first icons, one with
