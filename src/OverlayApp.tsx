@@ -45,12 +45,12 @@ export default function OverlayApp() {
     const clock = window.setInterval(() => setNow(Date.now()), 100);
 
     void subscribe<[number, number]>("overlay-right-click", coordinates => {
-      const [sx, sy] = coordinates;
+      const [x, y] = coordinates;
       const scale = window.devicePixelRatio || 1;
-      // Convert physical screen pixels → CSS viewport pixels
-      const cx = sx / scale - window.screenX;
-      const cy = sy / scale - window.screenY;
-      console.log("[overlay] right-click screen=", sx, sy, "viewport=", cx, cy, "items=", itemEls.current.size);
+      // The native hook supplies physical pixels relative to the overlay client.
+      const cx = x / scale;
+      const cy = y / scale;
+      console.log("[overlay] right-click client=", x, y, "viewport=", cx, cy, "items=", itemEls.current.size);
       for (const [id, el] of itemEls.current) {
         const rect = el.getBoundingClientRect();
         console.log("[overlay] item", id, "rect=", rect.left, rect.top, rect.right, rect.bottom);
@@ -77,7 +77,10 @@ export default function OverlayApp() {
         const next = await invoke<OverlayBounds | null>("get_overlay_origin", { folderId });
         if (!disposed) setPresentation(previous => acceptOverlayOrigin(previous, generation, next));
       } catch (error) {
-        if (!disposed) reportError(error);
+        if (!disposed) {
+          setPresentation(previous => acceptOverlayOrigin(previous, generation, null));
+          reportError(error);
+        }
       } finally {
         if (!disposed) timer = window.setTimeout(refresh, 250);
       }

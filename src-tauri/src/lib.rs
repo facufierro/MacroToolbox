@@ -24,10 +24,10 @@ mod display_resolution;
 #[cfg(target_os = "windows")]
 mod window_transform;
 #[cfg(target_os = "windows")]
-use window_transform::{WindowTransform, WindowTransformState};
+use window_transform::{PhysicalCoordinates, WindowTransform, WindowTransformState};
 
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WindowClientBounds {
     left: i32,
     top: i32,
@@ -47,8 +47,57 @@ impl WindowClientBounds {
 
 #[cfg(all(test, target_os = "windows"))]
 mod overlay_position_tests {
-    use super::WindowClientBounds;
+    use super::{fit_overlay_to_desktop, get_global_viewport, get_window_client_bounds, PhysicalCoordinates, WindowClientBounds};
     use tauri::PhysicalPosition;
+    use winapi::shared::windef::HWND;
+    use winapi::um::winuser::*;
+
+    struct Canvas(HWND);
+
+    impl Canvas {
+        fn new() -> Self {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, class.as_ptr(), std::ptr::null(),
+                    WS_POPUP, 0, 0, 800, 600, std::ptr::null_mut(), std::ptr::null_mut(),
+                    std::ptr::null_mut(), std::ptr::null_mut(),
+                )
+            };
+            assert!(!hwnd.is_null(), "Failed to create overlay test canvas");
+            Self(hwnd)
+        }
+    }
+
+    impl Drop for Canvas {
+        fn drop(&mut self) { unsafe { DestroyWindow(self.0); } }
+    }
+
+    #[test]
+    fn native_canvas_covers_new_monitors_and_recovers_from_clipping_without_taking_focus() {
+        let _dpi = PhysicalCoordinates::enter().unwrap();
+        let window = Canvas::new();
+        let original = get_global_viewport();
+        let foreground = unsafe { GetForegroundWindow() };
+        for desktop in [
+            original,
+            WindowClientBounds { width: original.width + 1920, ..original },
+            WindowClientBounds { left: original.left - 2560, top: original.top - 1440,
+                width: original.width + 2560, height: original.height + 1440 },
+            original,
+        ] {
+            assert_eq!(fit_overlay_to_desktop(window.0, desktop).unwrap(), desktop);
+            assert_eq!(get_window_client_bounds(window.0).unwrap(), desktop);
+            assert_eq!(fit_overlay_to_desktop(window.0, desktop).unwrap(), desktop);
+            assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+        }
+    }
+
+    #[test]
+    fn invalid_canvas_cannot_report_valid_overlay_bounds() {
+        let _dpi = PhysicalCoordinates::enter().unwrap();
+        assert!(fit_overlay_to_desktop(std::ptr::null_mut(), get_global_viewport()).is_err());
+    }
 
     #[test]
     fn global_origin_is_local_to_the_overlay_on_negative_desktops() {
@@ -150,7 +199,9 @@ fn start_mouse_hook(handle: tauri::AppHandle) {
         while let Ok((x, y)) = pending_events.recv() {
             if let Some(overlay) = handle.get_webview_window("overlay") {
                 if overlay.is_visible().unwrap_or(false) {
-                    let _ = overlay.emit("overlay-right-click", (x, y));
+                    if let Ok(position) = overlay.inner_position() {
+                        let _ = overlay.emit("overlay-right-click", (x - position.x, y - position.y));
+                    }
                 }
             }
         }
@@ -621,6 +672,7 @@ fn get_global_viewport() -> WindowClientBounds {
 fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>, folder_id: String) -> Result<Option<(i32, i32, i32, i32)>, String> {
     #[cfg(target_os = "windows")]
     {
+        let _dpi = PhysicalCoordinates::enter()?;
         let db = config::load_db(&state.db_path)?;
         let Some(game) = db.games.iter().find(|game| game.id == folder_id) else { return Ok(None); };
         let (bounds, minimized) = if is_global_game_exe(&game.exe) {
@@ -629,7 +681,10 @@ fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>, fold
             let Some(hwnd) = find_window_by_exe(&game.exe) else { return Ok(None); };
             (get_window_client_bounds(hwnd)?, unsafe { winapi::um::winuser::IsIconic(hwnd) != 0 })
         };
-        let position = window.inner_position().map_err(|e| e.to_string())?;
+        let desktop = get_global_viewport();
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
+        let canvas = fit_overlay_to_desktop(hwnd, desktop)?;
+        let position = tauri::PhysicalPosition::new(canvas.left, canvas.top);
         Ok(bounds.overlay_origin(position, minimized))
     }
 
@@ -1046,6 +1101,7 @@ fn focus_game_window(exe: &str) {
 
 #[cfg(target_os = "windows")]
 fn get_window_client_bounds(hwnd: winapi::shared::windef::HWND) -> Result<WindowClientBounds, String> {
+    let _dpi = PhysicalCoordinates::enter()?;
     use winapi::shared::windef::{POINT, RECT};
     use winapi::um::winuser::{ClientToScreen, GetClientRect};
 
@@ -1112,6 +1168,34 @@ fn get_virtual_screen_bounds() -> (i32, i32, i32, i32) {
             GetSystemMetrics(SM_CYVIRTUALSCREEN),
         )
     }
+}
+
+#[cfg(target_os = "windows")]
+fn fit_overlay_to_desktop(
+    hwnd: winapi::shared::windef::HWND,
+    desktop: WindowClientBounds,
+) -> Result<WindowClientBounds, String> {
+    use winapi::um::winuser::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOZORDER};
+
+    let _dpi = PhysicalCoordinates::enter()?;
+    let current = get_window_client_bounds(hwnd)?;
+    if current == desktop { return Ok(current); }
+
+    // The transparent canvas spans every monitor. Apply its physical rectangle together,
+    // bypassing normal window tracking limits that can clip it to a single monitor.
+    if unsafe {
+        SetWindowPos(
+            hwnd, std::ptr::null_mut(), desktop.left, desktop.top, desktop.width, desktop.height,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+        )
+    } == 0 {
+        return Err(format!("Failed to resize overlay: {}", std::io::Error::last_os_error()));
+    }
+    let canvas = get_window_client_bounds(hwnd)?;
+    if canvas != desktop {
+        return Err("Overlay window does not cover the virtual desktop".into());
+    }
+    Ok(canvas)
 }
 
 #[tauri::command]
@@ -1245,6 +1329,7 @@ async fn pick_coordinate(window: tauri::WebviewWindow, exe: String) -> Result<(f
 
         #[cfg(target_os = "windows")]
         unsafe {
+            let _dpi = PhysicalCoordinates::enter()?;
             use winapi::um::winuser::{GetAsyncKeyState, GetCursorPos};
             use winapi::shared::windef::POINT;
 
@@ -1729,6 +1814,7 @@ pub fn run() {
                 tauri::WebviewUrl::App("index.html?window=overlay".into()),
             )
             .decorations(false)
+            .shadow(false)
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
@@ -1736,10 +1822,17 @@ pub fn run() {
             .build()
             {
                 Ok(overlay) => {
-                    // Builder coordinates are logical; size the virtual desktop in physical pixels.
+                    #[cfg(target_os = "windows")]
+                    let result = (|| -> Result<(), String> {
+                        let _dpi = PhysicalCoordinates::enter()?;
+                        let hwnd = overlay.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
+                        fit_overlay_to_desktop(hwnd, get_global_viewport()).map(|_| ())
+                    })();
+                    #[cfg(not(target_os = "windows"))]
                     let result = overlay.set_position(tauri::PhysicalPosition::new(overlay_left, overlay_top))
                         .and_then(|()| overlay.set_size(tauri::PhysicalSize::new(overlay_width as u32, overlay_height as u32)))
-                        .and_then(|()| overlay.set_ignore_cursor_events(true));
+                        .map_err(|e| e.to_string());
+                    let result = result.and_then(|()| overlay.set_ignore_cursor_events(true).map_err(|e| e.to_string()));
                     if let Err(e) = result {
                         eprintln!("[overlay] failed to configure overlay window: {e}");
                         let _ = overlay.close();
