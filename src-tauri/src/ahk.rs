@@ -330,7 +330,7 @@ pub struct ProfileContext<'a> {
 }
 
 /// Serialize validated behavior data for the persistent input host.
-pub fn runtime_config(profiles: &[ProfileContext]) -> Result<String, String> {
+pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::NumberVariable]) -> Result<String, String> {
     use serde_json::json;
     use std::hash::{Hash, Hasher};
     let mut ordered: Vec<_> = profiles.iter().collect();
@@ -354,7 +354,7 @@ pub fn runtime_config(profiles: &[ProfileContext]) -> Result<String, String> {
         };
         for hotkey in hotkeys.into_iter().filter(|_| profile.armed && !profile.hotkeys_disabled) {
             if hotkey.trigger.trim().is_empty() { continue; }
-            let mut steps = behavior::parse(&hotkey.behavior)?;
+            let mut steps = behavior::resolve(&hotkey.behavior, variables)?;
             if profile.armed { behavior::validate(&steps).map_err(|error| format!("{} / {}: {error}", profile.name, hotkey.trigger))?; }
             if let Some(state_id) = &hotkey.state_id { steps.push(behavior::Action::State { state_id: state_id.clone(), action: behavior::StateAction::Toggle }); }
             bindings.push(binding(&hotkey.trigger, steps, false, hotkey.allow_extra_modifiers, "hotkeys"));
@@ -368,7 +368,7 @@ pub fn runtime_config(profiles: &[ProfileContext]) -> Result<String, String> {
         }
         let mut events = serde_json::Map::new();
         for event in config::resolve_profile_events(ap.siblings, profile).into_iter().filter(|_| profile.armed && !profile.events_disabled) {
-            let steps = behavior::parse(&event.behavior)?;
+            let steps = behavior::resolve(&event.behavior, variables)?;
             if profile.armed { behavior::validate(&steps)?; }
             events.insert(event.event.clone(), serde_json::to_value(steps).map_err(|error| error.to_string())?);
         }
@@ -977,7 +977,7 @@ ReadBehaviorInput(handle) {
 }
 ; End native behavior input boundary.
 
-DoMousePress(keyName, configuredExe := "", modifierFlags := 0) {
+DoMousePress(keyName, configuredExe := "", modifierFlags := 0, doubleClick := false) {
     global heldOutputCounts
     static buttons := Map("lbutton", "Left", "rbutton", "Right", "mbutton", "Middle",
         "xbutton1", "X1", "xbutton2", "X2")
@@ -998,7 +998,7 @@ DoMousePress(keyName, configuredExe := "", modifierFlags := 0) {
     SetControlDelay -1
     try {
         if !(GetKeyState(keyName, "P") || heldOutputCounts.Has(keyName)) {
-            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags)
+            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags, doubleClick)
             return
         }
         ; A second down is not a new press while the app already sees this button held.
@@ -1009,7 +1009,7 @@ DoMousePress(keyName, configuredExe := "", modifierFlags := 0) {
         try {
             WindowClick(position, target, buttons[keyName], "NA Pos U", modifierFlags)
             Sleep 30
-            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags)
+            WindowClick(position, target, buttons[keyName], "NA Pos", modifierFlags, doubleClick)
         } finally {
             try finish.Call()
             finally {
@@ -1037,13 +1037,13 @@ FinishModifiedMousePress(position, target, button, keyName, flags, exitReason :=
     FinishMousePress(position, target, button, keyName, exitReason, flags)
 }
 
-WindowClick(position, target, button, options, flags := 0) {
-    if !flags {
+WindowClick(position, target, button, options, flags := 0, doubleClick := false) {
+    if !flags && !doubleClick {
         ControlClick(position, target,, button, 1, options)
         return
     }
-    ; ControlClick omits MK_CONTROL/MK_SHIFT. Modified clicks must carry those
-    ; flags in both messages, including the release and held-button recovery.
+    ; ControlClick omits MK_CONTROL/MK_SHIFT and does not synthesize WM_*DBLCLK.
+    ; Post those messages explicitly, retaining the same target and coordinates.
     if !RegExMatch(position, "^X(-?\d+) Y(-?\d+)$", &coordinates)
         throw ValueError("Invalid window click position.")
     point := Buffer(8)
@@ -1061,8 +1061,13 @@ WindowClick(position, target, button, options, flags := 0) {
         "X1", [0x20B, 32, 1 << 16], "X2", [0x20B, 64, 2 << 16])
     message := messages[button]
     if !InStr(options, " D") && !InStr(options, " U") {
-        try PostMessage message[1], flags | message[2] | message[3], packed,, current
-        finally PostMessage message[1] + 1, flags | message[3], packed,, current
+        ; Windows replaces the second down with a double-click message only for
+        ; classes with CS_DBLCLKS. Other classes receive two ordinary clicks.
+        secondDown := doubleClick && (DllCall("GetClassLongW", "Ptr", current, "Int", -26, "UInt") & 8) ? message[1] + 2 : message[1]
+        loop doubleClick ? 2 : 1 {
+            try PostMessage A_Index = 2 ? secondDown : message[1], flags | message[2] | message[3], packed,, current
+            finally PostMessage message[1] + 1, flags | message[3], packed,, current
+        }
     } else if InStr(options, " D") {
         PostMessage message[1], flags | message[2] | message[3], packed,, current
     } else {
@@ -1431,7 +1436,7 @@ mod tests {
     fn every_composition_uses_the_same_structured_execution_contract() {
         let profile = profile(r#"[{"type":"parallel","steps":[{"type":"hold","key":"LButton"},{"type":"repeat","key":"a","interval":"100","hold":"6"}]}]"#);
         let profiles = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }];
-        let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles).unwrap()).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles, &[]).unwrap()).unwrap();
         let binding = &config[0]["bindings"][0];
         assert_eq!(binding["steps"][0]["type"], "parallel");
         assert_eq!(binding["modifiers"], "^");
@@ -1444,17 +1449,46 @@ mod tests {
         let a = [ProfileContext { siblings: std::slice::from_ref(&first), profile: &first, exe:"Game.exe" }];
         let b = [ProfileContext { siblings: std::slice::from_ref(&second), profile: &second, exe:"Game.exe" }];
         assert_eq!(input_script(), input_script());
-        assert_ne!(runtime_config(&a).unwrap(), runtime_config(&b).unwrap());
+        assert_ne!(runtime_config(&a, &[]).unwrap(), runtime_config(&b, &[]).unwrap());
+    }
+    #[test]
+    fn shared_variables_resolve_in_inherited_bindings_and_events_and_update_revisions() {
+        let mut base = profile("sleep($buff);send($buff)");
+        base.id = "base".into();
+        base.events = vec![config::BehaviorEvent { event: "focus_gained".into(), behavior: "sleep($buff)".into() }];
+        let mut child = profile(""); child.id = "child".into(); child.parent_id = Some(base.id.clone()); child.hotkeys.clear();
+        let siblings = [base, child];
+        let contexts: Vec<_> = siblings.iter().map(|profile| ProfileContext { siblings: &siblings, profile, exe: "Game.exe" }).collect();
+        let mut variables = [config::NumberVariable { id: "buff".into(), name: "buff timer".into(), value: 5000.0 }];
+        let before: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        for data in before.as_array().unwrap() {
+            assert_eq!(data["bindings"][0]["steps"][0]["ms"], "5000");
+            assert_eq!(data["bindings"][0]["steps"][1]["text"], "$buff");
+            assert_eq!(data["events"]["focus_gained"][0]["ms"], "5000");
+        }
+        variables[0].name = "renamed timer".into();
+        let renamed: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        assert_eq!(before, renamed);
+        variables[0].value = 6000.0;
+        let after: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        for index in 0..2 {
+            assert_eq!(after[index]["bindings"][0]["steps"][0]["ms"], "6000");
+            assert_ne!(before[index]["sectionRevisions"]["hotkeys"], after[index]["sectionRevisions"]["hotkeys"]);
+            assert_ne!(before[index]["sectionRevisions"]["events"], after[index]["sectionRevisions"]["events"]);
+            assert_eq!(before[index]["sectionRevisions"]["scripts"], after[index]["sectionRevisions"]["scripts"]);
+        }
+        assert_eq!(siblings[0].hotkeys[0].behavior, "sleep($buff);send($buff)");
+        assert!(runtime_config(&contexts, &[]).is_err());
     }
     #[test]
     fn invalid_active_behaviors_fail_before_activation() {
         let profile = profile("repeat(a,0)");
-        assert!(runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}]).is_err());
+        assert!(runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).is_err());
     }
     #[test]
     fn disabled_drafts_do_not_register_or_validate_native_bindings() {
         let mut profile = profile("future(action)"); profile.armed = false;
-        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}]).unwrap()).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).unwrap()).unwrap();
         assert!(data[0]["bindings"].as_array().unwrap().is_empty());
     }
     #[test]
@@ -1480,11 +1514,11 @@ mod tests {
         for kind in ["hotkeys", "events", "scripts", "overlay"] {
             let mut profile = profile("press(x)"); profile.kind = kind.into();
             profile.overlay_items = vec![serde_json::from_value(serde_json::json!({"type":"text","id":"label","x":0,"y":0,"font_size":16,"color":"#fff","content":"Buff"})).unwrap()];
-            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }]).unwrap()).unwrap();
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
             assert_eq!(data[0]["overlay"], true);
             assert!(!data[0]["bindings"].as_array().unwrap().is_empty());
             profile.overlay_disabled = true;
-            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }]).unwrap()).unwrap();
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
             assert_eq!(data[0]["overlay"], false);
         }
     }
@@ -1498,7 +1532,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"id":"launch","trigger":"launch","source":"code"})).unwrap(),
         ];
         let configuration = |profile: &Profile| -> serde_json::Value {
-            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe:"Game.exe" }]).unwrap()).unwrap()
+            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe:"Game.exe" }], &[]).unwrap()).unwrap()
         };
         let before = configuration(&profile);
         profile.hotkeys_disabled = true;

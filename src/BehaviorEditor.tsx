@@ -3,8 +3,9 @@ import { useErrorReporter } from "./AppConsole";
 import { useState } from "react";
 import { api } from "./api";
 import { KeyInput } from "./KeyInput";
+import { NumberInput } from "./NumberInput";
 import type { Step } from "./behaviors";
-import type { OverlayTarget, ProfileState, Script } from "./types";
+import type { NumberVariable, OverlayTarget, ProfileState, Script } from "./types";
 
 const ACTION_TYPES: Step["type"][] = ["borderless", "fit", "goto", "hold", "killprocess", "lock", "press", "mousepress", "repeat", "resolution", "restorecursor", "savecursor", "send", "sleep", "state", "startoverlay", "stretch", "waitfor", "sequence", "parallel", "stopoverlay", "bar", "script"];
 const ACTION_ICONS: Record<Step["type"], IconName> = {
@@ -17,7 +18,7 @@ const ACTION_ICONS: Record<Step["type"], IconName> = {
 const ACTION_LABELS: Record<Step["type"], string> = {
   borderless: "Borderless", fit: "Fit window", goto: "Move cursor", hold: "Hold keys", killprocess: "End process", lock: "Lock cursor",
   press: "Press keys", mousepress: "Mouse press", repeat: "Repeat keys", resolution: "Resolution", restorecursor: "Restore cursor",
-  savecursor: "Save cursor", send: "Type text", sleep: "Delay", state: "State", startoverlay: "Start overlay",
+  savecursor: "Save cursor", send: "Type text", sleep: "Sleep", state: "State", startoverlay: "Start overlay",
   stretch: "Stretch window", waitfor: "Wait for input", sequence: "Sequence", parallel: "Simultaneous",
   stopoverlay: "Stop overlay", bar: "Set bar", script: "Run script", unknown: "Unsupported action",
 };
@@ -41,7 +42,7 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
   }
 }
 
-export function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
+export function GotoInput({ x, y, gameExe, variables = [], onChange }: { x: string; y: string; gameExe: string; variables?: NumberVariable[]; onChange: (x: string, y: string) => void }) {
   const reportError = useErrorReporter();
   const [picking, setPicking] = useState(false);
 
@@ -59,14 +60,14 @@ export function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; g
 
   return (
     <div className="goto-input">
-      <label>X (%) <input type="number" min={0} max={100} step={0.1} value={x} onChange={e => onChange(e.target.value, y)} /></label>
-      <label>Y (%) <input type="number" min={0} max={100} step={0.1} value={y} onChange={e => onChange(x, e.target.value)} /></label>
+      <label>X (%) <NumberInput label="X (%)" min={0} max={100} step={0.1} value={x} variables={variables} onChange={value => onChange(value, y)} /></label>
+      <label>Y (%) <NumberInput label="Y (%)" min={0} max={100} step={0.1} value={y} variables={variables} onChange={value => onChange(x, value)} /></label>
       <IconButton showLabel icon={picking ? "spinner" : "crosshairs"} label={picking ? "Click in app" : "Pick position"} spin={picking} className="btn btn--ghost btn--sm coordinate-picker" onClick={pick} disabled={picking} />
     </div>
   );
 }
 
-function StepRow({ step, index, total, gameExe, states, overlays, scripts, onChange, onDelete, onMove }: {
+function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, onChange, onDelete, onMove }: {
   step: Step;
   index: number;
   total: number;
@@ -74,6 +75,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, onCha
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  variables: NumberVariable[];
   onChange: (s: Step) => void;
   onDelete: () => void;
   onMove: (dir: -1 | 1) => void;
@@ -90,31 +92,38 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, onCha
           />
         )}
         {step.type === "mousepress" && (
-          <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} placeholder="Mouse button" />
+          <>
+            <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} placeholder="Mouse button" />
+            <select value={step.doubleClick ? "double" : "single"} aria-label="Click type"
+              onChange={e => onChange({ ...step, doubleClick: e.target.value === "double" })}>
+              <option value="single">Single click</option>
+              <option value="double">Double click</option>
+            </select>
+          </>
         )}
         {(step.type === "sequence" || step.type === "parallel") && (
-          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts}
+          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables}
             onChange={steps => onChange({ ...step, steps })} />
         )}
         {step.type === "unknown" && <input value={step.source} readOnly aria-label="Unsupported action" />}
         {step.type === "repeat" && (
           <>
-            <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} allowChord />
-            <input type="number" min={1} value={step.interval} placeholder="interval ms" title="Interval between presses (ms)"
-              onChange={e => onChange({ ...step, interval: e.target.value })} style={{ width: 90 }} />
-            <input type="number" min={0} value={step.hold} placeholder="hold ms" title="Key-down time per press (ms). Lower it if a game fires too fast; raise it if presses don't register."
-              onChange={e => onChange({ ...step, hold: e.target.value })} style={{ width: 80 }} />
+            <div className="step-row__keys"><KeyInput value={step.key} onChange={key => onChange({ ...step, key })} allowChord /></div>
+            <NumberInput min={1} step={1} value={step.interval} label="Interval (ms)" variables={variables}
+              onChange={interval => onChange({ ...step, interval })} />
+            <NumberInput min={0} step={1} value={step.hold} label="Hold (ms)" variables={variables}
+              onChange={hold => onChange({ ...step, hold })} width={80} />
           </>
         )}
         {step.type === "goto" && (
-          <GotoInput x={step.x} y={step.y} gameExe={gameExe} onChange={(x, y) => onChange({ ...step, x, y })} />
+          <GotoInput x={step.x} y={step.y} gameExe={gameExe} variables={variables} onChange={(x, y) => onChange({ ...step, x, y })} />
         )}
         {step.type === "resolution" && (
           <>
-            <input type="number" min={1} step={1} value={step.width} placeholder="width" aria-label="Resolution width"
-              onChange={e => onChange({ ...step, width: e.target.value })} style={{ width: 90 }} />
-            <input type="number" min={1} step={1} value={step.height} placeholder="height" aria-label="Resolution height"
-              onChange={e => onChange({ ...step, height: e.target.value })} style={{ width: 90 }} />
+            <NumberInput min={1} step={1} value={step.width} label="Resolution width" variables={variables}
+              onChange={width => onChange({ ...step, width })} />
+            <NumberInput min={1} step={1} value={step.height} label="Resolution height" variables={variables}
+              onChange={height => onChange({ ...step, height })} />
           </>
         )}
         {step.type === "state" && (
@@ -153,7 +162,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, onCha
               {step.itemId && !overlays.some(item => item.id === step.itemId && (step.type !== "bar" || item.type === "bar")) && <option value={step.itemId}>Missing overlay</option>}
               {overlays.filter(item => step.type !== "bar" || item.type === "bar").map(item => <option key={item.id} value={item.id}>{item.name || (item.type === "group" ? "Overlay" : item.type)}</option>)}
             </select>
-            {step.type === "bar" && <input type="number" value={step.value} onChange={e => onChange({ ...step, value: e.target.value })} aria-label="Bar value" />}
+            {step.type === "bar" && <NumberInput value={step.value} variables={variables} onChange={value => onChange({ ...step, value })} label="Bar value" />}
           </>
         )}
         {step.type === "script" && <select value={step.scriptId} onChange={e => onChange({ ...step, scriptId: e.target.value })} aria-label="Script">
@@ -161,8 +170,8 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, onCha
           {scripts.map(script => <option key={script.id} value={script.id}>{script.name || script.language}</option>)}
         </select>}
         {step.type === "sleep" && (
-          <input type="number" value={step.ms} placeholder="ms"
-            onChange={e => onChange({ ...step, ms: e.target.value })} style={{ width: 90 }} />
+          <NumberInput min={0} step={1} value={step.ms} variables={variables} label="Sleep (ms)"
+            onChange={ms => onChange({ ...step, ms })} />
         )}
         {step.type === "send" && (
           <input value={step.text} placeholder="text"
@@ -178,12 +187,13 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, onCha
   );
 }
 
-export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, onChange }: {
+export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], onChange }: {
   steps: Step[];
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  variables?: NumberVariable[];
   onChange: (steps: Step[]) => void;
 }) {
   function addStep(step: Step) { onChange([...steps, step]); }
@@ -201,7 +211,7 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
     <div className="steps-section">
       <div className="steps-list">
         {steps.map((step, i) => (
-          <StepRow key={i} step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts}
+          <StepRow key={i} step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables}
             onChange={next => updateStep(i, next)}
             onDelete={() => removeStep(i)}
             onMove={direction => moveStep(i, direction)} />

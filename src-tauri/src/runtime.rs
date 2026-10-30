@@ -84,7 +84,7 @@ impl Runtime {
         let game = db.games.iter().find(|game| game.profiles.iter().any(|candidate| candidate.id == profile && candidate.armed)).ok_or("Profile is unavailable.")?;
         if !self.enabled(profile) { return Err("Profile is disabled.".into()); }
         if !scope.is_active(db) || (!scope.script_owner.is_empty() && !self.enabled(&scope.script_owner)) { return Err("Behavior source is disabled.".into()); }
-        let steps = crate::behavior::parse(source)?;
+        let steps = crate::behavior::resolve(source, &db.variables)?;
         crate::behavior::validate(&steps)?;
         self.next_command += 1;
         let mut scope = scope.clone(); scope.section = scope.section().to_string();
@@ -305,6 +305,20 @@ mod tests {
                 {"type":"timer","id":"timer","x":0,"y":0,"duration_ms":500,"timer_state_id":"buff"},
                 {"type":"bar","id":"health","x":0,"y":0,"w":100,"h":10,"color":"#fff","max_value":100}
             ]}]}],"settings":{"ahk_exe":"","python_exe":""}})).unwrap()
+    }
+    #[test]
+    fn script_behavior_requests_resolve_shared_variables_without_changing_the_source() {
+        let mut db = database();
+        db.variables.push(config::NumberVariable { id: "pause".into(), name: "sleep timer".into(), value: 50.0 });
+        let mut runtime = Runtime::default(); runtime.reconcile(&db, 0);
+        let scope = ExecutionScope { profile: "keys".into(), ..Default::default() };
+        let source = "sleep($pause);send($pause)";
+        runtime.enqueue(&db, &scope, source).unwrap();
+        let commands = runtime.take_commands();
+        assert!(matches!(&commands[0].steps[0], crate::behavior::Action::Sleep { ms } if ms == "50"));
+        assert!(matches!(&commands[0].steps[1], crate::behavior::Action::Send { text } if text == "$pause"));
+        assert!(runtime.enqueue(&db, &scope, "sleep($missing)").is_err());
+        assert!(runtime.take_commands().is_empty());
     }
     #[test]
     fn folder_state_is_shared_and_focus_does_not_restart_deadlines() {

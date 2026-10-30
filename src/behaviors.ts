@@ -1,5 +1,8 @@
+import type { NumberVariable } from "./types";
+
 export type Step =
-  | { type: "press" | "hold" | "mousepress" | "waitfor"; key: string }
+  | { type: "press" | "hold" | "waitfor"; key: string }
+  | { type: "mousepress"; key: string; doubleClick?: boolean }
   | { type: "repeat"; key: string; interval: string; hold: string }
   | { type: "sequence" | "parallel"; steps: Step[] }
   | { type: "goto"; x: string; y: string }
@@ -92,12 +95,33 @@ const input = /^(?:(?:[lr]?(?:ctrl|shift|alt|win))\s+)*(?:[^\s,]+)(?:[\s,]+[^\s,
 const mouse = /^(?:(?:[lr]?(?:ctrl|shift|alt|win))\s+)*(?:[lrm]button|xbutton[12]|m[12])$/i;
 const integer = (value: string, minimum: number) => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= minimum && Number(value) <= 0xffffffff;
 
-export function areStepsValid(steps: Step[]): boolean {
+// Only numeric parameters resolve references; text and key names remain literal.
+export function mapStepNumbers(step: Step, map: (value: string) => string): Step {
+  switch (step.type) {
+    case "sleep": return { ...step, ms: map(step.ms) };
+    case "repeat": return { ...step, interval: map(step.interval), hold: map(step.hold) };
+    case "goto": return { ...step, x: map(step.x), y: map(step.y) };
+    case "resolution": return { ...step, width: map(step.width), height: map(step.height) };
+    case "bar": return { ...step, value: map(step.value) };
+    default: return step;
+  }
+}
+
+export function resolveNumber(value: string, variables: NumberVariable[]): string {
+  if (!value.startsWith("$")) return value;
+  const variable = variables.find(variable => variable.id === value.slice(1));
+  if (!variable || !Number.isFinite(variable.value)) throw new Error("Missing or invalid number variable");
+  return String(variable.value);
+}
+
+export function areStepsValid(steps: Step[], variables: NumberVariable[] = []): boolean {
   return steps.every(step => {
+    try { step = mapStepNumbers(step, value => resolveNumber(value, variables)); }
+    catch { return false; }
     switch (step.type) {
-      case "sequence": case "parallel": return step.steps.length > 0 && areStepsValid(step.steps);
+      case "sequence": case "parallel": return step.steps.length > 0 && areStepsValid(step.steps, variables);
       case "press": case "hold": case "waitfor": return input.test(step.key.trim());
-      case "mousepress": return mouse.test(step.key.trim());
+      case "mousepress": return mouse.test(step.key.trim()) && (step.doubleClick === undefined || typeof step.doubleClick === "boolean");
       case "repeat": return input.test(step.key.trim()) && integer(step.interval, 1) && integer(step.hold, 0);
       case "sleep": return integer(step.ms, 0);
       case "resolution": return integer(step.width, 1) && integer(step.height, 1);
@@ -122,11 +146,13 @@ export function mapBehavior(behavior: string, map: (step: Step) => Step | null):
   return JSON.stringify(original) === JSON.stringify(changed) ? behavior : stepsToString(changed);
 }
 
-export function describeBehavior(behavior: string, stateName: (id: string) => string, itemName: (id: string) => string): string {
+export function describeBehavior(behavior: string, stateName: (id: string) => string, itemName: (id: string) => string, variableName: (id: string) => string = id => id): string {
   const describe = (steps: Step[]): string => steps.map(step => {
+    step = mapStepNumbers(step, value => value.startsWith("$") ? variableName(value.slice(1)) : value);
     switch (step.type) {
       case "parallel": case "sequence": return `${step.type}(${describe(step.steps)})`;
-      case "press": case "hold": case "repeat": case "waitfor": case "mousepress": return `${step.type}(${step.key})`;
+      case "press": case "hold": case "repeat": case "waitfor": return `${step.type}(${step.key})`;
+      case "mousepress": return `${step.type}(${step.key}${step.doubleClick ? ", double" : ""})`;
       case "state": return `${step.action === "set" ? "enter" : step.action === "clear" ? "leave" : "state"}(${stateName(step.stateId)})`;
       case "startoverlay": return `${step.restart ? "restartoverlay" : "startoverlay"}(${itemName(step.itemId)})`;
       case "stopoverlay": case "bar": return `${step.type}(${itemName(step.itemId)}${step.type === "bar" ? `, ${step.value}` : ""})`;

@@ -8,6 +8,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { api } from "./api";
 import { useErrorReporter } from "./AppConsole";
 import { CloudSettings } from "./CloudSettings";
+import { VariablesView } from "./VariablesView";
+import { exportVariables, importVariables } from "./variables";
 import { KeyInput, useBindingRecorder } from "./KeyInput";
 import { EnableSwitch } from "./EnableSwitch";
 import { ProfileSection } from "./ProfileSection";
@@ -31,6 +33,7 @@ import type {
   ProfileState,
   Script,
   ProfileKind,
+  NumberVariable,
 } from "./types";
 import "./App.css";
 
@@ -134,7 +137,7 @@ function materializeProfile(profile: Profile, profiles: Profile[]): Profile {
   };
 }
 
-async function exportProfile(profile: Profile, folder: Scope) {
+async function exportProfile(profile: Profile, folder: Scope, variables: NumberVariable[]) {
   const profiles = folder.profiles;
   const path = await saveDialog({
     title: "Export Profile",
@@ -143,20 +146,21 @@ async function exportProfile(profile: Profile, folder: Scope) {
   });
   if (!path) return;
   const states = folder.states;
-  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data: withReferencedScripts(withReferencedStates(withReferencedOverlayParts(materializeProfile(profile, profiles), profiles), states), profiles.flatMap(profile => profile.scripts)) }, null, 2));
+  const data = withReferencedScripts(withReferencedStates(withReferencedOverlayParts(materializeProfile(profile, profiles), profiles), states), profiles.flatMap(profile => profile.scripts));
+  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data, variables: exportVariables([data], variables) }, null, 2));
 }
 
-async function exportScope(scope: Scope) {
+async function exportScope(scope: Scope, variables: NumberVariable[]) {
   const path = await saveDialog({
     title: "Export Scope",
     defaultPath: `${scope.name || "scope"}.hkm-scope`,
     filters: [{ name: "HKM Scope", extensions: ["hkm-scope"] }],
   });
   if (!path) return;
-  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "scope", data: scope }, null, 2));
+  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "scope", data: scope, variables: exportVariables(scope.profiles, variables) }, null, 2));
 }
 
-async function importProfile(): Promise<Profile | null> {
+async function importProfile(existing: NumberVariable[]): Promise<{ profile: Profile; variables: NumberVariable[] } | null> {
   const path = await openDialog({
     title: "Import Profile",
     filters: [{ name: "HKM Profile", extensions: ["hkm-profile", "json"] }],
@@ -165,10 +169,11 @@ async function importProfile(): Promise<Profile | null> {
   if (!path) return null;
   const raw = JSON.parse(await api.readTextFile(path as string));
   if (raw.type !== "profile") throw new Error("File is not a profile export");
-  return remapProfileIds(raw.data as Profile);
+  const imported = importVariables([remapProfileIds(raw.data as Profile)], raw.variables ?? [], existing);
+  return { profile: imported.profiles[0], variables: imported.variables };
 }
 
-async function importScope(): Promise<Scope[] | null> {
+async function importScope(existing: NumberVariable[]): Promise<{ scopes: Scope[]; variables: NumberVariable[] } | null> {
   const path = await openDialog({
     title: "Import Scope",
     filters: [{ name: "HKM Scope", extensions: ["hkm-scope", "json"] }],
@@ -177,7 +182,9 @@ async function importScope(): Promise<Scope[] | null> {
   if (!path) return null;
   const raw = JSON.parse(await api.readTextFile(path as string));
   if (raw.type !== "scope") throw new Error("File is not a scope export");
-  const scope = raw.data as LegacyScopeExport;
+  const source = raw.data as LegacyScopeExport;
+  const imported = importVariables(source.profiles, raw.variables ?? [], existing);
+  const scope = { ...source, profiles: imported.profiles };
   const profileIds = new Map(scope.profiles.map(profile => [profile.id, uid()]));
   const stateIds = new Map([...(scope.states ?? []), ...scope.profiles.flatMap(profile => profile.states ?? [])].map(state => [state.id, uid()] as const));
   const itemIds = new Map(scope.profiles.flatMap(profile => profile.overlay_items.map(item => [item.id, uid()] as const)));
@@ -218,7 +225,7 @@ async function importScope(): Promise<Scope[] | null> {
   }
   if (groups.length === 0) groups.push({ exe: typeof scope.exe === "string" ? scope.exe.trim() : "", profiles: [] });
 
-  return groups.map(group => ({
+  const scopes = groups.map(group => ({
     ...scope,
     id: uid(),
     name: groups.length === 1
@@ -228,6 +235,7 @@ async function importScope(): Promise<Scope[] | null> {
     profiles: group.profiles,
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));
+  return { scopes, variables: imported.variables };
 }
 
 function formatDuration(ms: number | null) {
@@ -315,6 +323,7 @@ function Placeholder({ label }: { label?: string }) {
 type Selection =
   | { kind: "profile"; folderId: string; profileId: string }
   | { kind: "settings" }
+  | { kind: "variables" }
   | { kind: "empty" };
 
 /** Whether an armed profile's folder app is present (so its hotkeys can fire). "*" is always present. */
@@ -509,13 +518,14 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
         <IconButton icon="folder-plus" label="New folder" className="btn btn--ghost btn--full" onClick={() => onModal({ type: "addGame" })} />
         <IconButton icon="file-import" label="Import folder" className="btn btn--ghost btn--full" onClick={async () => {
           try {
-            const scopes = await importScope();
-            if (!scopes) return;
+            const imported = await importScope(db!.variables);
+            if (!imported) return;
             let updated: Database | null = null;
-            for (const scope of scopes) updated = await api.upsertGame(scope);
+            for (const scope of imported.scopes) updated = await api.upsertGame(scope, imported.variables);
             if (updated) onDb(updated);
           } catch (e) { reportError(e); }
         }} />
+        <IconButton icon="code" label="Variables" className={`btn btn--ghost btn--full ${selection.kind === "variables" ? "btn--primary" : ""}`} onClick={() => onSelect({ kind: "variables" })} />
         <IconButton icon="gear" label="Settings" className={`btn btn--ghost btn--full ${selection.kind === "settings" ? "btn--primary" : ""}`} onClick={() => onSelect({ kind: "settings" })} />
       </div>
     </aside>
@@ -654,12 +664,13 @@ function behaviorEventLabel(event: BehaviorEventKind): string {
 
 // ── Step sub-components ───────────────────────────────────────────────────────
 
-function HotkeyModal({ initial, gameExe, states, overlays, scripts, onSave, onClose }: {
+function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, onSave, onClose }: {
   initial: Hotkey;
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  variables: NumberVariable[];
   onSave: (hk: Hotkey) => void;
   onClose: () => void;
 }) {
@@ -700,24 +711,25 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, onSave, onCl
           <span>Allow extra modifiers</span>
         </label>
 
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onChange={setSteps} />
 
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
-          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!areStepsValid(steps)} onClick={() => trigger.trim() && areStepsValid(steps) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!areStepsValid(steps, variables)} onClick={() => trigger.trim() && areStepsValid(steps, variables) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })} />
         </div>
       </div>
     </div>
   );
 }
 
-function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, onSave, onClose }: {
+function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, variables, onSave, onClose }: {
   initial: BehaviorEvent;
   eventKinds: BehaviorEventKind[];
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  variables: NumberVariable[];
   onSave: (event: BehaviorEvent) => void;
   onClose: () => void;
 }) {
@@ -734,10 +746,10 @@ function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, o
             <option key={candidate.value} value={candidate.value}>{candidate.label}</option>
           ))}
         </select>
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onChange={setSteps} />
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
-          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!behavior || !areStepsValid(steps)} onClick={() => behavior && areStepsValid(steps) && onSave({ event, behavior })} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!behavior || !areStepsValid(steps, variables)} onClick={() => behavior && areStepsValid(steps, variables) && onSave({ event, behavior })} />
         </div>
       </div>
     </div>
@@ -880,21 +892,22 @@ function hotkeyLabel(hotkey: Hotkey): string {
   return hotkey.name.trim() ? `${hotkey.name} - hotkey` : "hotkey";
 }
 
-function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayTarget[]): string {
+function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayTarget[], variables: NumberVariable[]): string {
   return describeBehavior(behavior, id => stateNameById(states, id) ?? id, id => {
     const item = overlays.find(item => item.id === id);
     return item ? item.name || (item.type === "group" ? "Overlay" : item.type) : "Missing overlay";
-  });
+  }, id => variables.find(variable => variable.id === id)?.name ?? "Missing variable");
 }
 
-function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayTarget[]): string {
-  return behaviorDesc(hotkey.behavior, states, overlays);
+function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayTarget[], variables: NumberVariable[]): string {
+  return behaviorDesc(hotkey.behavior, states, overlays, variables);
 }
 
-function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDelete, onOverride }: {
+function HotkeyRow({ hotkey, states, overlays, variables, inherited, onEdit, onCopy, onDelete, onOverride }: {
   hotkey: Hotkey;
   states: ProfileState[];
   overlays: OverlayTarget[];
+  variables: NumberVariable[];
   inherited: boolean;
   onEdit?: () => void;
   onCopy?: () => void;
@@ -905,7 +918,7 @@ function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDele
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
       <span className="overlay-type-badge overlay-type-badge--text">{hotkeyLabel(hotkey)}</span>
       <span className="hotkey-row__trigger">{hotkey.trigger}</span>
-      <span className="overlay-item-desc">{hotkeyDesc(hotkey, states, overlays)}</span>
+      <span className="overlay-item-desc">{hotkeyDesc(hotkey, states, overlays, variables)}</span>
       <div className="step-row__btns">
         {inherited ? (
           <>
@@ -924,10 +937,11 @@ function HotkeyRow({ hotkey, states, overlays, inherited, onEdit, onCopy, onDele
   );
 }
 
-function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOverride }: {
+function EventRow({ event, states, overlays, variables, inherited, onEdit, onDelete, onOverride }: {
   event: BehaviorEvent;
   states: ProfileState[];
   overlays: OverlayTarget[];
+  variables: NumberVariable[];
   inherited: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -936,7 +950,7 @@ function EventRow({ event, states, overlays, inherited, onEdit, onDelete, onOver
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
       <span className="overlay-type-badge overlay-type-badge--text">{behaviorEventLabel(event.event)}</span>
-      <span className="overlay-item-desc">{behaviorDesc(event.behavior, states, overlays)}</span>
+      <span className="overlay-item-desc">{behaviorDesc(event.behavior, states, overlays, variables)}</span>
       <div className="step-row__btns">
         {inherited ? (
           <IconButton icon="pen" label="Override" className="icon-btn" onClick={onOverride} />
@@ -1351,9 +1365,10 @@ function ScriptModal({ initial, onSave, onClose }: {
 
 // ── Game detail view ──────────────────────────────────────────────────────────
 
-function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }: {
+function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb, onModal }: {
   folder: Scope;
   profile: Profile;
+  variables: NumberVariable[];
   showStates: boolean;
   onContext: (e: ReactMouseEvent) => void;
   onDb: (db: Database) => void;
@@ -1437,7 +1452,7 @@ function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }
               {resolvedHotkeys.map(({ hotkey: hk, own }, i) => {
                 const ownIndex = own ? profile.hotkeys.findIndex(h => h.trigger === hk.trigger) : -1;
                 return (
-                  <HotkeyRow key={i} hotkey={hk} states={stateOptions} overlays={overlayOptions} inherited={!own}
+                  <HotkeyRow variables={variables} key={i} hotkey={hk} states={stateOptions} overlays={overlayOptions} inherited={!own}
                     onEdit={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: ownIndex, hotkey: hk, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}
                     onCopy={() => onModal({ type: "copyHotkey", sourceGameId: folder.id, sourceProfileId: profileId, hotkey: hk })}
                     onDelete={() => deleteHotkey(ownIndex)}
@@ -1464,7 +1479,7 @@ function ProfileEditor({ folder, profile, showStates, onContext, onDb, onModal }
                 const eventKinds = BEHAVIOR_EVENTS.map(candidate => candidate.value)
                   .filter(kind => kind === event.event || !profile.events.some((existing, index) => index !== ownIndex && existing.event === kind));
                 return (
-                  <EventRow key={event.event} event={event} states={stateOptions} overlays={overlayOptions} inherited={!own}
+                  <EventRow variables={variables} key={event.event} event={event} states={stateOptions} overlays={overlayOptions} inherited={!own}
                     onEdit={own ? () => onModal({ type: "editEvent", gameId: folder.id, profileId, index: ownIndex, event, eventKinds, gameExe: profileExe, states: stateOptions, overlays: overlayOptions }) : undefined}
                     onDelete={own ? () => deleteEvent(ownIndex) : undefined}
                     onOverride={!own ? () => saveProfile({ ...profile, events: [...profile.events, { ...event }] }) : undefined} />
@@ -1849,7 +1864,7 @@ export default function App() {
       { label: p.parent_id ? "Change parent" : "Inherit from…", onClick: () => setModal({ type: "setParent", gameId: folderId, profile: p }) },
       { label: "Copy to…", onClick: () => setModal({ type: "copyProfile", sourceGameId: folderId, profile: p }) },
       { label: "Edit states…", onClick: () => { setSelection({ kind: "profile", folderId, profileId: p.id }); setStatesFor(p.id); } },
-      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!).catch(e => reportError(e)) },
+      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!, db!.variables).catch(e => reportError(e)) },
       { label: "Delete profile", danger: true, onClick: async () => {
         try {
           if (!await confirmDialog(`Delete profile "${p.name}"?`)) return;
@@ -1877,13 +1892,13 @@ export default function App() {
     return [
       { label: "New profile", onClick: () => newProfile("hotkeys") },
       { label: "Import profile…", onClick: async () => {
-        try { const imported = await importProfile(); if (!imported) return; imported.name = imported.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported)); }
+        try { const imported = await importProfile(db!.variables); if (!imported) return; imported.profile.name = imported.profile.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported.profile, imported.variables)); }
         catch (e) { reportError(e); }
       } },
       { label: "Arm all", onClick: () => armAll(true) },
       { label: "Disarm all", onClick: () => armAll(false) },
       { label: "Folder settings…", onClick: () => setModal({ type: "editGame", game: folder }) },
-      { label: "Export folder", onClick: () => exportScope(folder).catch(e => reportError(e)) },
+      { label: "Export folder", onClick: () => exportScope(folder, db!.variables).catch(e => reportError(e)) },
       ...(hasProcessTarget ? [
         { label: "Kill process", onClick: async () => {
           try {
@@ -2040,10 +2055,10 @@ export default function App() {
 
   async function importFolder() {
     try {
-      const scopes = await importScope();
-      if (!scopes) return;
+      const imported = await importScope(db!.variables);
+      if (!imported) return;
       let updated: Database | null = null;
-      for (const scope of scopes) updated = await api.upsertGame(scope);
+      for (const scope of imported.scopes) updated = await api.upsertGame(scope, imported.variables);
       if (updated) handleDb(updated);
     }
     catch (e) { reportError(e); }
@@ -2071,8 +2086,11 @@ export default function App() {
           {selection.kind === "settings" && (
             <div className="detail__scroll"><SettingsView db={db} onDb={handleDb} onCheckUpdates={() => checkUpdate(true)} /></div>
           )}
+          {selection.kind === "variables" && (
+            <div className="detail__scroll"><VariablesView db={db} onDb={handleDb} /></div>
+          )}
           {selProfile && selFolder && (
-            <ProfileEditor key={selProfile.id} folder={selFolder} profile={selProfile}
+            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile}
               showStates={statesFor === selProfile.id}
               onContext={e => onProfileContext(e, selFolder.id, selProfile)}
               onDb={handleDb} onModal={setModal} />
@@ -2104,13 +2122,13 @@ export default function App() {
       })()}
       {modal?.type === "editHotkey" && (() => {
         const { gameId, profileId: pid, index, hotkey, gameExe, states, overlays } = modal;
-        return <HotkeyModal initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
+        return <HotkeyModal variables={db.variables} initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
           onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editEvent" && (() => {
         const { gameId, profileId: pid, index, event, eventKinds, gameExe, states, overlays } = modal;
-        return <EventModal initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
+        return <EventModal variables={db.variables} initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
           onSave={next => handleEventSave(gameId, pid, index, next)}
           onClose={() => setModal(null)} />;
       })()}

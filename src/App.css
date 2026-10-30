@@ -580,6 +580,10 @@ textarea { resize: vertical; }
 }
 .step-row__params { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .step-row__params input { min-width: 0; }
+.number-input { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.number-input select { max-width: 180px; }
+.step-row__params:has(.number-input) { flex-wrap: wrap; }
+.step-row__keys { flex-basis: 100%; min-width: 0; }
 .step-row__params > .steps-section { flex: 1; min-width: 0; }
 .step-row__btns { display: flex; gap: 2px; flex-shrink: 0; }
 

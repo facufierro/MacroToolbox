@@ -94,6 +94,34 @@ mod overlay_position_tests {
     }
 
     #[test]
+    fn unchanged_canvas_recovers_above_a_borderless_topmost_window_without_taking_focus() {
+        let _dpi = PhysicalCoordinates::enter().unwrap();
+        let overlay = Canvas::new();
+        let game = Canvas::new();
+        let desktop = get_global_viewport();
+        let foreground = unsafe { GetForegroundWindow() };
+        fit_overlay_to_desktop(overlay.0, desktop).unwrap();
+        unsafe {
+            assert_ne!(SetWindowPos(game.0, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER), 0);
+        }
+        let above_game = || {
+            let mut previous = unsafe { GetWindow(game.0, GW_HWNDPREV) };
+            while !previous.is_null() {
+                if previous == overlay.0 { return true; }
+                previous = unsafe { GetWindow(previous, GW_HWNDPREV) };
+            }
+            false
+        };
+        assert!(!above_game(), "fixture must put the game above the overlay");
+        assert_eq!(get_window_client_bounds(overlay.0).unwrap(), desktop);
+        assert_eq!(fit_overlay_to_desktop(overlay.0, desktop).unwrap(), desktop);
+        assert!(above_game(), "unchanged geometry must not skip restoring overlay order");
+        assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+        assert_eq!(unsafe { IsWindowVisible(overlay.0) }, 0, "positioning must not show a hidden overlay");
+    }
+
+    #[test]
     fn invalid_canvas_cannot_report_valid_overlay_bounds() {
         let _dpi = PhysicalCoordinates::enter().unwrap();
         assert!(fit_overlay_to_desktop(std::ptr::null_mut(), get_global_viewport()).is_err());
@@ -263,12 +291,13 @@ fn get_database(state: State<AppState>) -> Result<Database, String> {
 }
 
 fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) -> Result<(), String> {
+    config::validate_variables(&db.variables)?;
     config::normalize_states(db);
     config::normalize_overlays(db);
     for game in &db.games {
         for profile in game.profiles.iter().filter(|profile| profile.armed) {
-            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) { behavior::validate(&behavior::parse(&hotkey.behavior)?)?; }
-            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::parse(&event.behavior)?)?; }
+            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables)?)?; }
+            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables)?)?; }
         }
     }
     config::save_db(&state.db_path, db)?;
@@ -284,14 +313,26 @@ fn debug_overlay_log(message: String) {
     eprintln!("[debug][overlay_frontend] {message}");
 }
 
+fn merge_imported_variables(db: &mut Database, variables: Vec<config::NumberVariable>) -> Result<(), String> {
+    for variable in variables {
+        if let Some(existing) = db.variables.iter().find(|existing| existing.id == variable.id) {
+            if existing != &variable { return Err(format!("Conflicting imported variable: {}", variable.name)); }
+        } else {
+            db.variables.push(variable);
+        }
+    }
+    config::validate_variables(&db.variables)
+}
+
 #[tauri::command]
-fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game) -> Result<Database, String> {
+fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut game = game;
     if game.id == config::GLOBAL_FOLDER_ID {
         game.exe = GLOBAL_GAME_EXE.to_string();
     }
     let mut db = config::load_db(&state.db_path)?;
+    merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     match db.games.iter_mut().find(|g| g.id == game.id) {
         Some(existing) => *existing = game,
         None => db.games.push(game),
@@ -316,10 +357,11 @@ fn delete_game(app: tauri::AppHandle, state: State<AppState>, id: String) -> Res
 }
 
 #[tauri::command]
-fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile) -> Result<Database, String> {
+fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
+    merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     match game.profiles.iter_mut().find(|p| p.id == profile_id) {
@@ -594,7 +636,7 @@ fn sync_hotkeys(state: &AppState, db: &Database) -> Result<(), String> {
     }
 
     let mut mgr = state.hotkeys_ahk.lock().unwrap();
-    let (profiles, configuration_error) = match ahk::runtime_config(&armed) {
+    let (profiles, configuration_error) = match ahk::runtime_config(&armed, &db.variables) {
         Ok(profiles) => (profiles, None),
         Err(error) if mgr.is_running() => return Err(error),
         Err(error) => ("[]".to_string(), Some(error)),
@@ -1175,21 +1217,23 @@ fn fit_overlay_to_desktop(
     hwnd: winapi::shared::windef::HWND,
     desktop: WindowClientBounds,
 ) -> Result<WindowClientBounds, String> {
-    use winapi::um::winuser::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOZORDER};
+    use winapi::um::winuser::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING};
 
     let _dpi = PhysicalCoordinates::enter()?;
     let current = get_window_client_bounds(hwnd)?;
-    if current == desktop { return Ok(current); }
+    let mut flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
+    if current == desktop { flags |= SWP_NOMOVE | SWP_NOSIZE; }
 
     // The transparent canvas spans every monitor. Apply its physical rectangle together,
     // bypassing normal window tracking limits that can clip it to a single monitor.
+    // A borderless game can move ahead within the topmost band without changing our
+    // geometry. Restore our order on every refresh without activating or showing us.
     if unsafe {
         SetWindowPos(
-            hwnd, std::ptr::null_mut(), desktop.left, desktop.top, desktop.width, desktop.height,
-            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+            hwnd, HWND_TOPMOST, desktop.left, desktop.top, desktop.width, desktop.height, flags,
         )
     } == 0 {
-        return Err(format!("Failed to resize overlay: {}", std::io::Error::last_os_error()));
+        return Err(format!("Failed to position overlay: {}", std::io::Error::last_os_error()));
     }
     let canvas = get_window_client_bounds(hwnd)?;
     if canvas != desktop {
@@ -1542,6 +1586,23 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Se
 }
 
 #[tauri::command]
+fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::NumberVariable>) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    config::validate_variables(&variables)?;
+    // Even disarmed profiles must keep their references and valid numeric parameters.
+    for profile in db.games.iter().flat_map(|game| &game.profiles) {
+        for source in profile.hotkeys.iter().map(|entry| &entry.behavior).chain(profile.events.iter().map(|entry| &entry.behavior)) {
+            if behavior::parse(source).is_ok() { behavior::resolve(source, &variables)?; }
+        }
+    }
+    db.variables = variables;
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
+#[tauri::command]
 fn set_library_width(app: tauri::AppHandle, state: State<AppState>, width: u16) -> Result<(), String> {
     if !(240..=520).contains(&width) { return Err("Invalid sidebar width.".into()); }
     let _lock = state.db_access.lock().unwrap();
@@ -1883,6 +1944,7 @@ pub fn run() {
             set_profile_part_enabled,
             get_ahk_status,
             save_settings,
+            save_variables,
             set_library_width,
             firebase::firebase_status,
             firebase::firebase_configure,
