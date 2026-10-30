@@ -1,6 +1,6 @@
 [package]
 name = "macro-toolbox"
-version = "6.1.1"
+version = "6.2.0"
 description = "MacroToolbox"
 authors = ["Facundo Fierro"]
 edition = "2021"

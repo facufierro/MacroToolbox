@@ -5,6 +5,12 @@ mouse down/up pair to the profile's target window at the current cursor position
 Global profiles target the active window. The editor offers left, right, middle,
 Mouse 4 and Mouse 5.
 
+The click type selector defaults to Single click. Double click saves a
+`doubleClick: true` option on the structured mousepress action and sends two
+clicks at the same position. Windows classes with `CS_DBLCLKS` receive the native
+down/up/double-click/up sequence; other classes receive two down/up pairs.
+Modifiers and held-button cleanup apply to the entire double click.
+
 Modified combinations such as `rctrl shift LButton` use the same input recorder as
 other behaviors. Ctrl/Shift clicks carry their modifier flags in both native
 window messages. Modifier transitions preserve independently held keys and use
@@ -50,5 +56,9 @@ After the user-built app is restarted:
    restorecursor sequence. Check that it picks once, restores the cursor and does
    not drag the clicked window. Also release the physical button during the tap
    and confirm it does not remain pressed.
+7. Select Double click, save and reopen the behavior, then verify it performs a
+   double click in the target app. Repeat with Ctrl/Shift and with the physical
+   button held; switch back to Single click and verify one click is delivered.
 
 Reference: [AutoHotkey ControlClick documentation](https://www.autohotkey.com/docs/v2/lib/ControlClick.htm).
+Double-click delivery: [Windows mouse message sequence](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-lbuttondblclk).

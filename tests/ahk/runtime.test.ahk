@@ -10,6 +10,10 @@ RunRuntimeTest("failed branches cancel and release their siblings", TestRuntimeF
 RunRuntimeTest("new runtime actions carry their owning profile", TestRuntimeOperations)
 RunRuntimeTest("modified window clicks acquire and release their modifiers", TestModifiedMouse)
 RunRuntimeTest("native clicks are processed before their modifiers are released", TestNativeModifiedMouse)
+RunRuntimeTest("native double clicks are processed before their modifiers are released", TestNativeModifiedMouse.Bind(true))
+RunRuntimeTest("double clicks deliver every button with native class semantics", TestNativeDoubleMouse)
+RunRuntimeTest("double clicks preserve another behavior's held button", TestDoubleMouseSharedHold)
+RunRuntimeTest("failed double clicks release modifiers and stop their sequence", TestDoubleMouseFailure)
 RunRuntimeTest("mousepress supports sided modifiers and every mouse button", TestMouseModifierCombinations)
 RunRuntimeTest("modified clicks share modifier ownership with parallel behaviors", TestMouseSharedModifiers)
 RunRuntimeTest("modified clicks preserve physical and Copilot-held modifiers", TestMousePhysicalModifiers)
@@ -39,7 +43,7 @@ RunRuntimeTest("a quick E release preserves its configured tap duration", TestCo
 RunRuntimeTest("consumed E preserves other behaviors holding the same output", TestConsumedSharedOutput)
 RunRuntimeTest("consumed E preserves independent physical keys and modifiers", TestConsumedIndependentOutput)
 RunRuntimeTest("failed delivery of a consumed key still releases its output", TestConsumedOutputFailure)
-FileAppend("All 39 structured runtime tests passed.`n", "*")
+FileAppend("All 43 structured runtime tests passed.`n", "*")
 ExitApp 0
 
 RunRuntimeTest(name, test) {
@@ -336,7 +340,7 @@ FailMouseMessage(message) {
         throw Error("simulated mouse message failure")
 }
 
-TestNativeModifiedMouse() {
+TestNativeModifiedMouse(doubleClick := false) {
     global testWindowId, testNativeTarget, testNativeMessages, testOnSend
     window := Gui("+ToolWindow -Caption")
     try {
@@ -347,10 +351,11 @@ TestNativeModifiedMouse() {
         testOnSend := TrackMouseModifiers
         OnMessage 0x201, RecordModifiedNativeClick
         OnMessage 0x202, RecordModifiedNativeClick
-        StartBehaviorRun("native-modified", [Action("mousepress", "key", "rctrl shift LButton")], "", "Test.exe")
+        OnMessage 0x203, RecordModifiedNativeClick
+        StartBehaviorRun("native-modified", [Action("mousepress", "key", "rctrl shift LButton", "doubleClick", doubleClick)], "", "Test.exe")
         AwaitRuns()
         Sleep 20
-        Assert(testNativeMessages.Length = 2, "modified click lost its native transitions")
+        Assert(testNativeMessages.Length = (doubleClick ? 4 : 2), "modified click lost its native transitions")
         for item in testNativeMessages {
             Assert((item.buttons & 12) = 12, "modified click omitted Ctrl or Shift from its window message")
             Assert(item.ctrl && item.shift, "modifiers were released before the target processed its click")
@@ -360,9 +365,86 @@ TestNativeModifiedMouse() {
         testOnSend := 0
         OnMessage 0x201, RecordModifiedNativeClick, 0
         OnMessage 0x202, RecordModifiedNativeClick, 0
+        OnMessage 0x203, RecordModifiedNativeClick, 0
         testNativeTarget := 0
         window.Destroy()
     }
+}
+
+TestNativeDoubleMouse() {
+    global testWindowId, testNativeTarget, testNativeMessages, testHeldKeys
+    window := Gui("+ToolWindow -Caption")
+    messages := [0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207, 0x208, 0x209, 0x20B, 0x20C, 0x20D]
+    originalStyle := DllCall("GetClassLongW", "Ptr", window.Hwnd, "Int", -26, "UInt")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd
+        testNativeTarget := window.Hwnd
+        for message in messages
+            OnMessage message, RecordNativeClick
+        for doubleClickStyle in [false, true] {
+            DllCall("SetClassLongW", "Ptr", window.Hwnd, "Int", -26, "UInt", (originalStyle & ~8) | (doubleClickStyle ? 8 : 0), "UInt")
+            for button, down in Map("LButton", 0x201, "RButton", 0x204, "MButton", 0x207,
+                "XButton1", 0x20B, "XButton2", 0x20B, "m1", 0x201, "m2", 0x204) {
+                for modifiers in ["", "rctrl shift "] {
+                    for held in [false, true] {
+                        physicalButton := button = "m1" ? "lbutton" : button = "m2" ? "rbutton" : StrLower(button)
+                        testHeldKeys := Map(physicalButton, held)
+                        testNativeMessages := []
+                        StartBehaviorRun("double-click", [Action("mousepress", "key", modifiers button, "doubleClick", true)], "", "Test.exe")
+                        AwaitRuns()
+                        Sleep 20
+                        secondDown := doubleClickStyle ? down + 2 : down
+                        expected := held ? [down + 1, down, down + 1, secondDown, down + 1, down + 1]
+                            : [down, down + 1, secondDown, down + 1]
+                        Assert(testNativeMessages.Length = expected.Length, "double click lost or repeated transitions for " button)
+                        for index, item in testNativeMessages {
+                            Assert(item.message = expected[index], "double click used the wrong native transition")
+                            Assert((item.position & 0xFFFF) = 350 && (item.position >> 16 & 0xFFFF) = 250, "double click changed its position")
+                            Assert((item.buttons & 12) = (modifiers = "" ? 0 : 12), "double click lost its modifier flags")
+                            if down = 0x20B
+                                Assert(item.buttons >> 16 = (button = "XButton1" ? 1 : 2), "double click lost its side button")
+                        }
+                        Assert(testHeldKeys[physicalButton] = held, "double click changed the physical button state")
+                    }
+                }
+            }
+        }
+    } finally {
+        behaviorRuntime.Stop()
+        DllCall("SetClassLongW", "Ptr", window.Hwnd, "Int", -26, "UInt", originalStyle, "UInt")
+        for message in messages
+            OnMessage message, RecordNativeClick, 0
+        testNativeTarget := 0
+        window.Destroy()
+    }
+}
+
+TestDoubleMouseSharedHold() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("held-button", [Action("hold", "key", "LButton")], "", "*", "", "q")
+    try {
+        StartBehaviorRun("double-click", [Action("mousepress", "key", "LButton", "doubleClick", true)])
+        Assert(nativePosts.Length = 4, "held button lost its double click")
+        AssertClickOptions(["NA Pos U", "NA Pos D"])
+        Assert(heldOutputCounts["lbutton"] = 1, "double click released the other behavior's button")
+    } finally behaviorRuntime.Cancel("held-button")
+}
+
+TestDoubleMouseFailure() {
+    global testOnPost
+    testOnPost := FailSecondMousePress
+    StartBehaviorRun("failed-double", [Action("mousepress", "key", "rctrl LButton", "doubleClick", true), Action("press", "key", "x")])
+    AwaitRuns()
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "double-click failure was hidden")
+    Assert(nativePosts.Length = 4 && nativePosts[4].message = 0x202, "second click failure did not release the button")
+    AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+}
+
+FailSecondMousePress(message) {
+    if nativePosts.Length = 3
+        throw Error("simulated second mouse press failure")
 }
 
 TrackMouseModifiers(keys) {

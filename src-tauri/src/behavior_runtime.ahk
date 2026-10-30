@@ -193,7 +193,7 @@ class BehaviorExecutor {
                 return
             if !task.mouse.clicked {
                 task.mouse.clicked := true
-                DoMousePress(task.mouse.button, execution.target, MousePressFlags(node["key"], execution.modifiers))
+                DoMousePress(task.mouse.button, execution.target, MousePressFlags(node["key"], execution.modifiers), node.Get("doubleClick", false))
                 if task.held {
                     ; Window clicks are queued. Keep their modifiers owned while the target
                     ; consumes the click, without blocking other branches or cancellation.

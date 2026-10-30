@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CloudStatus, Database, Scope, Profile, Settings } from "./types";
+import type { CloudStatus, Database, Scope, Profile, Settings, NumberVariable } from "./types";
 
 export const api = {
   cloudStatus: () => invoke<CloudStatus>("firebase_status"),
@@ -42,14 +42,14 @@ export const api = {
   toggleFit: (exe: string) =>
     invoke<boolean>("toggle_fit", { exe }),
 
-  upsertGame: (game: Scope) =>
-    invoke<Database>("upsert_game", { game }),
+  upsertGame: (game: Scope, variables: NumberVariable[] = []) =>
+    invoke<Database>("upsert_game", { game, variables }),
 
   deleteGame: (id: string) =>
     invoke<Database>("delete_game", { id }),
 
-  upsertProfile: (gameId: string, profile: Profile) =>
-    invoke<Database>("upsert_profile", { gameId, profile }),
+  upsertProfile: (gameId: string, profile: Profile, variables: NumberVariable[] = []) =>
+    invoke<Database>("upsert_profile", { gameId, profile, variables }),
 
   deleteProfile: (gameId: string, profileId: string) =>
     invoke<Database>("delete_profile", { gameId, profileId }),
@@ -65,6 +65,9 @@ export const api = {
 
   saveSettings: (settings: Settings) =>
     invoke<Database>("save_settings", { settings }),
+
+  saveVariables: (variables: NumberVariable[]) =>
+    invoke<Database>("save_variables", { variables }),
 
   writeTextFile: (path: string, content: string) =>
     invoke<void>("write_text_file", { path, content }),
