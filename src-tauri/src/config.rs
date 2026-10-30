@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v5 moves state definitions into their target folder.
-pub const CURRENT_DB_VERSION: u32 = 5;
+/// older files. v6 adds shared number variables.
+pub const CURRENT_DB_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -13,6 +13,28 @@ pub struct Database {
     #[serde(rename = "scopes", alias = "games")]
     pub games: Vec<Game>,
     pub settings: Settings,
+    #[serde(default)]
+    pub variables: Vec<NumberVariable>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NumberVariable {
+    pub id: String,
+    pub name: String,
+    pub value: f64,
+}
+
+pub fn validate_variables(variables: &[NumberVariable]) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    for variable in variables {
+        if variable.id.trim().is_empty() || !ids.insert(&variable.id)
+            || variable.name.trim().is_empty() || !names.insert(variable.name.trim().to_lowercase())
+            || !variable.value.is_finite() {
+            return Err(format!("Invalid or duplicate variable: {}", variable.name));
+        }
+    }
+    Ok(())
 }
 
 /// A folder owns one target executable shared by all of its profiles.
@@ -420,6 +442,11 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         v if v == CURRENT_DB_VERSION => {
             (serde_json::from_value(value).map_err(|e| e.to_string())?, false)
         }
+        5 => {
+            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            db.version = CURRENT_DB_VERSION;
+            (db, true)
+        }
         4 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             let mut backup = path.as_os_str().to_owned(); backup.push(".v4.bak");
@@ -635,7 +662,7 @@ mod legacy_v2 {
             }
         }
 
-        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings }
+        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
     }
 }
 
@@ -715,7 +742,7 @@ mod legacy_v1 {
                 super::Game { states: Vec::new(), states_disabled: false, id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
             })
             .collect();
-        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings }
+        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
     }
 }
 
@@ -905,6 +932,32 @@ pub fn profile_has_overlay(profiles: &[Profile], profile: &Profile) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn legacy_databases_default_variables_and_new_definitions_round_trip() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-variables-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::write(&path, r#"{"version":5,"scopes":[],"settings":{"ahk_exe":""}}"#).unwrap();
+        let mut db = load_db(&path).unwrap();
+        assert_eq!(db.version, super::CURRENT_DB_VERSION);
+        assert!(db.variables.is_empty());
+        db.variables.push(super::NumberVariable { id: "buff".into(), name: "buff timer".into(), value: 5000.0 });
+        super::save_db(&path, &db).unwrap();
+        assert_eq!(load_db(&path).unwrap().variables, db.variables);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn number_variable_definitions_require_unique_ids_names_and_finite_values() {
+        let variable = super::NumberVariable { id: "buff".into(), name: "buff timer".into(), value: 5000.0 };
+        assert!(super::validate_variables(std::slice::from_ref(&variable)).is_ok());
+        for other in [variable.clone(), super::NumberVariable { id: "other".into(), name: " BUFF TIMER ".into(), ..variable.clone() }] {
+            assert!(super::validate_variables(&[variable.clone(), other]).is_err());
+        }
+        for other in [super::NumberVariable { value: f64::INFINITY, ..variable.clone() },
+            super::NumberVariable { name: " ".into(), ..variable.clone() }, super::NumberVariable { id: "".into(), ..variable }] {
+            assert!(super::validate_variables(&[other]).is_err());
+        }
+    }
 
     #[test]
     fn overlay_groups_and_direct_timer_visibility_round_trip_with_legacy_defaults() {

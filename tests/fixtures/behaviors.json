@@ -1,9 +1,16 @@
 [
   {"source":"press(rctrl a b);repeat(x,100)","valid":true,"steps":[{"type":"press","key":"rctrl a b"},{"type":"repeat","key":"x","interval":"100","hold":"6"}]},
   {"source":"pressalt(shift LButton);send(a;b)","valid":true,"steps":[{"type":"mousepress","key":"shift LButton"},{"type":"send","text":"a;b"}]},
+  {"source":"[{\"type\":\"mousepress\",\"key\":\"LButton\"}]","valid":true,"steps":[{"type":"mousepress","key":"LButton"}]},
+  {"source":"[{\"type\":\"sequence\",\"steps\":[{\"type\":\"mousepress\",\"key\":\"rctrl shift XButton2\",\"doubleClick\":true}]}]","valid":true,"steps":[{"type":"sequence","steps":[{"type":"mousepress","key":"rctrl shift XButton2","doubleClick":true}]}]},
   {"source":"state(buff);restartoverlay(timer)","valid":true,"steps":[{"type":"state","stateId":"buff","action":"toggle"},{"type":"startoverlay","itemId":"timer","restart":true}]},
   {"source":"[{\"type\":\"parallel\",\"steps\":[{\"type\":\"hold\",\"key\":\"RButton\"},{\"type\":\"sequence\",\"steps\":[{\"type\":\"sleep\",\"ms\":\"10\"},{\"type\":\"send\",\"text\":\"ø; 😀\\n\"}]}]}]","valid":true,"steps":[{"type":"parallel","steps":[{"type":"hold","key":"RButton"},{"type":"sequence","steps":[{"type":"sleep","ms":"10"},{"type":"send","text":"ø; 😀\n"}]}]}]},
   {"source":"repeat(a,0)","valid":false,"steps":[{"type":"repeat","key":"a","interval":"0","hold":"6"}]},
   {"source":"sleep(+5)","valid":false,"steps":[{"type":"sleep","ms":"+5"}]},
-  {"source":"future(action)","valid":false,"steps":[{"type":"unknown","source":"future(action)"}]}
+  {"source":"future(action)","valid":false,"steps":[{"type":"unknown","source":"future(action)"}]},
+  {"source":"sleep($buff)","valid":true,"variables":[{"id":"buff","name":"buff timer","value":5000}],"steps":[{"type":"sleep","ms":"$buff"}]},
+  {"source":"sleep($missing)","valid":false,"variables":[{"id":"buff","name":"buff timer","value":5000}],"steps":[{"type":"sleep","ms":"$missing"}]},
+  {"source":"repeat(x,$buff,6)","valid":false,"variables":[{"id":"buff","name":"buff timer","value":0}],"steps":[{"type":"repeat","key":"x","interval":"$buff","hold":"6"}]},
+  {"source":"resolution($buff,720);goto($buff,50)","valid":true,"variables":[{"id":"buff","name":"buff timer","value":100}],"steps":[{"type":"resolution","width":"$buff","height":"720"},{"type":"goto","x":"$buff","y":"50"}]},
+  {"source":"[{\"type\":\"parallel\",\"steps\":[{\"type\":\"sleep\",\"ms\":\"$buff\"},{\"type\":\"send\",\"text\":\"$buff\"}]}]","valid":true,"variables":[{"id":"buff","name":"buff timer","value":10}],"steps":[{"type":"parallel","steps":[{"type":"sleep","ms":"$buff"},{"type":"send","text":"$buff"}]}]}
 ]

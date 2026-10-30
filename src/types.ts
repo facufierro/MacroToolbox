@@ -147,6 +147,13 @@ export interface Database {
   version: number;
   scopes: Scope[];
   settings: Settings;
+  variables: NumberVariable[];
+}
+
+export interface NumberVariable {
+  id: string;
+  name: string;
+  value: number;
 }
 
 export interface CloudStatus {
