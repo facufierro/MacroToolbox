@@ -11,7 +11,14 @@ After rebuilding, with the overlay enabled for the game:
    and a secondary monitor to the left or above the laptop display.
 4. Disable overlays or leave the target app. They must stay hidden; position
    refreshes must not show a hidden overlay or reset its timers.
+5. Cover the game with another window for at least a minute, then return to the
+   borderless game on the secondary display. Order recovery must not depend on
+   the overlay renderer continuing to poll while it was covered.
 
 The native `unchanged_canvas_recovers_above_a_borderless_topmost_window_without_taking_focus`
 regression checks order recovery when the canvas already has the correct bounds.
 It does not verify the affected laptop's GPU composition or physical display output.
+
+The native `native_timer_recovers_overlay_order_without_renderer_requests_and_leaves_hidden_overlays_alone`
+regression pumps only Windows messages, covering automatic order recovery after
+another topmost window overtakes the overlay, hide/show cycles, and retained focus.

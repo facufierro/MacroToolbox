@@ -7,7 +7,7 @@ CoordMode "Mouse", "Screen"
 SetTitleMatchMode 2
 
 global enabled := Map(), syntheticDown := Map(), chordHolds := Map(), heldOutputCounts := Map()
-global copilotState := {phase: GetKeyState("LWin", "P") ? "win_held" : "idle", input: "",
+global copilotState := {native: WindowsOwnsCopilotKey(), phase: GetKeyState("LWin", "P") ? "win_held" : "idle", input: "",
     shiftHeld: GetKeyState("LShift", "P"), shiftHeldBefore: false, winHeldBefore: false}
 global copilotShiftSuppressed := false, copilotCtrlHeld := false, copilotCtrlReleasePending := false
 global behaviorClipboardBackup := "", behaviorClipboardPending := false, behaviorClipboardSequence := 0
@@ -17,9 +17,34 @@ OnExit behaviorRuntime.Stop.Bind(behaviorRuntime)
 OnExit ReleaseSyntheticHeld
 OnExit ReleaseCopilotHeld
 OnExit RestoreBehaviorClipboard
+OnError HandleInputFailure
 ReleaseStaleCopilotModifiers()
-SetTimer runtimeHost.Tick.Bind(runtimeHost), 100
-runtimeHost.Tick()
+SetTimer TickRuntimeHost, 100
+TickRuntimeHost()
+
+TickRuntimeHost(*) {
+    global runtimeHost
+    runtimeHost.Tick()
+}
+
+HandleInputFailure(failure, mode) {
+    global behaviorRuntime
+    ; Stop new work before releasing owned input. Keep this host suspended so the
+    ; process monitor cannot immediately restart the failing shortcut.
+    Suspend true
+    SetTimer TickRuntimeHost, 0
+    SetTimer CheckHookHealth, 0
+    try behaviorRuntime.Stop()
+    try ReleaseCopilotHeld()
+    try ReleaseSyntheticHeld()
+    try RestoreBehaviorClipboard()
+    try BlockInput "Off"
+    try BlockInput "MouseMoveOff"
+    ; Unexpected API errors can contain text or password arguments.
+    line := failure is Error ? failure.Line : 0
+    ReportBehaviorError("", "Input disabled after an unexpected error at line " line ". Restart MacroToolbox to enable it again.")
+    return 1
+}
 
 SendOverlayCommand(path) {
     request := ComObject("WinHttp.WinHttpRequest.5.1")

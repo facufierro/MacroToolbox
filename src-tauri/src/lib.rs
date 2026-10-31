@@ -5,6 +5,9 @@ use tauri::{Emitter, Manager, State};
 
 mod ahk;
 mod behavior;
+mod variables;
+mod triggers;
+mod secure_send;
 mod runtime;
 mod protocol;
 mod config;
@@ -47,7 +50,7 @@ impl WindowClientBounds {
 
 #[cfg(all(test, target_os = "windows"))]
 mod overlay_position_tests {
-    use super::{fit_overlay_to_desktop, get_global_viewport, get_window_client_bounds, PhysicalCoordinates, WindowClientBounds};
+    use super::{fit_overlay_to_desktop, start_overlay_maintenance, get_global_viewport, get_window_client_bounds, PhysicalCoordinates, WindowClientBounds};
     use tauri::PhysicalPosition;
     use winapi::shared::windef::HWND;
     use winapi::um::winuser::*;
@@ -125,6 +128,58 @@ mod overlay_position_tests {
     fn invalid_canvas_cannot_report_valid_overlay_bounds() {
         let _dpi = PhysicalCoordinates::enter().unwrap();
         assert!(fit_overlay_to_desktop(std::ptr::null_mut(), get_global_viewport()).is_err());
+        assert!(start_overlay_maintenance(std::ptr::null_mut()).is_err());
+    }
+
+    #[test]
+    fn native_timer_recovers_overlay_order_without_renderer_requests_and_leaves_hidden_overlays_alone() {
+        let _dpi = PhysicalCoordinates::enter().unwrap();
+        let overlay = Canvas::new();
+        let game = Canvas::new();
+        let desktop = get_global_viewport();
+        let foreground = unsafe { GetForegroundWindow() };
+        // A visible, fully transparent fixture exercises native visibility without covering apps.
+        unsafe {
+            SetWindowLongPtrW(overlay.0, GWL_EXSTYLE, (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED) as isize);
+            assert_ne!(SetLayeredWindowAttributes(overlay.0, 0, 0, LWA_ALPHA), 0);
+            ShowWindow(overlay.0, SW_SHOWNOACTIVATE);
+        }
+        start_overlay_maintenance(overlay.0).unwrap();
+        let above_game = || {
+            let mut previous = unsafe { GetWindow(game.0, GW_HWNDPREV) };
+            while !previous.is_null() {
+                if previous == overlay.0 { return true; }
+                previous = unsafe { GetWindow(previous, GW_HWNDPREV) };
+            }
+            false
+        };
+        let pump = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+            while std::time::Instant::now() < deadline {
+                unsafe {
+                    let mut message = std::mem::zeroed();
+                    while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        for visible in [true, false, true] {
+            unsafe {
+                ShowWindow(overlay.0, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                assert_ne!(SetWindowPos(game.0, HWND_TOPMOST, desktop.left, desktop.top, 0, 0,
+                    SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOOWNERZORDER), 0);
+            }
+            assert!(!above_game(), "fixture must put the game above the overlay");
+            // Only the native message loop runs: no webview or get_overlay_origin calls.
+            pump();
+            assert_eq!(above_game(), visible);
+            assert_eq!(unsafe { IsWindowVisible(overlay.0) != 0 }, visible);
+            assert_eq!(get_window_client_bounds(overlay.0).unwrap(), desktop);
+            assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+        }
     }
 
     #[test]
@@ -290,14 +345,23 @@ fn get_database(state: State<AppState>) -> Result<Database, String> {
     config::load_db(&state.db_path)
 }
 
+#[tauri::command]
+fn get_disabled_profiles(state: State<AppState>) -> Vec<String> {
+    state.runtime.lock().unwrap().disabled_profiles()
+}
+
 fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) -> Result<(), String> {
     config::validate_variables(&db.variables)?;
     config::normalize_states(db);
     config::normalize_overlays(db);
     for game in &db.games {
         for profile in game.profiles.iter().filter(|profile| profile.armed) {
-            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables)?)?; }
-            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables)?)?; }
+            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) {
+                let triggers = hotkey.trigger.resolve(&db.variables)?;
+                if triggers.is_empty() { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, None)?, true)?; }
+                for trigger in triggers { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, Some(&trigger))?, true)?; }
+            }
+            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables, None)?, false)?; }
         }
     }
     config::save_db(&state.db_path, db)?;
@@ -313,7 +377,7 @@ fn debug_overlay_log(message: String) {
     eprintln!("[debug][overlay_frontend] {message}");
 }
 
-fn merge_imported_variables(db: &mut Database, variables: Vec<config::NumberVariable>) -> Result<(), String> {
+fn merge_imported_variables(db: &mut Database, variables: Vec<config::Variable>) -> Result<(), String> {
     for variable in variables {
         if let Some(existing) = db.variables.iter().find(|existing| existing.id == variable.id) {
             if existing != &variable { return Err(format!("Conflicting imported variable: {}", variable.name)); }
@@ -325,19 +389,21 @@ fn merge_imported_variables(db: &mut Database, variables: Vec<config::NumberVari
 }
 
 #[tauri::command]
-fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
+fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game, variables: Option<Vec<config::Variable>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut game = game;
     if game.id == config::GLOBAL_FOLDER_ID {
         game.exe = GLOBAL_GAME_EXE.to_string();
     }
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     match db.games.iter_mut().find(|g| g.id == game.id) {
         Some(existing) => *existing = game,
         None => db.games.push(game),
     }
     save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -350,17 +416,31 @@ fn delete_game(app: tauri::AppHandle, state: State<AppState>, id: String) -> Res
         return Err("The Global folder can't be deleted.".to_string());
     }
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     db.games.retain(|g| g.id != id);
+    save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
+#[tauri::command]
+fn reorder_folders(app: tauri::AppHandle, state: State<AppState>, ids: Vec<String>) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    db.reorder_folders(&ids)?;
     save_database(&app, &state, &mut db)?;
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
 #[tauri::command]
-fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
+fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::Variable>>, secure_texts: Option<Vec<secure_send::PasswordDraft>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
+    let password_write = secure_send::PasswordWrite::prepare(&secure_texts.unwrap_or_default(), &profile)?;
     merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
@@ -369,6 +449,8 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
         None => game.profiles.push(profile),
     }
     save_database(&app, &state, &mut db)?;
+    password_write.commit();
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -377,10 +459,12 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
 fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
     save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -403,18 +487,26 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
         return Err("Profile not found".to_string());
     }
     save_database(&app, &state, &mut db)?;
+    if armed {
+        state.runtime.lock().unwrap().set_enabled(&db, &profile_id, true, runtime::now_ms())?;
+    }
     sync_hotkeys(&state, &db)?;
     if !armed {
         kill_profile_scripts(&state, &profile_id);
 
     }
+    publish_runtime(&app);
     Ok(db)
 }
 
 fn publish_runtime(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let snapshot = state.runtime.lock().unwrap().snapshot();
+    let (snapshot, disabled) = {
+        let runtime = state.runtime.lock().unwrap();
+        (runtime.snapshot(), runtime.disabled_profiles())
+    };
     if let Some(window) = app.get_webview_window("overlay") { let _ = window.emit("overlay-snapshot", snapshot); }
+    if let Some(window) = app.get_webview_window("main") { let _ = window.emit("disabled-profiles", disabled); }
 }
 
 #[tauri::command]
@@ -641,6 +733,14 @@ fn sync_hotkeys(state: &AppState, db: &Database) -> Result<(), String> {
         Err(error) if mgr.is_running() => return Err(error),
         Err(error) => ("[]".to_string(), Some(error)),
     };
+    let mut profiles: Vec<serde_json::Value> = serde_json::from_str(&profiles).map_err(|e| e.to_string())?;
+    {
+        let runtime = state.runtime.lock().unwrap();
+        for profile in &mut profiles {
+            profile["enabled"] = serde_json::json!(profile["armed"] == true && runtime.enabled(profile["id"].as_str().unwrap()));
+        }
+    }
+    let profiles = serde_json::to_string(&profiles).map_err(|e| e.to_string())?;
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     profiles.hash(&mut hash);
@@ -723,9 +823,8 @@ fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>, fold
             let Some(hwnd) = find_window_by_exe(&game.exe) else { return Ok(None); };
             (get_window_client_bounds(hwnd)?, unsafe { winapi::um::winuser::IsIconic(hwnd) != 0 })
         };
-        let desktop = get_global_viewport();
         let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
-        let canvas = fit_overlay_to_desktop(hwnd, desktop)?;
+        let canvas = get_window_client_bounds(hwnd)?;
         let position = tauri::PhysicalPosition::new(canvas.left, canvas.top);
         Ok(bounds.overlay_origin(position, minimized))
     }
@@ -786,10 +885,7 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
     match kind {
         "enabled" => {
             if value != "0" && value != "1" { return Err("Enabled must be 0 or 1.".into()); }
-            let _access = state.db_access.lock().unwrap();
-            let db = config::load_db(&state.db_path)?;
-            state.runtime.lock().unwrap().set_enabled(&db, profile, value == "1", runtime::now_ms())?;
-            if value != "1" { kill_profile_scripts(&state, profile); }
+            return set_runtime_profiles_enabled(app, &[profile.to_string()], value == "1");
         }
         "script" => run_script_for_profile(app, scope, id, if matches!(value, "hotkeys" | "events" | "scripts") { value } else { scope.section() })?,
         "behavior" => {
@@ -800,6 +896,19 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
         "error" => { app.emit("runtime-error", value).map_err(|e| e.to_string())?; }
         _ => state.runtime.lock().unwrap().action(profile, kind, id, value, runtime::now_ms())?,
     }
+    publish_runtime(app);
+    Ok(())
+}
+
+fn set_runtime_profiles_enabled(app: &tauri::AppHandle, profiles: &[String], enabled: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _access = state.db_access.lock().unwrap();
+    let db = config::load_db(&state.db_path)?;
+    state.runtime.lock().unwrap().set_profiles_enabled(&db, profiles, enabled, runtime::now_ms())?;
+    if !enabled {
+        for profile in profiles { kill_profile_scripts(&state, profile); }
+    }
+    sync_hotkeys(&state, &db)?;
     publish_runtime(app);
     Ok(())
 }
@@ -842,6 +951,14 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             },
                             Err(error) => ("400 Bad Request", error.to_string().into_bytes()),
                         }
+                    } else if route == "/profiles-enabled" {
+                        let profiles: Vec<_> = action.split_once('?').map(|(_, query)| query.split('&').filter_map(|pair| pair.split_once('='))
+                            .filter(|(name, _)| *name == "profile").map(|(_, value)| decode_query_value(value)).collect()).unwrap_or_default();
+                        let result = match get_query_param(action, "value").as_deref() {
+                            Some(value @ ("0" | "1")) if !profiles.is_empty() => set_runtime_profiles_enabled(&handle, &profiles, value == "1"),
+                            _ => Err("Profiles and enabled value are required.".into()),
+                        };
+                        match result { Ok(()) => ("200 OK", Vec::new()), Err(error) => ("422 Unprocessable Entity", error.into_bytes()) }
                     } else if route == "/activated" {
                         handle.state::<AppState>().hotkeys_ahk.lock().unwrap().activate_revision(get_query_param(action, "revision").unwrap_or_default());
                         ("200 OK", Vec::new())
@@ -1242,6 +1359,31 @@ fn fit_overlay_to_desktop(
     Ok(canvas)
 }
 
+#[cfg(target_os = "windows")]
+fn start_overlay_maintenance(hwnd: winapi::shared::windef::HWND) -> Result<(), String> {
+    use winapi::shared::basetsd::UINT_PTR;
+    use winapi::shared::minwindef::{DWORD, UINT};
+    use winapi::shared::windef::HWND;
+    use winapi::um::winuser::{IsWindowVisible, SetTimer};
+
+    unsafe extern "system" fn refresh(hwnd: HWND, _message: UINT, _timer: UINT_PTR, _time: DWORD) {
+        if IsWindowVisible(hwnd) == 0 { return; }
+        let result = PhysicalCoordinates::enter().and_then(|_dpi| fit_overlay_to_desktop(hwnd, get_global_viewport()));
+        if let Err(error) = result {
+            debug_log_once("overlay_canvas", format!("[overlay] {error}"));
+        }
+    }
+
+    let _dpi = PhysicalCoordinates::enter()?;
+    fit_overlay_to_desktop(hwnd, get_global_viewport())?;
+    // This timer belongs to the HWND and is destroyed with it. Keeping the canvas above
+    // games must not depend on JavaScript timers in an occluded or throttled webview.
+    if unsafe { SetTimer(hwnd, 0x4D544F, 250, Some(refresh)) } == 0 {
+        return Err(format!("Failed to maintain overlay window: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn kill_game(exe: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -1500,6 +1642,8 @@ fn get_app_version() -> &'static str {
 
 /// Register or unregister the app to launch at login. Re-applied on every launch so the
 /// registration tracks the current executable across updates and moves.
+/// Development builds can disable autostart, but must never become the login target:
+/// their frontend requires Vite, which is not started by Windows logon.
 ///
 /// On Windows the app runs elevated (`requireAdministrator`, see build.rs). Windows refuses to
 /// auto-launch an elevated app from the HKCU `Run` key at logon — it can't show a UAC prompt
@@ -1509,6 +1653,8 @@ fn get_app_version() -> &'static str {
 /// logon without a prompt. (Creating the task itself needs elevation, which we already have.)
 /// Other platforms use the plugin as normal.
 fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
+    if enabled && tauri::is_dev() { return; }
+
     #[cfg(not(target_os = "windows"))]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -1586,18 +1732,29 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Se
 }
 
 #[tauri::command]
-fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::NumberVariable>) -> Result<Database, String> {
+fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::Variable>, secure_texts: Option<Vec<secure_send::PasswordDraft>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     config::validate_variables(&variables)?;
+    let previous_passwords = secure_send::database_ids(&db);
+    let password_write = secure_send::PasswordWrite::prepare_variables(&secure_texts.unwrap_or_default(), &variables)?;
     // Even disarmed profiles must keep their references and valid numeric parameters.
     for profile in db.games.iter().flat_map(|game| &game.profiles) {
-        for source in profile.hotkeys.iter().map(|entry| &entry.behavior).chain(profile.events.iter().map(|entry| &entry.behavior)) {
-            if behavior::parse(source).is_ok() { behavior::resolve(source, &variables)?; }
+        for hotkey in &profile.hotkeys {
+            let triggers = hotkey.trigger.resolve(&variables)?;
+            if behavior::parse(&hotkey.behavior).is_ok() {
+                if triggers.is_empty() { behavior::resolve(&hotkey.behavior, &variables, None)?; }
+                for trigger in triggers { behavior::resolve(&hotkey.behavior, &variables, Some(&trigger))?; }
+            }
+        }
+        for event in &profile.events {
+            if behavior::parse(&event.behavior).is_ok() { behavior::resolve(&event.behavior, &variables, None)?; }
         }
     }
     db.variables = variables;
     save_database(&app, &state, &mut db)?;
+    password_write.commit();
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -1878,6 +2035,8 @@ pub fn run() {
             .shadow(false)
             .transparent(true)
             .always_on_top(true)
+            .focusable(false)
+            .focused(false)
             .skip_taskbar(true)
             .visible(false)
             .build()
@@ -1885,9 +2044,8 @@ pub fn run() {
                 Ok(overlay) => {
                     #[cfg(target_os = "windows")]
                     let result = (|| -> Result<(), String> {
-                        let _dpi = PhysicalCoordinates::enter()?;
                         let hwnd = overlay.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
-                        fit_overlay_to_desktop(hwnd, get_global_viewport()).map(|_| ())
+                        start_overlay_maintenance(hwnd)
                     })();
                     #[cfg(not(target_os = "windows"))]
                     let result = overlay.set_position(tauri::PhysicalPosition::new(overlay_left, overlay_top))
@@ -1920,6 +2078,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            get_disabled_profiles,
             debug_overlay_log,
             get_overlay_config,
             get_overlay_snapshot,
@@ -1938,6 +2097,7 @@ pub fn run() {
             read_image_as_data_url,
             upsert_game,
             delete_game,
+            reorder_folders,
             upsert_profile,
             delete_profile,
             set_profile_armed,

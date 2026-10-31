@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v6 adds shared number variables.
-pub const CURRENT_DB_VERSION: u32 = 6;
+/// older files. v7 adds typed variables and explicit behavior references.
+pub const CURRENT_DB_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -14,27 +14,26 @@ pub struct Database {
     pub games: Vec<Game>,
     pub settings: Settings,
     #[serde(default)]
-    pub variables: Vec<NumberVariable>,
+    pub variables: Vec<Variable>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NumberVariable {
-    pub id: String,
-    pub name: String,
-    pub value: f64,
+pub use crate::variables::Variable;
+
+pub fn validate_variables(variables: &[Variable]) -> Result<(), String> {
+    crate::variables::validate_variables(variables)?;
+    crate::behavior::validate_variable_behaviors(variables)
 }
 
-pub fn validate_variables(variables: &[NumberVariable]) -> Result<(), String> {
-    let mut ids = HashSet::new();
-    let mut names = HashSet::new();
-    for variable in variables {
-        if variable.id.trim().is_empty() || !ids.insert(&variable.id)
-            || variable.name.trim().is_empty() || !names.insert(variable.name.trim().to_lowercase())
-            || !variable.value.is_finite() {
-            return Err(format!("Invalid or duplicate variable: {}", variable.name));
+impl Database {
+    pub fn reorder_folders(&mut self, ids: &[String]) -> Result<(), String> {
+        let order: HashMap<_, _> = ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
+        if ids.len() != self.games.len() || order.len() != ids.len()
+            || self.games.iter().any(|game| !order.contains_key(game.id.as_str())) {
+            return Err("Folder list changed. Try moving the folder again.".into());
         }
+        self.games.sort_by_key(|game| order[game.id.as_str()]);
+        Ok(())
     }
-    Ok(())
 }
 
 /// A folder owns one target executable shared by all of its profiles.
@@ -347,10 +346,10 @@ pub struct OverlayTrigger {
 pub struct Hotkey {
     #[serde(default)]
     pub name: String,
-    pub trigger: String,
+    pub trigger: crate::triggers::Trigger,
     pub behavior: String,
-    /// Missing values preserve legacy matching: unmodified keys accept held modifiers,
-    /// while triggers with explicit modifiers require their existing modifier combination.
+    /// Missing values preserve legacy matching for literal triggers: unmodified keys accept
+    /// held modifiers. Trigger lists require the configured modifier combination exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_extra_modifiers: Option<bool>,
     #[serde(default)]
@@ -441,6 +440,13 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         v if v > CURRENT_DB_VERSION => return Err(format!("Settings schema v{v} requires a newer MacroToolbox version.")),
         v if v == CURRENT_DB_VERSION => {
             (serde_json::from_value(value).map_err(|e| e.to_string())?, false)
+        }
+        6 => {
+            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let mut backup = path.as_os_str().to_owned(); backup.push(".v6.bak");
+            std::fs::copy(path, std::path::Path::new(&backup)).map_err(|e| format!("Could not back up settings: {e}"))?;
+            db.version = CURRENT_DB_VERSION;
+            (db, true)
         }
         5 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -874,6 +880,15 @@ where
         }
     }
 
+    // Owned entries fill their existing slots in saved order; inherited entries keep theirs.
+    let owned = select(profile);
+    let own_keys: Vec<_> = owned.iter().map(key_of).collect();
+    let mut ordered: Vec<_> = resolved.iter().copied().filter(|entry| own_keys.contains(&key_of(entry))).collect();
+    ordered.sort_by_key(|entry| own_keys.iter().rposition(|key| *key == key_of(entry)));
+    let mut ordered = ordered.into_iter();
+    for slot in &mut resolved {
+        if own_keys.contains(&key_of(slot)) { *slot = ordered.next().unwrap(); }
+    }
     resolved
 }
 
@@ -934,27 +949,78 @@ mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
 
     #[test]
+    fn folder_reordering_is_atomic_and_persists_without_changing_folder_contents() {
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({
+            "version": super::CURRENT_DB_VERSION, "settings": {"ahk_exe": ""}, "scopes": [
+                {"id": "global", "name": "Global", "exe": "*"},
+                {"id": "game", "name": "Game", "exe": "game.exe", "profiles": [{"id": "p", "name": "Profile"}]}
+            ]
+        })).unwrap();
+        let before = serde_json::to_value(&db).unwrap();
+        for ids in [vec!["global"], vec!["game", "game"], vec!["game", "unknown"]] {
+            assert!(db.reorder_folders(&ids.into_iter().map(String::from).collect::<Vec<_>>()).is_err());
+            assert_eq!(serde_json::to_value(&db).unwrap(), before);
+        }
+        db.reorder_folders(&["game".into(), "global".into()]).unwrap();
+        let path = std::env::temp_dir().join(format!("macrotoolbox-order-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        super::save_db(&path, &db).unwrap();
+        let loaded = load_db(&path).unwrap();
+        assert_eq!(loaded.games.iter().map(|game| game.id.as_str()).collect::<Vec<_>>(), ["game", "global"]);
+        assert_eq!(serde_json::to_value(&loaded).unwrap()["scopes"][0], before["scopes"][1]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn owned_overrides_follow_saved_order_and_inherited_entries_keep_their_slots() {
+        let profiles: Vec<Profile> = serde_json::from_value(serde_json::json!([
+            {"id":"parent", "name":"Parent", "hotkeys":[
+                {"trigger":"a", "behavior":"press(a)"}, {"trigger":"b", "behavior":"press(b)"}, {"trigger":"c", "behavior":"press(c)"}]},
+            {"id":"child", "name":"Child", "parent_id":"parent", "hotkeys":[
+                {"trigger":"d", "behavior":"press(d)"}, {"trigger":"b", "behavior":"send(override)"}]}
+        ])).unwrap();
+        let resolved = super::resolve_profile_hotkeys(&profiles, &profiles[1]);
+        assert_eq!(resolved.iter().map(|entry| entry.trigger.resolve(&[]).unwrap().join(",")).collect::<Vec<_>>(), ["a", "d", "c", "b"]);
+        assert_eq!(resolved[3].behavior, "send(override)");
+        assert_eq!(profiles[0].hotkeys.iter().map(|entry| entry.trigger.resolve(&[]).unwrap().join(",")).collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    #[test]
     fn legacy_databases_default_variables_and_new_definitions_round_trip() {
         let path = std::env::temp_dir().join(format!("macrotoolbox-variables-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::write(&path, r#"{"version":5,"scopes":[],"settings":{"ahk_exe":""}}"#).unwrap();
         let mut db = load_db(&path).unwrap();
         assert_eq!(db.version, super::CURRENT_DB_VERSION);
         assert!(db.variables.is_empty());
-        db.variables.push(super::NumberVariable { id: "buff".into(), name: "buff timer".into(), value: 5000.0 });
+        db.variables.push(super::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() });
         super::save_db(&path, &db).unwrap();
         assert_eq!(load_db(&path).unwrap().variables, db.variables);
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
+    fn v6_number_variables_upgrade_automatically_and_preserve_the_original_database() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-v6-variables-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = r#"{"version":6,"scopes":[],"settings":{"ahk_exe":""},"variables":[{"id":"timer","name":"Sleep timer","value":100}]}"#;
+        std::fs::write(&path, source).unwrap();
+        let migrated = load_db(&path).unwrap();
+        assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
+        assert_eq!(migrated.variables[0].value, crate::variables::VariableValue::Number(100.0));
+        assert_eq!(serde_json::to_value(&migrated).unwrap()["variables"][0]["type"], "number");
+        let backup = std::path::PathBuf::from(format!("{}.v6.bak", path.display()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+        assert_eq!(load_db(&path).unwrap().variables, migrated.variables);
+        std::fs::remove_file(&path).unwrap(); std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
     fn number_variable_definitions_require_unique_ids_names_and_finite_values() {
-        let variable = super::NumberVariable { id: "buff".into(), name: "buff timer".into(), value: 5000.0 };
+        let variable = super::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() };
         assert!(super::validate_variables(std::slice::from_ref(&variable)).is_ok());
-        for other in [variable.clone(), super::NumberVariable { id: "other".into(), name: " BUFF TIMER ".into(), ..variable.clone() }] {
+        for other in [variable.clone(), super::Variable { id: "other".into(), name: " BUFF TIMER ".into(), ..variable.clone() }] {
             assert!(super::validate_variables(&[variable.clone(), other]).is_err());
         }
-        for other in [super::NumberVariable { value: f64::INFINITY, ..variable.clone() },
-            super::NumberVariable { name: " ".into(), ..variable.clone() }, super::NumberVariable { id: "".into(), ..variable }] {
+        for other in [super::Variable { value: f64::INFINITY.into(), ..variable.clone() },
+            super::Variable { name: " ".into(), ..variable.clone() }, super::Variable { id: "".into(), ..variable }] {
             assert!(super::validate_variables(&[other]).is_err());
         }
     }
@@ -1171,7 +1237,7 @@ mod tests {
         let child = &migrated.games[1].profiles[0];
         assert_eq!(child.parent_id, None);
         assert!(matches!(child.hotkeys.as_slice(), [Hotkey { trigger, behavior, .. }]
-            if trigger == "f1" && behavior == "press(1)"));
+            if trigger == &crate::triggers::Trigger::from("f1") && behavior == "press(1)"));
     }
 
     #[test]

@@ -11,19 +11,27 @@ class BehaviorExecutor {
     }
 
     Start(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {
+        if chord = "" && BehaviorNeedsHotkey(steps)
+            throw ValueError("This behavior requires a hotkey trigger.")
         if chord != "" && this.latches.Has(owner)
             return
         if this.runs.Has(owner) {
             if chord = ""
                 return
-            ; A fresh physical press owns a new activation. A previous wait or delay
-            ; must not consume it; cancel that run before sending the new prefix.
+            stoppingToggle := BehaviorHasToggle(this.runs[owner].task.node["steps"])
+            if stoppingToggle
+                this.latches[owner] := chord
+            ; Toggle runs consume the next fresh press as Stop. Other runs restart
+            ; from the prefix, replacing any previous wait or delay.
             this.Cancel(owner)
+            if stoppingToggle
+                return
         }
         this.nextId++
         MouseGetPos &x, &y
         execution := {id: this.nextId, owner: owner, target: target, profile: profile,
             modifiers: modifiers, chord: chord, triggerHeld: true, x: x, y: y,
+            cursorButtons: this.CursorButtons(), cursorClicks: Map(),
             locked: false, cancelled: false, section: section, scriptOwner: scriptOwner, background: background && !BehaviorContextActive(target, profile), task: this.Task(Map("type", "sequence", "steps", steps)), failure: 0}
         this.runs[owner] := execution
         if chord != ""
@@ -52,6 +60,37 @@ class BehaviorExecutor {
             if this.runs.Has(owner)
                 this.runs[owner].triggerHeld := false
         }
+    }
+
+    ToggleModifiers(owner) {
+        if !this.runs.Has(owner) || !BehaviorHasToggle(this.runs[owner].task.node["steps"])
+            return ""
+        return this.HeldModifiers(this.runs[owner].task)
+    }
+
+    OwnedModifiers() {
+        modifiers := ""
+        for owner, execution in this.runs
+            modifiers .= this.HeldModifiers(execution.task)
+        return modifiers
+    }
+
+    HeldModifiers(task) {
+        modifiers := " "
+        if task.held {
+            for key in task.keys {
+                if RegExMatch(key, "^(Ctrl|Shift|Alt)$")
+                    key := "L" key
+                if RegExMatch(key, "^(L|R)(Ctrl|Shift|Alt|Win)$")
+                    modifiers .= key " "
+                ; AltGr contributes a synthetic Left Ctrl alongside Right Alt.
+                if key = "RAlt"
+                    modifiers .= "LCtrl "
+            }
+        }
+        for child in task.children
+            modifiers .= this.HeldModifiers(child)
+        return modifiers
     }
 
     Tick(*) {
@@ -103,8 +142,10 @@ class BehaviorExecutor {
         node := task.node
         kind := node["type"]
         if execution.background && !BehaviorContextActive(execution.target, execution.profile)
-            && InStr("|press|hold|repeat|mousepress|send|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
+            && InStr("|press|hold|toggle|repeat|mousepress|send|securesend|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
             throw TargetError("Input behavior requires the target app to be focused.")
+        if !task.started && (kind = "press" || kind = "mousepress") && node.Get("onRelease", false) && execution.triggerHeld
+            return
         first := !task.started
         if first {
             task.started := true
@@ -135,12 +176,13 @@ class BehaviorExecutor {
                 task.due := now + Integer(node["ms"])
             if now < task.due
                 return
-        } else if kind = "hold" || kind = "press" {
-            if first && (kind = "press" || execution.triggerHeld) {
+        } else if kind = "hold" || kind = "press" || kind = "toggle" {
+            if first && (kind != "hold" || execution.triggerHeld) {
                 task.held := true
                 keys := RegExReplace(node["key"], "[,\s]+", " ")
                 task.keys := HoldKeyList(keys)
-                HoldChordDown(task.id, keys, "", execution.modifiers, false, this.physicalOwner)
+                mouseOutput := kind = "toggle" ? {target: execution.target, flags: MousePressFlags(keys, execution.modifiers)} : 0
+                HoldChordDown(task.id, keys, "", execution.modifiers, false, this.physicalOwner, mouseOutput)
                 duration := Integer(node.Get("duration", "30"))
                 task.due := now + duration
                 if kind = "press" && duration <= 6 {
@@ -148,7 +190,9 @@ class BehaviorExecutor {
                     task.due := now
                 }
             }
-            if task.held && (kind = "hold" ? execution.triggerHeld : now < task.due)
+            if task.held
+                AdvanceHeldOutputs(task.keys)
+            if task.held && (kind = "toggle" || (kind = "hold" ? execution.triggerHeld : now < task.due))
                 return
             this.Release(task)
         } else if kind = "repeat" {
@@ -193,17 +237,18 @@ class BehaviorExecutor {
                 return
             if !task.mouse.clicked {
                 task.mouse.clicked := true
-                DoMousePress(task.mouse.button, execution.target, MousePressFlags(node["key"], execution.modifiers), node.Get("doubleClick", false))
-                if task.held {
-                    ; Window clicks are queued. Keep their modifiers owned while the target
-                    ; consumes the click, without blocking other branches or cancellation.
-                    task.due := A_TickCount + 30
-                    return
-                }
+                flags := MousePressFlags(node["key"], execution.modifiers)
+                task.mouse.click := DoMousePress(task.mouse.button, execution.target, flags, node.Get("doubleClick", false), true)
+                if task.mouse.click.borrowed
+                    execution.cursorClicks[task.mouse.click.keyName] := task.mouse.click
             }
+            if task.mouse.HasOwnProp("click") && !task.mouse.click.Advance()
+                return
             this.Release(task)
         } else if kind = "send" {
             SendBehaviorText(node["text"])
+        } else if kind = "securesend" {
+            SendSecureText(node["credentialId"], execution.target, execution.profile)
         } else if kind = "state" {
             SendRuntimeAction(execution.profile, "state", node["stateId"], node.Get("action", "toggle"))
         } else if kind = "startoverlay" {
@@ -217,12 +262,12 @@ class BehaviorExecutor {
         } else if kind = "savecursor" {
             MouseGetPos &x, &y
             execution.x := x, execution.y := y
+            execution.cursorButtons := this.CursorButtons()
         } else if kind = "restorecursor" {
-            this.Unlock(execution)
-            SendMode "Event"
-            SetMouseDelay -1
-            MouseMove execution.x, execution.y, 0
+            this.RestoreCursor(execution)
         } else if kind = "lock" {
+            if !execution.locked
+                execution.cursorButtons := this.CursorButtons()
             execution.locked := true
             BlockInput "MouseMove"
         } else if kind = "goto" {
@@ -240,9 +285,41 @@ class BehaviorExecutor {
         task.done := true
     }
 
+    CursorButtons() {
+        global heldOutputCounts
+        buttons := Map()
+        for key in ["lbutton", "rbutton", "mbutton", "xbutton1", "xbutton2"]
+            if PhysicalOwnsOutput(key, this.physicalOwner) || heldOutputCounts.Has(key)
+                buttons[key] := true
+        return buttons
+    }
+
+    RestoreCursor(execution) {
+        global heldOutputCounts
+        clicks := execution.cursorClicks
+        execution.cursorClicks := Map()
+        ; Window clicks can interrupt a real hold. Resume it only after returning,
+        ; so the intervening movement cannot drag the UI clicked by the macro.
+        for key, mousePress in clicks
+            if execution.cursorButtons.Has(key) && heldOutputCounts.Has(key)
+                mousePress.Send(false)
+        SendMode "Event"
+        SetMouseDelay -1
+        MouseMove execution.x, execution.y, 0
+        for key, mousePress in clicks
+            if execution.cursorButtons.Has(key) && !execution.cancelled
+                mousePress.ResumeHold(this.physicalOwner, MousePressFlags(""))
+        this.Unlock(execution)
+    }
+
     Release(task) {
         global heldOutputCounts, syntheticDown, copilotCtrlHeld
         failure := 0
+        if task.HasOwnProp("mouse") && task.mouse.HasOwnProp("click") {
+            try task.mouse.click.Close()
+            catch Error as caught
+                failure := caught
+        }
         if task.held {
             task.held := false
             try HoldChordUp(task.id, this.physicalOwner)
@@ -314,14 +391,39 @@ class BehaviorExecutor {
     }
 
     Stop(*) {
+        SetTimer this.callback, 0
         owners := []
         for owner in this.runs
             owners.Push(owner)
+        failure := 0
         for owner in owners
-            this.Cancel(owner)
+            try this.Cancel(owner)
+            catch Error as caught
+                failure := caught
         this.latches.Clear()
-        SetTimer this.callback, 0
+        if IsObject(failure)
+            throw failure
     }
+}
+
+BehaviorNeedsHotkey(steps) {
+    for node in steps {
+        kind := node["type"]
+        if kind = "toggle" || kind = "securesend" || ((kind = "press" || kind = "mousepress") && node.Get("onRelease", false))
+            return true
+        if (kind = "sequence" || kind = "parallel") && BehaviorNeedsHotkey(node["steps"])
+            return true
+    }
+    return false
+}
+
+BehaviorHasToggle(steps) {
+    for node in steps {
+        kind := node["type"]
+        if kind = "toggle" || ((kind = "sequence" || kind = "parallel") && BehaviorHasToggle(node["steps"]))
+            return true
+    }
+    return false
 }
 
 StartBehaviorRun(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {

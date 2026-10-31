@@ -1,5 +1,5 @@
-import { mapBehavior } from "./behaviors.ts";
-import type { Profile, ProfileState, Scope } from "./types";
+import { expandBehavior, mapBehavior } from "./behaviors.ts";
+import type { Profile, ProfileState, Scope, Variable } from "./types";
 
 export function mapStateActions(behavior: string, mapId: (id: string) => string | null) {
   return mapBehavior(behavior, step => {
@@ -9,14 +9,14 @@ export function mapStateActions(behavior: string, mapId: (id: string) => string 
   });
 }
 
-export function withReferencedStates(profile: Profile, states: ProfileState[]): Profile {
+export function withReferencedStates(profile: Profile, states: ProfileState[], variables: Variable[] = []): Profile {
   const ids = new Set(profile.states.map(state => state.id));
   for (const hotkey of profile.hotkeys) {
     if (hotkey.state_id) ids.add(hotkey.state_id);
-    mapStateActions(hotkey.behavior, id => { ids.add(id); return id; });
+    mapStateActions(expandBehavior(hotkey.behavior, variables), id => { ids.add(id); return id; });
   }
   for (const event of profile.events ?? []) {
-    mapStateActions(event.behavior, id => { ids.add(id); return id; });
+    mapStateActions(expandBehavior(event.behavior, variables), id => { ids.add(id); return id; });
   }
   for (const item of profile.overlay_items) {
     if (item.state_id) ids.add(item.state_id);
@@ -25,9 +25,9 @@ export function withReferencedStates(profile: Profile, states: ProfileState[]): 
   return { ...profile, states: states.filter(state => ids.has(state.id)) };
 }
 
-export function carryReferencedStates(profile: Profile, sourceStates: ProfileState[], targetStates: ProfileState[]): Profile {
+export function carryReferencedStates(profile: Profile, sourceStates: ProfileState[], targetStates: ProfileState[], variables: Variable[] = []): Profile {
   const existing = new Set([...targetStates, ...profile.states].map(state => state.id));
-  const referenced = withReferencedStates(profile, sourceStates);
+  const referenced = withReferencedStates(profile, sourceStates, variables);
   return {
     ...profile,
     states: [...profile.states, ...referenced.states.filter(state => !existing.has(state.id))],

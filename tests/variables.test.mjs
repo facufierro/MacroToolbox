@@ -1,26 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { areStepsValid, describeBehavior, mapBehavior, mapStepNumbers, parseSteps, resolveNumber, stepsToString } from "../src/behaviors.ts";
-import { exportVariables, importVariables, profileVariableIds } from "../src/variables.ts";
+import { areStepsValid, describeBehavior, mapBehavior, mapStepValues, parseSteps, stepsToString } from "../src/behaviors.ts";
+import { isReference, resolveValue } from "../src/behaviorValues.ts";
+import { exportVariables, importVariables, profileVariableIds, readVariable } from "../src/variables.ts";
 
-const buff = { id: "buff", name: "buff timer", value: 5000 };
-const pause = { id: "pause", name: "sleep timer", value: 50 };
+const buff = { id: "buff", name: "buff timer", type: "number", value: 5000 };
+const pause = { id: "pause", name: "sleep timer", type: "number", value: 50 };
 const profile = (behavior, id = "profile") => ({ id, hotkeys: [{ behavior }], events: [] });
 
 test("all numeric behavior parameters accept shared variables in nested groups", () => {
   const steps = [{ type: "parallel", steps: [
-    { type: "sleep", ms: "$buff" },
+    { type: "sleep", ms: { variable: "buff" } },
     { type: "sequence", steps: [
-      { type: "repeat", key: "x", interval: "$buff", hold: "$pause" },
-      { type: "goto", x: "$pause", y: "12.5" },
-      { type: "resolution", width: "$buff", height: "1080" },
-      { type: "bar", itemId: "bar", value: "$pause" },
+      { type: "repeat", key: "x", interval: { variable: "buff" }, hold: { variable: "pause" } },
+      { type: "goto", x: { variable: "pause" }, y: "12.5" },
+      { type: "resolution", width: { variable: "buff" }, height: "1080" },
+      { type: "bar", itemId: "bar", value: { variable: "pause" } },
       { type: "send", text: "$buff" },
     ] },
   ] }];
   assert.equal(areStepsValid(steps, [buff, pause]), true);
   const source = stepsToString(steps);
-  const resolved = mapBehavior(source, step => mapStepNumbers(step, value => resolveNumber(value, [buff, pause])));
+  const resolved = mapBehavior(source, step => mapStepValues(step, (value, type) => resolveValue(value, type, [buff, pause])));
   assert.equal(parseSteps(resolved)[0].steps[0].ms, "5000");
   assert.equal(parseSteps(resolved)[0].steps[1].steps[4].text, "$buff");
   assert.deepEqual([...profileVariableIds([profile(source)])].sort(), ["buff", "pause"]);
@@ -31,19 +32,19 @@ test("variable values obey the numeric field's existing boundaries", () => {
   for (const [value, sleep, repeat] of [[0, true, false], [-0, true, false], [1, true, true],
     [0xffffffff, true, true], [0x100000000, false, false], [-1, false, false], [1.5, false, false], [Infinity, false, false]]) {
     const variables = [{ ...buff, value }];
-    assert.equal(areStepsValid([{ type: "sleep", ms: "$buff" }], variables), sleep, String(value));
-    assert.equal(areStepsValid([{ type: "repeat", key: "x", interval: "$buff", hold: "6" }], variables), repeat, String(value));
+    assert.equal(areStepsValid([{ type: "sleep", ms: { variable: "buff" } }], variables), sleep, String(value));
+    assert.equal(areStepsValid([{ type: "repeat", key: "x", interval: { variable: "buff" }, hold: "6" }], variables), repeat, String(value));
   }
-  assert.equal(areStepsValid([{ type: "sleep", ms: "$missing" }], [buff]), false);
-  assert.equal(areStepsValid([{ type: "goto", x: "$buff", y: "0" }], [{ ...buff, value: -12.5 }]), true);
+  assert.equal(areStepsValid([{ type: "sleep", ms: { variable: "missing" } }], [buff]), false);
+  assert.equal(areStepsValid([{ type: "goto", x: { variable: "buff" }, y: "0" }], [{ ...buff, value: -12.5 }]), true);
 });
 
 test("renames preserve references and summaries show the current name", () => {
-  const source = stepsToString([{ type: "sleep", ms: "$buff" }]);
+  const source = stepsToString([{ type: "sleep", ms: { variable: "buff" } }]);
   const renamed = { ...buff, name: "new timer", value: 6000 };
-  assert.equal(resolveNumber("$buff", [renamed]), "6000");
+  assert.equal(resolveValue({ variable: "buff" }, "number", [renamed]), "6000");
   assert.equal(describeBehavior(source, id => id, id => id, id => [renamed].find(variable => variable.id === id).name), "sleep(new timer)");
-  assert.equal(parseSteps(source)[0].ms, "$buff");
+  assert.deepEqual(parseSteps(source)[0].ms, { variable: "buff" });
 });
 
 test("profile and folder exports preserve variables shared by hotkeys and events", () => {
@@ -52,7 +53,7 @@ test("profile and folder exports preserve variables shared by hotkeys and events
   assert.deepEqual(portable.variables, [buff, pause]);
   const imported = importVariables(portable.profiles, portable.variables, []);
   assert.equal(imported.variables.length, 2);
-  assert.equal(parseSteps(imported.profiles[0].hotkeys[0].behavior)[0].ms, `$${imported.variables[0].id}`);
+  assert.deepEqual(parseSteps(imported.profiles[0].hotkeys[0].behavior)[0].ms, { variable: imported.variables[0].id });
   assert.equal(imported.profiles[0].hotkeys[0].behavior, imported.profiles[1].hotkeys[0].behavior);
   for (const current of imported.profiles) {
     for (const entry of [...current.hotkeys, ...current.events]) assert.equal(areStepsValid(parseSteps(entry.behavior), imported.variables), true);
@@ -63,7 +64,7 @@ test("imports reuse matching values and isolate conflicts without overwriting lo
   const profiles = [profile("sleep($buff)")];
   const reused = importVariables(profiles, [buff], [{ ...buff, id: "local" }]);
   assert.deepEqual(reused.variables, []);
-  assert.equal(parseSteps(reused.profiles[0].hotkeys[0].behavior)[0].ms, "$local");
+  assert.deepEqual(parseSteps(reused.profiles[0].hotkeys[0].behavior)[0].ms, { variable: "local" });
   const existing = [{ ...buff, value: 1000 }];
   const imported = importVariables(profiles, [buff], existing);
   assert.equal(imported.variables[0].name, "buff timer (2)");
@@ -76,8 +77,45 @@ test("legacy exports need no variables, while missing and malformed references f
   assert.deepEqual(importVariables([{ hotkeys: [{ behavior: "sleep(50)" }], exe: "Game.exe" }], [], []).profiles[0],
     { hotkeys: [{ behavior: "sleep(50)" }], events: [], exe: "Game.exe" });
   assert.throws(() => importVariables([profile("sleep($missing)")], [], []), /Missing imported/);
-  assert.throws(() => exportVariables([profile("sleep($missing)")], []), /Missing number/);
+  assert.throws(() => exportVariables([profile("sleep($missing)")], []), /Missing variable/);
   for (const incoming of [[{ ...buff, value: "50" }], [buff, buff], [{ ...buff, name: " " }]]) {
-    assert.throws(() => importVariables([profile("sleep($buff)")], incoming, []), /Invalid imported/);
+    assert.throws(() => importVariables([profile("sleep($buff)")], incoming, []), /Invalid variable|Enter a variable name|Duplicate imported/);
   }
+});
+
+const message = { id: "message", name: "chat message", type: "text", value: "$buff; hello\nworld" };
+const keys = { id: "keys", name: "cast keys", type: "keys", value: "rctrl shift n" };
+
+test("text and key references are typed and literal dollar-prefixed text is preserved", () => {
+  const steps = [{ type: "send", text: { variable: "message" } }, { type: "press", key: { variable: "keys" } },
+    { type: "send", text: "$buff" }];
+  const variables = [buff, message, keys];
+  assert.equal(areStepsValid(steps, variables), true);
+  assert.equal(resolveValue(steps[0].text, "text", variables), message.value);
+  assert.equal(resolveValue(steps[1].key, "keys", variables), keys.value);
+  assert.deepEqual(parseSteps(stepsToString(steps)), steps);
+  assert.deepEqual([...profileVariableIds([profile(stepsToString(steps))])], ["message", "keys"]);
+  for (const step of [{ type: "sleep", ms: { variable: "message" } }, { type: "send", text: { variable: "buff" } },
+    { type: "press", key: { variable: "message" } }]) assert.equal(areStepsValid([step], variables), false);
+  assert.equal(isReference({ variable: "keys", unexpected: true }), false);
+});
+
+test("legacy number references migrate at read time without interpreting literal strings", () => {
+  assert.deepEqual(parseSteps('sleep($buff);send($buff);press($buff)'), [
+    { type: "sleep", ms: { variable: "buff" } }, { type: "send", text: "$buff" }, { type: "press", key: "$buff" },
+  ]);
+  assert.deepEqual(readVariable({ id: "buff", name: "buff timer", value: 5000 }), buff);
+  for (const variable of [message, keys, { ...buff, value: 0 }]) assert.deepEqual(readVariable(variable), variable);
+  assert.throws(() => readVariable({ ...keys, value: "" }), /Enter keys/);
+});
+
+test("typed imports keep text and key references and do not merge different variable types", () => {
+  const source = profile(stepsToString([{ type: "send", text: { variable: "message" } }, { type: "hold", key: { variable: "keys" } }]));
+  const existing = [{ id: "number-message", name: message.name, type: "number", value: 10 }];
+  const imported = importVariables([source], exportVariables([source], [buff, message, keys]), existing);
+  assert.equal(imported.variables[0].type, "text");
+  assert.equal(imported.variables[0].name, "chat message (2)");
+  assert.equal(imported.variables[1].type, "keys");
+  assert.equal(areStepsValid(parseSteps(imported.profiles[0].hotkeys[0].behavior), imported.variables), true);
+  assert.equal(existing[0].value, 10);
 });
