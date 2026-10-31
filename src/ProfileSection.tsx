@@ -12,7 +12,7 @@ export function ProfileSection({ title, enabled, onChange, actions, defaultExpan
   children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded || !!reveal);
-  useEffect(() => { if (reveal) setExpanded(true); }, [reveal]);
+  useEffect(() => { if (reveal || defaultExpanded) setExpanded(true); }, [reveal, defaultExpanded]);
   return <section className={`setup-section${enabled ? "" : " setup-section--disabled"}`}>
     <div className="section-head">
       <button type="button" className="section-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
@@ -23,6 +23,6 @@ export function ProfileSection({ title, enabled, onChange, actions, defaultExpan
         <EnableSwitch enabled={enabled} label={`${title} enabled`} onChange={onChange} />
       </div>
     </div>
-    {expanded && <div className="setup-section__body">{children}</div>}
+    <div className="setup-section__body" hidden={!expanded}>{children}</div>
   </section>;
 }

@@ -1,30 +1,20 @@
-import { IconButton, type IconName } from "./Icon";
+import { Icon, IconButton } from "./Icon";
 import { useErrorReporter } from "./AppConsole";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { BehaviorActionPicker } from "./BehaviorActionPicker";
+import { CompactNumber } from "./CompactNumber";
 import { api } from "./api";
-import { KeyInput } from "./KeyInput";
-import { NumberInput } from "./NumberInput";
-import type { Step } from "./behaviors";
-import type { NumberVariable, OverlayTarget, ProfileState, Script } from "./types";
+import { ValueInput } from "./ValueInput";
+import { VariableModal } from "./VariableModal";
+import { SecureSendInput } from "./SecureSendInput";
+import { SortableList } from "./SortableList";
+import { moveItem } from "./listOrder";
+import { areStepsValid, type Step } from "./behaviors";
+import type { Database, Variable, OverlayTarget, ProfileState, Script, SecureTextDraft } from "./types";
 
-const ACTION_TYPES: Step["type"][] = ["borderless", "fit", "goto", "hold", "killprocess", "lock", "press", "mousepress", "repeat", "resolution", "restorecursor", "savecursor", "send", "sleep", "state", "startoverlay", "stretch", "waitfor", "sequence", "parallel", "stopoverlay", "bar", "script"];
-const ACTION_ICONS: Record<Step["type"], IconName> = {
-  borderless: "expand", fit: "compress", goto: "crosshairs", hold: "hand", killprocess: "stop", lock: "lock",
-  press: "keyboard", mousepress: "computer-mouse", repeat: "repeat", resolution: "display", restorecursor: "rotate-left",
-  savecursor: "floppy-disk", send: "font", sleep: "clock", state: "toggle-on", startoverlay: "layer-group",
-  stretch: "arrows-up-down-left-right", waitfor: "hourglass-half", sequence: "list-ol", parallel: "code-fork",
-  stopoverlay: "ban", bar: "gauge", script: "code", unknown: "ban",
-};
-const ACTION_LABELS: Record<Step["type"], string> = {
-  borderless: "Borderless", fit: "Fit window", goto: "Move cursor", hold: "Hold keys", killprocess: "End process", lock: "Lock cursor",
-  press: "Press keys", mousepress: "Mouse press", repeat: "Repeat keys", resolution: "Resolution", restorecursor: "Restore cursor",
-  savecursor: "Save cursor", send: "Type text", sleep: "Sleep", state: "State", startoverlay: "Start overlay",
-  stretch: "Stretch window", waitfor: "Wait for input", sequence: "Sequence", parallel: "Simultaneous",
-  stopoverlay: "Stop overlay", bar: "Set bar", script: "Run script", unknown: "Unsupported action",
-};
 function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTarget[], scripts: Script[]): Step {
   switch (type) {
-    case "press": case "hold": case "waitfor": return { type, key: "" };
+    case "press": case "hold": case "toggle": case "waitfor": return { type, key: "" };
     case "mousepress": return { type, key: "LButton" };
     case "repeat": return { type, key: "", interval: "100", hold: "6" };
     case "sequence": case "parallel": return { type, steps: [{ type: "press", key: "" }] };
@@ -34,6 +24,8 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
     case "bar": return { type, itemId: overlays.find(item => item.type === "bar")?.id ?? "", value: "0" };
     case "script": return { type, scriptId: scripts[0]?.id ?? "" };
     case "send": return { type, text: "" };
+    case "securesend": return { type, credentialId: "" };
+    case "behavior": return { type, variableId: "" };
     case "sleep": return { type, ms: "100" };
     case "goto": return { type, x: "", y: "" };
     case "resolution": return { type, width: "", height: "" };
@@ -42,32 +34,30 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
   }
 }
 
-export function GotoInput({ x, y, gameExe, variables = [], onChange }: { x: string; y: string; gameExe: string; variables?: NumberVariable[]; onChange: (x: string, y: string) => void }) {
+function CoordinatePicker({ gameExe, onPick }: { gameExe: string; onPick: (x: string, y: string) => void }) {
   const reportError = useErrorReporter();
   const [picking, setPicking] = useState(false);
-
   async function pick() {
     setPicking(true);
     try {
-      const [px, py] = await api.pickCoordinate(gameExe);
-      onChange(String(px), String(py));
-    } catch (e) {
-      reportError(e);
-    } finally {
-      setPicking(false);
-    }
+      const [x, y] = await api.pickCoordinate(gameExe);
+      onPick(String(x), String(y));
+    } catch (error) { reportError(error); }
+    finally { setPicking(false); }
   }
-
-  return (
-    <div className="goto-input">
-      <label>X (%) <NumberInput label="X (%)" min={0} max={100} step={0.1} value={x} variables={variables} onChange={value => onChange(value, y)} /></label>
-      <label>Y (%) <NumberInput label="Y (%)" min={0} max={100} step={0.1} value={y} variables={variables} onChange={value => onChange(x, value)} /></label>
-      <IconButton showLabel icon={picking ? "spinner" : "crosshairs"} label={picking ? "Click in app" : "Pick position"} spin={picking} className="btn btn--ghost btn--sm coordinate-picker" onClick={pick} disabled={picking} />
-    </div>
-  );
+  return <IconButton showLabel={picking} icon={picking ? "spinner" : "crosshairs"} label={picking ? "Click in app" : "Pick position"}
+    spin={picking} className="btn btn--ghost btn--sm coordinate-picker" onClick={pick} disabled={picking} />;
 }
 
-function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, onChange, onDelete, onMove }: {
+export function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
+  return <div className="goto-input">
+    <CompactNumber label="X (%)" prefix="X" unit="%" min={0} max={100} step={0.1} value={x} onChange={value => onChange(value, y)} />
+    <CompactNumber label="Y (%)" prefix="Y" unit="%" min={0} max={100} step={0.1} value={y} onChange={value => onChange(x, value)} />
+    <CoordinatePicker gameExe={gameExe} onPick={onChange} />
+  </div>;
+}
+
+function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, hasTrigger, secureTexts, editingVariableId, onSecureTextChange, onDb, onChange, onDelete, onMove }: {
   step: Step;
   index: number;
   total: number;
@@ -75,54 +65,80 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
-  variables: NumberVariable[];
+  variables: Variable[];
+  hasTrigger: boolean;
+  secureTexts: SecureTextDraft[];
+  editingVariableId?: string;
+  onSecureTextChange?: (credentialId: string, password: string) => void;
+  onDb: (db: Database) => void;
   onChange: (s: Step) => void;
   onDelete: () => void;
   onMove: (dir: -1 | 1) => void;
 }) {
+  const [editingBehavior, setEditingBehavior] = useState<Variable | "new" | null>(null);
+  const behaviorChoices = variables.filter(variable => variable.type === "behavior" && variable.id !== editingVariableId);
   return (
-    <div className="step-row">
+    <div className={`step-row${step.type === "sequence" || step.type === "parallel" ? " step-row--group" : ""}`}>
       <span className="step-row__type">{step.type}</span>
       <div className="step-row__params">
-        {(step.type === "press" || step.type === "hold" || step.type === "waitfor") && (
-          <KeyInput
-            value={step.key}
-            onChange={key => onChange({ ...step, key })}
-            allowChord
-          />
+        {step.type === "behavior" && <>
+          <select aria-label="Behavior variable" value={step.variableId} onChange={event => onChange({ ...step, variableId: event.target.value })}>
+            <option value="">Select variable</option>
+            {step.variableId && !behaviorChoices.some(variable => variable.id === step.variableId) && <option value={step.variableId}>Missing or incompatible variable</option>}
+            {behaviorChoices.map(variable => <option key={variable.id} value={variable.id}>{variable.name}</option>)}
+          </select>
+          {behaviorChoices.some(variable => variable.id === step.variableId) && <IconButton icon="pen" label="Edit variable" className="icon-btn" onClick={() => setEditingBehavior(behaviorChoices.find(variable => variable.id === step.variableId)!)} />}
+          <button type="button" className="btn btn--ghost btn--sm" onClick={() => setEditingBehavior("new")}>New variable</button>
+        </>}
+        {(step.type === "press" || step.type === "hold" || step.type === "toggle" || step.type === "waitfor") && (
+          <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys" allowMatchedTrigger={step.type === "press" && hasTrigger}
+            onChange={key => onChange({ ...step, key })} />
         )}
         {step.type === "mousepress" && (
           <>
-            <KeyInput value={step.key} onChange={key => onChange({ ...step, key })} placeholder="Mouse button" />
-            <select value={step.doubleClick ? "double" : "single"} aria-label="Click type"
+            <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Mouse button" allowChord={false}
+              onChange={key => onChange({ ...step, key })} />
+            <select value={step.doubleClick ? "double" : "single"} aria-label="Click type" title="Single or double mouse click"
               onChange={e => onChange({ ...step, doubleClick: e.target.value === "double" })}>
               <option value="single">Single click</option>
               <option value="double">Double click</option>
             </select>
           </>
         )}
+        {(step.type === "press" || step.type === "mousepress") && (hasTrigger || step.onRelease) && (
+          <select value={step.onRelease ? "release" : "press"} aria-label="Activation" title="Run when the hotkey is pressed or released"
+            onChange={event => onChange({ ...step, onRelease: event.target.value === "release" })}>
+            <option value="press">On press</option>
+            <option value="release" disabled={!hasTrigger}>On release</option>
+          </select>
+        )}
         {(step.type === "sequence" || step.type === "parallel") && (
-          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables}
+          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={steps => onChange({ ...step, steps })} />
         )}
         {step.type === "unknown" && <input value={step.source} readOnly aria-label="Unsupported action" />}
         {step.type === "repeat" && (
           <>
-            <div className="step-row__keys"><KeyInput value={step.key} onChange={key => onChange({ ...step, key })} allowChord /></div>
-            <NumberInput min={1} step={1} value={step.interval} label="Interval (ms)" variables={variables}
+            <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys"
+              onChange={key => onChange({ ...step, key })} />
+            <ValueInput min={1} step={1} value={step.interval} label="Interval (ms)" variables={variables} onDb={onDb}
               onChange={interval => onChange({ ...step, interval })} />
-            <NumberInput min={0} step={1} value={step.hold} label="Hold (ms)" variables={variables}
+            <ValueInput min={0} step={1} value={step.hold} label="Hold (ms)" variables={variables} onDb={onDb}
               onChange={hold => onChange({ ...step, hold })} width={80} />
           </>
         )}
         {step.type === "goto" && (
-          <GotoInput x={step.x} y={step.y} gameExe={gameExe} variables={variables} onChange={(x, y) => onChange({ ...step, x, y })} />
+          <div className="goto-input">
+            <ValueInput value={step.x} variables={variables} onDb={onDb} label="X (%)" min={0} max={100} step={0.1} onChange={x => onChange({ ...step, x })} />
+            <ValueInput value={step.y} variables={variables} onDb={onDb} label="Y (%)" min={0} max={100} step={0.1} onChange={y => onChange({ ...step, y })} />
+            <CoordinatePicker gameExe={gameExe} onPick={(x, y) => onChange({ ...step, x, y })} />
+          </div>
         )}
         {step.type === "resolution" && (
           <>
-            <NumberInput min={1} step={1} value={step.width} label="Resolution width" variables={variables}
+            <ValueInput min={1} step={1} value={step.width} label="Resolution width" variables={variables} onDb={onDb}
               onChange={width => onChange({ ...step, width })} />
-            <NumberInput min={1} step={1} value={step.height} label="Resolution height" variables={variables}
+            <ValueInput min={1} step={1} value={step.height} label="Resolution height" variables={variables} onDb={onDb}
               onChange={height => onChange({ ...step, height })} />
           </>
         )}
@@ -162,7 +178,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
               {step.itemId && !overlays.some(item => item.id === step.itemId && (step.type !== "bar" || item.type === "bar")) && <option value={step.itemId}>Missing overlay</option>}
               {overlays.filter(item => step.type !== "bar" || item.type === "bar").map(item => <option key={item.id} value={item.id}>{item.name || (item.type === "group" ? "Overlay" : item.type)}</option>)}
             </select>
-            {step.type === "bar" && <NumberInput value={step.value} variables={variables} onChange={value => onChange({ ...step, value })} label="Bar value" />}
+            {step.type === "bar" && <ValueInput value={step.value} variables={variables} onDb={onDb} onChange={value => onChange({ ...step, value })} label="Bar value" />}
           </>
         )}
         {step.type === "script" && <select value={step.scriptId} onChange={e => onChange({ ...step, scriptId: e.target.value })} aria-label="Script">
@@ -170,32 +186,50 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           {scripts.map(script => <option key={script.id} value={script.id}>{script.name || script.language}</option>)}
         </select>}
         {step.type === "sleep" && (
-          <NumberInput min={0} step={1} value={step.ms} variables={variables} label="Sleep (ms)"
+          <ValueInput min={0} step={1} value={step.ms} variables={variables} onDb={onDb} label="Sleep (ms)"
             onChange={ms => onChange({ ...step, ms })} />
         )}
         {step.type === "send" && (
-          <input value={step.text} placeholder="text"
-            onChange={e => onChange({ ...step, text: e.target.value })} />
+          <ValueInput type="text" value={step.text} variables={variables} onDb={onDb} label="Text"
+            onChange={text => onChange({ ...step, text })} />
         )}
+        {step.type === "securesend" && <SecureSendInput credentialId={step.credentialId} drafts={secureTexts}
+          onChange={onSecureTextChange && ((credentialId, password) => { onSecureTextChange(credentialId, password); onChange({ ...step, credentialId }); })} />}
       </div>
       <div className="step-row__btns">
         <IconButton icon="arrow-up" label="Move up"  className="icon-btn" disabled={index === 0} onClick={() => onMove(-1)} />
         <IconButton icon="arrow-down" label="Move down"  className="icon-btn" disabled={index === total - 1} onClick={() => onMove(1)} />
         <IconButton icon="trash-can" label="Delete step" className="icon-btn icon-btn--danger" onClick={onDelete} />
       </div>
+      {editingBehavior && <VariableModal initial={editingBehavior === "new" ? undefined : editingBehavior} variables={variables} fixedType="behavior"
+        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} />}
+        onClose={() => setEditingBehavior(null)} onSaved={(variable, db) => {
+          onDb(db);
+          if (step.type === "behavior") onChange({ ...step, variableId: variable.id });
+          setEditingBehavior(null);
+        }} />}
     </div>
   );
 }
 
-export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], onChange }: {
+export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], hasTrigger = true, secureTexts = [], editingVariableId, onSecureTextChange, onDb, onChange }: {
   steps: Step[];
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
-  variables?: NumberVariable[];
+  variables?: Variable[];
+  hasTrigger?: boolean;
+  secureTexts?: SecureTextDraft[];
+  editingVariableId?: string;
+  onSecureTextChange?: (credentialId: string, password: string) => void;
+  onDb: (db: Database) => void;
   onChange: (steps: Step[]) => void;
 }) {
+  const [savingAsVariable, setSavingAsVariable] = useState(false);
+  const [addingAction, setAddingAction] = useState(false);
+  const addButton = useRef<HTMLButtonElement>(null);
+  function closeActions() { setAddingAction(false); addButton.current?.focus(); }
   function addStep(step: Step) { onChange([...steps, step]); }
   function removeStep(i: number) { onChange(steps.filter((_, index) => index !== i)); }
   function updateStep(i: number, step: Step) { onChange(steps.map((current, index) => index === i ? step : current)); }
@@ -209,20 +243,30 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
 
   return (
     <div className="steps-section">
-      <div className="steps-list">
-        {steps.map((step, i) => (
-          <StepRow key={i} step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables}
+      <SortableList items={steps} itemKey={(_step, index) => String(index)} itemLabel={(step, index) => `${step.type} step ${index + 1}`}
+        onReorder={(from, to, after) => onChange(moveItem(steps, (_step, index) => String(index), from, to, after))}
+        empty={<div className="steps-empty">No steps yet</div>}>
+        {(step, i) => (
+          <StepRow step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={next => updateStep(i, next)}
             onDelete={() => removeStep(i)}
             onMove={direction => moveStep(i, direction)} />
-        ))}
-        {steps.length === 0 && <div className="steps-empty">No steps yet</div>}
-      </div>
+        )}
+      </SortableList>
       <div className="step-add-btns">
-        {ACTION_TYPES.map(type => (
-          <IconButton showLabel icon={ACTION_ICONS[type]} label={ACTION_LABELS[type]} key={type} className="btn btn--ghost btn--sm" onClick={() => addStep(newStep(type, states, overlays, scripts))} />
-        ))}
+        <button ref={addButton} type="button" className="btn btn--ghost btn--sm action-label-btn" aria-label="Add action" aria-expanded={addingAction} onClick={() => setAddingAction(!addingAction)}><Icon name="plus" /><span>Add action</span></button>
+        {!!steps.length && <IconButton icon="floppy-disk" label="Save as variable" className="btn btn--ghost btn--sm"
+          disabled={!areStepsValid(steps, variables, hasTrigger, secureTexts)} onClick={() => setSavingAsVariable(true)} />}
       </div>
+      {addingAction && <BehaviorActionPicker hasTrigger={hasTrigger} canSecureSend={!!onSecureTextChange}
+        onClose={closeActions} onSelect={type => { addStep(newStep(type, states, overlays, scripts)); closeActions(); }} />}
+      {savingAsVariable && <VariableModal variables={variables} fixedType="behavior" initialBehavior={steps} initialSecureTexts={secureTexts}
+        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} />}
+        onClose={() => setSavingAsVariable(false)} onSaved={(variable, db) => {
+          onDb(db);
+          onChange([{ type: "behavior", variableId: variable.id }]);
+          setSavingAsVariable(false);
+        }} />}
     </div>
   );
 }

@@ -17,6 +17,11 @@ The Copilot key is not a standalone key: on the target Windows hardware it arriv
 compound `LWin+LShift+F23` sequence (`SC06E` is F23). MacroToolbox's always-on remap must make
 that physical button behave as a true held **Right Ctrl**, never Left Ctrl or generic Ctrl.
 
+When Windows' native Copilot setting is `RightControl`, Windows owns this remap.
+MacroToolbox must leave the Copilot/Win/Shift hooks inactive and skip its remap cleanup;
+it must not inject a second Ctrl transition. The input host reads this native choice
+at startup. The invariants below apply to the app fallback when native ownership is off.
+
 Whenever changing AutoHotkey generation, keyboard hooks, modifier handling, input ownership,
 hotkey matching, or release recovery, preserve all of these invariants:
 

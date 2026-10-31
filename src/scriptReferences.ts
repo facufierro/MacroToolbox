@@ -1,5 +1,5 @@
-import { mapBehavior } from "./behaviors.ts";
-import type { Profile, Scope, Script } from "./types";
+import { expandBehavior, mapBehavior } from "./behaviors.ts";
+import type { Profile, Scope, Script, Variable } from "./types";
 
 export function mapScriptActions(behavior: string, mapId: (id: string) => string | null) {
   return mapBehavior(behavior, step => {
@@ -9,17 +9,17 @@ export function mapScriptActions(behavior: string, mapId: (id: string) => string
   });
 }
 
-export function withReferencedScripts(profile: Profile, scripts: Script[]): Profile {
+export function withReferencedScripts(profile: Profile, scripts: Script[], variables: Variable[] = []): Profile {
   const ids = new Set(profile.scripts.map(script => script.id));
   for (const entry of [...profile.hotkeys, ...(profile.events ?? [])]) {
-    mapScriptActions(entry.behavior, id => { ids.add(id); return id; });
+    mapScriptActions(expandBehavior(entry.behavior, variables), id => { ids.add(id); return id; });
   }
   return { ...profile, scripts: scripts.filter(script => ids.has(script.id)) };
 }
 
-export function carryReferencedScripts(profile: Profile, source: Script[], target: Script[]): Profile {
+export function carryReferencedScripts(profile: Profile, source: Script[], target: Script[], variables: Variable[] = []): Profile {
   const existing = new Set([...profile.scripts, ...target].map(script => script.id));
-  return { ...profile, scripts: [...profile.scripts, ...withReferencedScripts(profile, source).scripts.filter(script => !existing.has(script.id))] };
+  return { ...profile, scripts: [...profile.scripts, ...withReferencedScripts(profile, source, variables).scripts.filter(script => !existing.has(script.id))] };
 }
 
 export function removeScriptReferences(scope: Scope, scriptId: string): Scope {

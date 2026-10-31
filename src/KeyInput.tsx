@@ -54,6 +54,7 @@ function toAhkKey(e: KeyboardEvent, activeSideModifiers: Set<string>): string {
     NumpadEnter: "NumpadEnter",
   };
   let key = keypadKeys[e.code] ?? (/^Numpad[0-9]$/.test(e.code) ? e.code : e.key);
+  if (!key || key === "Unidentified") return "";
   if (key in keyMap) key = keyMap[key];
   else if (/^F\d+$/.test(key)) key = key.toLowerCase();
   else if (key.length === 1) {
@@ -99,6 +100,11 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
     const heldInputs = new Map<string, string>();
     const chordInputs: string[] = [];
     const chordModifiers: string[] = [];
+    let pendingCapture = 0;
+    const cancelPendingCapture = () => {
+      if (pendingCapture) window.clearTimeout(pendingCapture);
+      pendingCapture = 0;
+    };
     const rememberModifiers = (mods: string[]) => {
       for (const mod of mods) {
         if (!chordModifiers.includes(mod)) chordModifiers.push(mod);
@@ -112,6 +118,7 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
       const parts = value.split(/\s+/);
       const key = parts.pop();
       if (!key) return;
+      if (chordInputs.length === 0) chordModifiers.length = 0;
       rememberModifiers(parts);
       heldInputs.set(id, key);
       chordInputs.push(key);
@@ -125,11 +132,15 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
       e.stopImmediatePropagation();
       const sideMod = sideModifier(e.code);
       if (sideMod) {
+        cancelPendingCapture();
+        if (activeSideModifiersRef.current.size === 0 && chordInputs.length === 0) chordModifiers.length = 0;
         activeSideModifiersRef.current.add(sideMod);
         if (allowChord && !chordModifiers.includes(sideMod)) chordModifiers.push(sideMod);
         return;
       }
       const value = toAhkKey(e, activeSideModifiersRef.current);
+      if (!value) return;
+      cancelPendingCapture();
       if (allowChord) rememberInput(`key:${e.code}`, value);
       else capture(value);
     };
@@ -143,7 +154,13 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
           const modifiers = chordModifiers.includes("ralt")
             ? chordModifiers.filter(mod => mod !== "lctrl")
             : chordModifiers;
-          capture(modifiers.join(" "));
+          // A native remap can release its chord prefix immediately before pressing
+          // the replacement modifier. Let that input batch settle before committing.
+          cancelPendingCapture();
+          pendingCapture = window.setTimeout(() => {
+            pendingCapture = 0;
+            capture(modifiers.join(" "));
+          }, 0);
         }
         return;
       }
@@ -153,6 +170,8 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
       e.preventDefault();
       e.stopImmediatePropagation();
       const value = toAhkMouseButton(e, activeSideModifiersRef.current);
+      if (!value) return;
+      cancelPendingCapture();
       if (allowChord) rememberInput(`mouse:${e.button}`, value);
       else capture(value);
     };
@@ -172,6 +191,7 @@ export function useBindingRecorder(recording: boolean, onCapture: (value: string
     window.addEventListener("mouseup", mouseUpHandler, true);
     window.addEventListener("contextmenu", contextMenuHandler, true);
     return () => {
+      cancelPendingCapture();
       activeSideModifiersRef.current.clear();
       window.removeEventListener("keydown", keyHandler, true);
       window.removeEventListener("keyup", keyUpHandler, true);
@@ -199,9 +219,9 @@ export function KeyInput({ value, onChange, placeholder = "Key", allowChord = fa
       {allowChord ? "Hold the key/button combination, then release…" : "Press any key or mouse button…"}
     </div>
   ) : (
-    <div className="input-row" style={{ margin: 0, flex: 1 }}>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
-      <IconButton showLabel icon="keyboard" label="Record key" className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} />
+    <div className="input-row key-input">
+      <input aria-label={placeholder} title={placeholder} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
+      <IconButton icon="keyboard" label="Record key" className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} />
     </div>
   );
 }
