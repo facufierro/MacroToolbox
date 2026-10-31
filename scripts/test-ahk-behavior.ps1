@@ -14,6 +14,11 @@ if ($Engine -eq 'runtime') {
     foreach ($file in @('behavior_runtime.ahk', 'json.ahk', 'runtime_host.ahk')) {
         $engineText += [Environment]::NewLine + [IO.File]::ReadAllText((Join-Path $projectPath "src-tauri/src/$file"))
     }
+    $copilotSource = [regex]::Match($source, '(?s)const COPILOT_ENGINE: &str = r###"(.*?)"###;').Groups[1].Value
+    $copilotSource = [regex]::Replace($copilotSource, '(?m)^~?\$\*[^\r\n]+::[^\r\n]+\r?\n|^#HotIf[^\r\n]*\r?\n', '')
+    $engineText += [Environment]::NewLine + $copilotSource
+    $hostSource = [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/input_host.ahk'))
+    $engineText += [Environment]::NewLine + [regex]::Match($hostSource, '(?ms)^HandleInputFailure\([^\r\n]*\) \{.*?^\}').Value
 }
 
 if ($Engine -in @('behavior', 'runtime')) {
@@ -21,11 +26,20 @@ if ($Engine -in @('behavior', 'runtime')) {
 }
 
 # Exercise production input primitives and the structured executor with an isolated test sink.
-# No keyboard/mouse hooks or injected global input are needed. Native checks use a hidden
-# fixture window and register raw input only inside this short-lived test process.
+# Native stages use fixture windows or a temporary hook which consumes dummy text
+# before applications receive it. Input-owner stages use the isolated sink below.
 $isolatedEngine = [regex]::Replace($engineText, '\bSend(Input|Event)\b', 'TestSend')
 $isolatedEngine = [regex]::Replace($isolatedEngine, '\bGetKeyState\b', 'TestGetKeyState')
 if ($Engine -in @('behavior', 'runtime')) {
+    $literalSender = [regex]::Match($engineText, '(?ms)^SendLiteralText\([^\r\n]*\) \{.*?^\}').Value
+    $isolatedEngine = $isolatedEngine.Replace($literalSender, 'SendLiteralText(text) {' + [Environment]::NewLine + '    TestSend("{Text}" text)' + [Environment]::NewLine + '}')
+    $literalInput = [regex]::Match($engineText, '(?ms)^SendLiteralInput\([^\r\n]*\) \{.*?^\}').Value
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^SendLiteralInput\([^\r\n]*\) \{.*?^\}', '')
+    if ($Engine -eq 'runtime') {
+        $literalTestPrimitives = [Environment]::NewLine + $literalSender.Replace('SendLiteralText(', 'NativeSendLiteralText(').Replace('SendLiteralInput(', 'TestLiteralInput(').Replace('A_IsSuspended', 'testInputSuspended')
+        $literalTestPrimitives += [Environment]::NewLine + $literalInput.Replace('SendLiteralInput(', 'NativeSendLiteralInput(').Replace('DllCall("SendInput", ', 'TestTextDelivery(')
+        $isolatedEngine += $literalTestPrimitives
+    }
     $nativeInput = [regex]::Match($engineSource.Groups[1].Value, '(?ms)^; Native behavior input boundary\..*?^; End native behavior input boundary\.').Value
     if (-not $nativeInput) { throw 'Behavior input boundary not found' }
     $isolatedEngine = $isolatedEngine.Replace($nativeInput, '')
@@ -42,6 +56,7 @@ if ($Engine -in @('behavior', 'runtime')) {
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^(\s*if !?)TryGetViewportFromApp\b', '${1}TestTryGetViewportFromApp')
 }
 if ($Engine -eq 'runtime') {
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bSuspend\b', 'TestSuspend')
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bPostMessage\b', 'TestPostMessage')
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bHotkey\b', 'TestHotkey')
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bHotIf\b', 'TestHotIf')
@@ -58,6 +73,7 @@ if ($Engine -eq 'copilot') {
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?m)^~?\$\*[^\r\n]+::[^\r\n]+\r?\n', '')
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bSetTimer\b', 'TestSetTimer')
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bInputHook\b', 'TestInputHook')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bRegRead\b', 'TestRegRead')
 }
 $fixture = [IO.File]::ReadAllText((Join-Path $projectPath "tests/ahk/$Engine.test.ahk"))
 if ($Engine -eq 'runtime') {
@@ -71,7 +87,24 @@ $stages = @(@{ Source = $isolatedEngine; Validate = ''; Name = "$Engine tests" }
 # /Validate checks the production declarations and native boundary without executing them.
 $validationSource = $engineText
 if ($Engine -in @('behavior', 'runtime')) { $validationSource += [Environment]::NewLine + $nativeInput }
+if ($Engine -eq 'runtime') { $validationSource += $literalTestPrimitives }
 $stages = @(@{ Source = $validationSource; Validate = '/Validate '; Name = "$Engine syntax validation" }) + $stages
+if ($Engine -eq 'behavior') {
+    $literalTextSource = ''
+    foreach ($name in @('SendLiteralText', 'SendLiteralInput', 'SendBehaviorText', 'SendSecureText', 'RestoreBehaviorClipboard', 'BehaviorContextActive')) {
+        $literalTextSource += [Environment]::NewLine + [regex]::Match($engineText, '(?ms)^' + $name + '\([^\r\n]*\) \{.*?^\}').Value
+    }
+    $literalTextSource = [regex]::Replace($literalTextSource, '\bWinGetProcessName\b', 'FixtureWinGetProcessName')
+    $runtimeFixture = [IO.File]::ReadAllText((Join-Path $projectPath 'tests/ahk/runtime.test.ahk'))
+    $credentialFixture = [regex]::Match($runtimeFixture, '(?ms)^SecureFixtureId\(\) \{.*?^\}').Value
+    $credentialFixture += [Environment]::NewLine + [regex]::Match($runtimeFixture, '(?ms)^class SecureCredentialFixture \{.*?^\}').Value
+    $stages += @{ Source = $literalTextSource + [Environment]::NewLine + $credentialFixture; Validate = ''; Name = 'Native text modifier tests'; Fixture = [IO.File]::ReadAllText((Join-Path $projectPath 'tests/ahk/text-input-native.test.ahk')) }
+}
+if ($Engine -eq 'copilot') {
+    $nativeCopilot = [regex]::Replace($engineSource.Groups[1].Value, '(?m)^~?\$\*[^\r\n]+::[^\r\n]+\r?\n', '')
+    $nativeCopilot = [regex]::Replace($nativeCopilot, '\bGetKeyState\b', 'NativeTestGetKeyState')
+    $stages += @{ Source = $nativeCopilot; Validate = ''; Name = 'Copilot native output tests'; Fixture = [IO.File]::ReadAllText((Join-Path $projectPath 'tests/ahk/copilot-native.test.ahk')) }
+}
 if ($Engine -eq 'runtime') {
     $fullSource = [IO.File]::ReadAllText((Join-Path $projectPath 'src-tauri/src/input_host.ahk'))
     $fullSource += [Environment]::NewLine + [regex]::Match($source, '(?s)const COPILOT_ENGINE: &str = r###"(.*?)"###;').Groups[1].Value
@@ -86,7 +119,7 @@ if ($Engine -eq 'runtime') {
 }
 try {
     foreach ($stage in $stages) {
-        $prefix = if ($stage.NoFixture) { '' } else { $fixture }
+        $prefix = if ($stage.NoFixture) { '' } elseif ($stage.Fixture) { $stage.Fixture } else { $fixture }
         [IO.File]::WriteAllText($testPath, $prefix + [Environment]::NewLine + $stage.Source, [Text.UTF8Encoding]::new($true))
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = $ahkPath

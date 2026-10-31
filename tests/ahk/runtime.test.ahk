@@ -1,5 +1,10 @@
 global behaviorRuntime := BehaviorExecutor(), runtimeActions := [], nativePosts := [], testOnPost := 0
 global testHotkeys := [], testHotCriterion := 0
+global copilotState := {native: false, input: ""}, copilotCtrlReleasePending := false, copilotShiftSuppressed := false
+global testInputSuspended := false, recoveryTimerTicks := 0
+global inputErrorUnwound := false, inputErrorContinued := false
+global literalPackets := [], literalBuffer := 0, literalFailure := false, literalDeliveryResults := [], literalDeliveryCalls := []
+global suspendDuringText := false
 RunRuntimeTest("parallel branches make progress while a sibling holds", TestParallelHold)
 RunRuntimeTest("sequences wait for their previous action", TestStructuredSequence)
 RunRuntimeTest("focus loss cancels delays and releases owned keys", TestRuntimeFocusLoss)
@@ -78,8 +83,192 @@ RunRuntimeTest("Secure send without a hotkey rejects its entire action tree befo
 RunRuntimeTest("a missing secure credential reports a safe error and stops the sequence", TestSecureMissing)
 RunRuntimeTest("secure input failures redact API arguments before reaching the console", TestSecureFailureRedaction)
 RunRuntimeTest("Secure send keeps its position in a nested sequence", TestSecureSequence)
-FileAppend("All 79 structured runtime tests passed.`n", "*")
+RunRuntimeTest("unhandled errors stop work and release remapped input and mouse locking", TestInputFailure.Bind(false))
+RunRuntimeTest("error recovery preserves Windows-owned Ctrl and independent physical modifiers", TestInputFailure.Bind(true))
+RunRuntimeTest("error recovery still unlocks input when executor cleanup fails", TestInputFailureCleanupError)
+RunRuntimeTest("an unhandled timer error unwinds after disabling input and releasing locks", TestUnhandledInputFailure)
+RunRuntimeTest("literal text preserves Unicode, line endings, Tab, and Backspace without modifier input", TestLiteralPackets)
+RunRuntimeTest("literal text clears its packet buffer after a delivery failure", TestLiteralPacketFailure)
+RunRuntimeTest("partial text delivery releases its unfinished key and reports a safe error", TestPartialLiteralDelivery)
+RunRuntimeTest("suspension interrupts an in-progress text send and clears its buffer", TestSuspendedLiteralText)
+FileAppend("All 87 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestLiteralPackets() {
+    global literalPackets, literalBuffer
+    literalPackets := []
+    previousDelay := A_KeyDelay
+    SetKeyDelay -1
+    try NativeSendLiteralText("Aø🚀`r`n`n`t`b")
+    finally SetKeyDelay previousDelay
+    expected := [[0, 65], [0, 248], [0, 0xD83D], [0, 0xDE80], [13, 0], [13, 0], [9, 0], [8, 0]]
+    Assert(literalPackets.Length = expected.Length, "text encoding lost Unicode or changed CRLF normalization")
+    for index, packet in literalPackets {
+        Assert(packet.vk = expected[index][1] && packet.scan = expected[index][2], "text packet changed a code unit or control key")
+        Assert(packet.flags = (packet.vk ? 0 : 4) && packet.up = (packet.flags | 2), "text packet did not pair down and up")
+        Assert(packet.extra = 0xFFC3D44D - A_SendLevel, "text packet can retrigger a scan-code hotkey")
+    }
+    AssertLiteralBufferCleared()
+    NativeSendLiteralText("")
+    Assert(literalPackets.Length = expected.Length, "empty text sent input")
+}
+
+TestLiteralPacketFailure() {
+    global literalFailure
+    literalFailure := true, failed := false
+    try NativeSendLiteralText("fixture-sensitive-text")
+    catch Error
+        failed := true
+    finally literalFailure := false
+    Assert(failed, "text delivery failure was swallowed")
+    AssertLiteralBufferCleared()
+}
+
+AssertLiteralBufferCleared() {
+    loop literalBuffer.Size
+        Assert(NumGet(literalBuffer, A_Index - 1, "UChar") = 0, "literal text remained in its native packet buffer")
+}
+
+TestLiteralInput(inputs, inputSize) {
+    global literalBuffer, testInputSuspended
+    literalBuffer := inputs
+    keyOffset := A_PtrSize = 8 ? 8 : 4
+    literalPackets.Push({vk: NumGet(inputs, keyOffset, "UShort"), scan: NumGet(inputs, keyOffset + 2, "UShort"),
+        flags: NumGet(inputs, keyOffset + 4, "UInt"), up: NumGet(inputs, inputSize + keyOffset + 4, "UInt"),
+        extra: NumGet(inputs, keyOffset + (A_PtrSize = 8 ? 16 : 12), "UPtr")})
+    if literalFailure
+        throw Error("fixture input failure")
+    if suspendDuringText
+        testInputSuspended := true
+}
+
+TestSuspendedLiteralText() {
+    global literalPackets, suspendDuringText
+    literalPackets := [], suspendDuringText := true
+    try NativeSendLiteralText("fixture must stop")
+    finally suspendDuringText := false
+    Assert(literalPackets.Length = 1, "suspended text continued sending after input was disabled")
+    AssertLiteralBufferCleared()
+}
+
+TestPartialLiteralDelivery() {
+    global literalDeliveryResults, literalDeliveryCalls
+    size := A_PtrSize = 8 ? 40 : 28, inputs := Buffer(size * 2, 0)
+    for delivered in [0, 1, 2] {
+        literalDeliveryResults := delivered = 1 ? [1, 1] : [delivered]
+        literalDeliveryCalls := [], failed := false
+        try NativeSendLiteralInput(inputs, size)
+        catch Error as failure {
+            failed := true
+            Assert(failure.Message = "Text input could not be delivered.", "text delivery exposed API arguments")
+        }
+        Assert(failed = (delivered != 2), "partial text delivery was accepted")
+        Assert(literalDeliveryCalls.Length = (delivered = 1 ? 2 : 1), "partial text delivery did not send the required key-up")
+        if delivered = 1
+            Assert(literalDeliveryCalls[2].count = 1 && literalDeliveryCalls[2].pointer = inputs.Ptr + size, "partial delivery retried a key-down instead of its key-up")
+    }
+}
+
+TestTextDelivery(countType, count, pointerType, pointer, sizeType, size, returnType) {
+    literalDeliveryCalls.Push({count: count, pointer: IsObject(pointer) ? pointer.Ptr : pointer})
+    return literalDeliveryResults.RemoveAt(1)
+}
+
+TestInputFailure(native) {
+    global testHeldKeys, testLogicalKeys, copilotState, copilotCtrlHeld, testInputSuspended, recoveryTimerTicks, testOnSend
+    testHeldKeys := Map("q", true)
+    testLogicalKeys := Map("RCtrl", true)
+    copilotState := {native: native, input: ""}, copilotCtrlHeld := !native
+    testInputSuspended := false, recoveryTimerTicks := 0
+    execution := StartBehaviorRun("failed-input", [Action("lock"), Action("hold", "key", "x RShift"), Action("send", "text", "must not run")], "^", "*", "", "q")
+    testHeldKeys["RShift"] := true, testHeldKeys["LWin"] := true
+    SetTimer TickRuntimeHost, 10
+    SetTimer CheckHookHealth, 10
+    testOnSend := RequireInputSuspended
+    result := HandleInputFailure(Error("fixture-sensitive-api-argument", -1, "fixture-sensitive-extra"), "Return")
+    Sleep 30
+    Assert(result = 1 && testInputSuspended, "unhandled error left hotkeys enabled or requested a modal error dialog")
+    Assert(!recoveryTimerTicks, "error recovery allowed polling or hook recovery to restart input")
+    Assert(execution.cancelled && !execution.locked && !behaviorRuntime.runs.Count && !behaviorRuntime.latches.Count, "error recovery left a run or mouse lock active")
+    Assert(!syntheticDown.Count && !heldOutputCounts.Count && !chordHolds.Count && !copilotCtrlHeld, "error recovery left owned input behind")
+    for event in testEvents {
+        Assert(!InStr(event["keys"], "{rshift up}") && !InStr(event["keys"], "{lwin up}"), "error recovery released an independent physical modifier")
+        if native
+            Assert(!InStr(event["keys"], "{rctrl up}"), "error recovery released Windows-owned Right Ctrl")
+    }
+    Assert(testBlockModes[testBlockModes.Length - 1] = "Off" && testBlockModes[testBlockModes.Length] = "MouseMoveOff", "error recovery did not clear input and mouse movement blocking")
+    Assert(runtimeActions.Length = 1 && InStr(runtimeActions[1].value, "Input disabled") && !InStr(runtimeActions[1].value, "fixture-sensitive"), "unexpected input error leaked API arguments or was not reported")
+    copilotState := {native: false, input: ""}
+}
+
+class FailingUnlockExecutor extends BehaviorExecutor {
+    Unlock(execution) {
+        super.Unlock(execution)
+        if execution.owner = "first-failure"
+            throw Error("fixture cleanup failure")
+    }
+}
+
+TestInputFailureCleanupError() {
+    global behaviorRuntime, testInputSuspended, testOnSend, testHeldKeys
+    behaviorRuntime := FailingUnlockExecutor()
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("first-failure", [Action("lock"), Action("hold", "key", "x")], "", "*", "", "q")
+    StartBehaviorRun("second-failure", [Action("lock"), Action("hold", "key", "y")], "", "*", "", "q")
+    testInputSuspended := false, testOnSend := RequireInputSuspended
+    Assert(HandleInputFailure(Error("fixture failure"), "Return") = 1, "cleanup failure escaped the error handler")
+    Assert(!behaviorRuntime.runs.Count && !behaviorRuntime.latches.Count && !syntheticDown.Count && !heldOutputCounts.Count && testBlockModes[testBlockModes.Length] = "MouseMoveOff", "cleanup failure abandoned other runs, owned keys, or mouse unlocking")
+    behaviorRuntime := BehaviorExecutor()
+}
+
+RequireInputSuspended(*) {
+    Assert(testInputSuspended, "error recovery released input before disabling hotkeys")
+}
+
+TestSuspend(value) {
+    global testInputSuspended
+    testInputSuspended := value
+}
+
+TickRuntimeHost(*) {
+    global recoveryTimerTicks
+    recoveryTimerTicks++
+}
+
+CheckHookHealth(*) {
+    global recoveryTimerTicks
+    recoveryTimerTicks++
+}
+
+TestUnhandledInputFailure() {
+    global testHeldKeys, testInputSuspended, inputErrorUnwound, inputErrorContinued
+    testHeldKeys := Map("q", true)
+    execution := StartBehaviorRun("unhandled-error", [Action("lock"), Action("hold", "key", "x")], "", "*", "", "q")
+    testInputSuspended := false, inputErrorUnwound := false, inputErrorContinued := false
+    OnError TestUnhandledError, 0
+    OnError HandleInputFailure
+    try {
+        SetTimer ThrowInputFixtureError, -1
+        Sleep 60
+    } finally {
+        OnError HandleInputFailure, 0
+        OnError TestUnhandledError
+    }
+    Assert(testInputSuspended && execution.cancelled && !execution.locked && !syntheticDown.Count, "the actual unhandled-error callback did not release input")
+    Assert(inputErrorUnwound && !inputErrorContinued && runtimeActions.Length = 1, "the failed thread continued or its cleanup did not unwind")
+}
+
+ThrowInputFixtureError() {
+    global inputErrorUnwound, inputErrorContinued
+    try {
+        RaiseInputFixtureError()
+        inputErrorContinued := true
+    } finally inputErrorUnwound := true
+}
+
+RaiseInputFixtureError() {
+    throw Error("fixture-sensitive-unhandled-error")
+}
 
 SecureFixtureId() {
     guid := Buffer(16, 0), text := Buffer(78, 0)
@@ -203,11 +392,13 @@ TestSecureSequence() {
 
 RunRuntimeTest(name, test) {
     global runtimeActions, nativePosts, testOnPost, testHotkeys, testHotCriterion, behaviorRuntime
+    global testInputSuspended
     runtimeActions := []
     nativePosts := []
     testOnPost := 0
     testHotkeys := []
     testHotCriterion := 0
+    testInputSuspended := false
     RunTest(name, test)
     Assert(behaviorRuntime.runs.Count = 0, name " left a running behavior")
     behaviorRuntime.Stop()
@@ -720,6 +911,7 @@ TestNativeDoubleMouse() {
                                 Assert(item.buttons >> 16 = (button = "XButton1" ? 1 : 2), "double click lost its side button")
                         }
                         Assert(testHeldKeys[physicalButton] = held, "double click changed the physical button state")
+                        Assert(DllCall("GetForegroundWindow", "Ptr") != window.Hwnd, "mouse delivery activated its initially inactive target")
                     }
                 }
             }
@@ -746,6 +938,9 @@ TestDoubleClickTextFocus(secure := false) {
         testExpectedFocus := field.Hwnd
         DllCall("SetFocus", "Ptr", other.Hwnd)
         Assert(DllCall("GetFocus", "Ptr") = other.Hwnd, "text fixture did not establish initial focus")
+        ; SetFocus may activate its parent. Attribute activation to mouse delivery
+        ; only when the fixture was still inactive after its own focus setup.
+        foregroundAfterSetup := DllCall("GetForegroundWindow", "Ptr")
         testOnSend := CheckDoubleClickTextFocus
         if secure
             credential := SecureCredentialFixture("fixture")
@@ -759,7 +954,7 @@ TestDoubleClickTextFocus(secure := false) {
         }
         AwaitRuns()
         Assert(!runtimeActions.Length, "typing ran before the double click focused its text control" (runtimeActions.Length ? ": " runtimeActions[1].value : ""))
-        Assert(DllCall("GetForegroundWindow", "Ptr") != window.Hwnd, "targeted mouse messages activated the hidden fixture window")
+        Assert(foregroundAfterSetup = window.Hwnd || DllCall("GetForegroundWindow", "Ptr") != window.Hwnd, "targeted mouse messages activated the hidden fixture window")
     } finally {
         behaviorRuntime.Stop()
         testOnSend := 0, testNativeTarget := 0

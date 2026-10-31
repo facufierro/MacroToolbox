@@ -322,13 +322,18 @@ class BehaviorExecutor {
     }
 
     Stop(*) {
+        SetTimer this.callback, 0
         owners := []
         for owner in this.runs
             owners.Push(owner)
+        failure := 0
         for owner in owners
-            this.Cancel(owner)
+            try this.Cancel(owner)
+            catch Error as caught
+                failure := caught
         this.latches.Clear()
-        SetTimer this.callback, 0
+        if IsObject(failure)
+            throw failure
     }
 }
 

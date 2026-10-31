@@ -8,6 +8,7 @@ global copilotCtrlHeld := false, copilotCtrlReleasePending := false
 global physical := Map(), logical := Map(), sent := [], timers := Map(), chordModifiers := []
 global heldOutputCounts := Map(), syntheticDown := Map()
 global onSendEvent := 0, queuedInputs := [], deliveredModifiers := []
+global nativeCopilotChoice := ""
 OnError(TestUnhandledError)
 
 RunTest("quick Win+R forwards Win before R", TestQuickWinR)
@@ -19,6 +20,7 @@ RunTest("queued Copilot modifiers do not leak", TestQueuedChord)
 RunTest("Copilot+Shift+N keeps Right Ctrl and Shift", TestCopilotShiftN)
 RunTest("RCtrl+O and RCtrl+Shift+O stay distinct", TestAccentModifiers)
 RunTest("Copilot holds until key-up without repeat", TestHeldCopilot)
+RunTest("Copilot sends no unrelated key for a game's key binding", TestGameBindingInput)
 RunTest("physical Right Ctrl keeps ownership", TestPhysicalRightCtrl)
 RunTest("physical Win and Shift keep ownership", TestPhysicalModifiers)
 RunTest("physical Win keeps ownership without adding Shift", TestPhysicalWin)
@@ -32,14 +34,17 @@ RunTest("a delayed Copilot chord neutralizes modifiers already passed by its pre
 RunTest("a delayed Copilot chord preserves independently held Shift", TestDelayedCopilotChord.Bind(true))
 RunTest("remapped transitions do not inherit behavior delays", TestRemapDelays)
 RunTest("failed remap delivery restores the caller's input settings", TestRemapDeliveryFailure)
-FileAppend("All 22 Copilot tests passed." Chr(10), "*")
+RunTest("Windows Right control selection owns the Copilot key", TestNativeCopilotSelection)
+RunTest("native Copilot input survives app startup and exit cleanup", TestNativeCopilotCleanup)
+FileAppend("All 25 Copilot tests passed." Chr(10), "*")
 ExitApp 0
 
 RunTest(name, test) {
     global copilotState, copilotShiftSuppressed, copilotCtrlHeld, copilotCtrlReleasePending
     global physical, logical, sent, timers, chordModifiers
-    global onSendEvent, queuedInputs, deliveredModifiers
-    copilotState := {phase: "idle", input: "", shiftHeld: false, shiftHeldBefore: false, winHeldBefore: false}
+    global onSendEvent, queuedInputs, deliveredModifiers, nativeCopilotChoice
+    nativeCopilotChoice := ""
+    copilotState := {native: false, phase: "idle", input: "", shiftHeld: false, shiftHeldBefore: false, winHeldBefore: false}
     copilotShiftSuppressed := false
     copilotCtrlHeld := false
     copilotCtrlReleasePending := false
@@ -59,6 +64,29 @@ RunTest(name, test) {
     Assert(A_SendLevel = 0, name " leaked the remap send level")
     Assert(!A_IsCritical, name " left the input handoff critical")
     FileAppend("PASS: " name Chr(10), "*")
+}
+
+TestNativeCopilotSelection() {
+    global nativeCopilotChoice
+    for choice in ["", "Copilot", "Search", "OpenApp", "ContextMenu", "RightControl"] {
+        nativeCopilotChoice := choice
+        Assert(WindowsOwnsCopilotKey() = (choice = "RightControl"), "native ownership did not match the Windows keyboard setting")
+    }
+}
+
+TestNativeCopilotCleanup() {
+    global logical
+    copilotState.native := true
+    logical := Map("RCtrl", true, "LWin", true, "LShift", true)
+    ReleaseStaleCopilotModifiers()
+    ReleaseCopilotHeld()
+    Assert(!sent.Length && ExternalModifiers() = "RCtrl Shift Win", "app cleanup changed Windows-owned native input")
+    logical := Map()
+}
+
+TestRegRead(key, value, defaultValue := "") {
+    Assert(key = "HKCU\Software\Microsoft\Windows\Shell\BrandedKey" && value = "BrandedKeyChoiceType", "native remap queried an unrelated Windows setting")
+    return nativeCopilotChoice = "" ? defaultValue : nativeCopilotChoice
 }
 
 TestQuickWinR() {
@@ -156,9 +184,24 @@ TestHeldCopilot() {
     Assert(sent.Length = 1, "a held Copilot repeated or released Right Ctrl")
     Assert(logical.Get("RCtrl", false), "Right Ctrl did not remain held")
     Assert(!logical.Get("LCtrl", false), "Copilot became Left Ctrl")
-    Assert(InStr(sent[1], "{vkE8}") < InStr(sent[1], "{LWin up}"), "Start was not masked before Win release")
     EndCopilot()
     Assert(sent.Length = 2, "Copilot release did not send exactly one Ctrl up")
+}
+
+TestGameBindingInput() {
+    BeginCopilot()
+    AssertPureCopilotDown(sent[sent.Length])
+    EndCopilot()
+}
+
+AssertPureCopilotDown(keys) {
+    downs := [], position := 1
+    while RegExMatch(keys, "\{([^{} ]+)(?: (up|downR|down))?\}", &part, position) {
+        if part[1] != "Blind" && part[2] != "up"
+            downs.Push(part[1])
+        position := part.Pos + part.Len
+    }
+    Assert(downs.Length = 1 && downs[1] = "RCtrl", "a game binding receives another key before Right Ctrl: " keys)
 }
 
 TestPhysicalRightCtrl() {
@@ -257,6 +300,7 @@ TestDelayedCopilotChord(physicalShift) {
     PassCopilotKeys()
     Assert(ExternalModifiers() = "Shift Win", "test did not pass the pending prefix")
     CopilotDown()
+    AssertPureCopilotDown(sent[sent.Length])
     expected := physicalShift ? "RCtrl Shift" : "RCtrl"
     Assert(ExternalModifiers() = expected, "delayed F23 mistook its own prefix for independently held modifiers")
     CopilotUp()

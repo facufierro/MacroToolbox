@@ -594,7 +594,11 @@ fn trigger_to_key(trigger: &str) -> String {
     format!("${wild}{mods}{key}")
 }
 
-const COPILOT_ENGINE: &str = r###"SendCopilotKeys(keys) {
+const COPILOT_ENGINE: &str = r###"WindowsOwnsCopilotKey() {
+    return RegRead("HKCU\Software\Microsoft\Windows\Shell\BrandedKey", "BrandedKeyChoiceType", "") = "RightControl"
+}
+
+SendCopilotKeys(keys) {
     previousDelay := A_KeyDelay, previousDuration := A_KeyDuration
     previousSendLevel := SendLevel(1)
     ; Modifier handoffs must finish before the next physical key reaches the app.
@@ -607,6 +611,9 @@ const COPILOT_ENGINE: &str = r###"SendCopilotKeys(keys) {
 }
 
 ReleaseStaleCopilotModifiers() {
+    global copilotState
+    if copilotState.native
+        return
     if !GetKeyState("RCtrl", "P")
         SendCopilotKeys("{Blind}{RCtrl up}")
     if !GetKeyState("LWin", "P")
@@ -636,7 +643,9 @@ ReleaseCopilotCtrl() {
 }
 
 ReleaseCopilotHeld(*) {
-    global copilotCtrlReleasePending
+    global copilotState, copilotCtrlReleasePending
+    if copilotState.native
+        return
     SetTimer PassCopilotKeys, 0
     StopCopilotPrefix()
     ReleaseCopilotCtrl()
@@ -760,8 +769,8 @@ CopilotDown() {
         copilotCtrlReleasePending := false
         SetTimer CheckCopilotRelease, 0
         keys := "{Blind}"
-        if !copilotState.winHeldBefore
-            keys .= "{vkE8}"
+        ; The Win prefix is suppressed or already modified by Copilot's Shift.
+        ; An extra menu-mask keystroke would become the game's first input.
         if !copilotState.shiftHeldBefore
             keys .= "{LShift up}"
         if !copilotState.winHeldBefore
@@ -785,16 +794,18 @@ CopilotUp() {
 ; Our level-1 sends must reach Windows and level-0 profile hotkeys without retriggering the
 ; modifier filters. Physical Shift outside the Copilot prefix always passes through.
 #InputLevel 1
+#HotIf !copilotState.native
 $*LWin::CopilotWinDown()
 $*LWin up::CopilotWinUp()
-#HotIf copilotState.phase = "waiting"
+#HotIf !copilotState.native && copilotState.phase = "waiting"
 $*LShift::CopilotShiftDown()
-#HotIf
+#HotIf !copilotState.native
 ~$*LShift::ObserveCopilotShiftDown()
 ~$*LShift up::ObserveCopilotShiftUp()
 #InputLevel 0
 $*SC06E::CopilotDown()
 $*SC06E up::CopilotUp()
+#HotIf
 "###;
 
 const BEHAVIOR_RUNTIME: &str = include_str!("behavior_runtime.ahk");
@@ -1131,7 +1142,7 @@ SendSecureText(credentialId, target := "", profile := "") {
             throw TargetError("Target unavailable.")
         password := StrGet(blob, size // 2, "UTF-16")
         ; Never use the ordinary text action's application-specific clipboard fallback.
-        SendEvent("{Text}" password)
+        SendLiteralText(password)
     } catch Error {
         ; Input APIs may include their arguments in errors. Do not forward those errors.
         throw Error("Secure send failed. Enter the password again or check the target app.")
@@ -1143,6 +1154,48 @@ SendSecureText(credentialId, target := "", profile := "") {
             DllCall("msvcrt\memset", "Ptr", blob, "Int", 0, "UPtr", size, "CDecl Ptr")
         if credential
             DllCall("Advapi32\CredFree", "Ptr", credential)
+    }
+}
+
+SendLiteralText(text) {
+    ; AHK's text sender restores its initial modifier snapshot for each character,
+    ; even in Blind mode. Send only text packets so a native Ctrl-up stays up.
+    inputSize := A_PtrSize = 8 ? 40 : 28, keyOffset := A_PtrSize = 8 ? 8 : 4
+    inputs := Buffer(inputSize * 2, 0)
+    loop 2 {
+        offset := (A_Index - 1) * inputSize
+        NumPut("UInt", 1, inputs, offset)
+        ; KEY_IGNORE_LEVEL from the bundled AHK's keyboard_mouse.h: literal text
+        ; must not activate SCxxx bindings for its Unicode packet scan codes.
+        NumPut("UPtr", 0xFFC3D44D - A_SendLevel, inputs, offset + keyOffset + (A_PtrSize = 8 ? 16 : 12))
+    }
+    try {
+        index := 0
+        while index < StrLen(text) {
+            if A_IsSuspended
+                return
+            code := NumGet(StrPtr(text), index++ * 2, "UShort")
+            if code = 13 && index < StrLen(text) && NumGet(StrPtr(text), index * 2, "UShort") = 10
+                index++
+            vk := code = 13 || code = 10 ? 13 : code = 9 || code = 8 ? code : 0
+            scan := vk ? 0 : code, flags := vk ? 0 : 4
+            loop 2 {
+                offset := (A_Index - 1) * inputSize + keyOffset
+                NumPut("UShort", vk, "UShort", scan, "UInt", flags | (A_Index = 2 ? 2 : 0), inputs, offset)
+            }
+            SendLiteralInput(inputs, inputSize)
+            if A_KeyDelay >= 0
+                Sleep A_KeyDelay
+        }
+    } finally DllCall("msvcrt\memset", "Ptr", inputs.Ptr, "Int", 0, "UPtr", inputs.Size, "CDecl Ptr")
+}
+
+SendLiteralInput(inputs, inputSize) {
+    sent := DllCall("SendInput", "UInt", 2, "Ptr", inputs, "Int", inputSize, "UInt")
+    if sent != 2 {
+        if sent = 1
+            DllCall("SendInput", "UInt", 1, "Ptr", inputs.Ptr + inputSize, "Int", inputSize, "UInt")
+        throw Error("Text input could not be delivered.")
     }
 }
 
@@ -1158,7 +1211,7 @@ SendBehaviorText(text) {
     ; by Text mode. Paste through the clipboard there, preserving every clipboard format; other
     ; applications keep the immediate Unicode-packet path.
     if (activeExe != "WhatsApp.Root.exe" && activeExe != "WhatsApp.exe") {
-        SendEvent("{Text}" text)
+        SendLiteralText(text)
         return
     }
 
@@ -1632,6 +1685,8 @@ mod tests {
         assert!(script.contains("$*SC06E::CopilotDown()"));
         assert!(script.contains("SendCopilotKeys(keys \"{RCtrl downR}\")"));
         assert!(script.contains("SendEvent(keys)"));
+        assert!(script.contains("native: WindowsOwnsCopilotKey()"));
+        assert!(script.contains("#HotIf !copilotState.native"));
         assert!(!COPILOT_ENGINE.contains("GetAsyncKeyState"));
     }
 
