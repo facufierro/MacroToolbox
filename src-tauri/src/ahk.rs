@@ -348,9 +348,9 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
         let binding = |trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str| {
             let modifiers = trigger_modifier_symbols(trigger);
             let base = trigger_to_key(trigger);
-            // Toggle outputs can hold extra modifiers; the shared hook checks exactness
-            // against their owner so the same shortcut can still stop that run.
-            let key = if allow_extra.unwrap_or(modifiers.is_empty()) || behavior::has_toggle(&steps) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
+            // Profile controls and toggle outputs must remain reachable while behaviors
+            // own extra modifiers; the shared hook distinguishes those from physical input.
+            let key = if toggle || allow_extra.unwrap_or(modifiers.is_empty()) || behavior::has_toggle(&steps) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
             let chord = trigger_physical_chord_keys(trigger);
             let prerequisites = trigger_chord_keys(trigger);
             json!({"key":key, "trigger":trigger, "modifiers":modifiers, "chord":chord.join(" "),
@@ -1004,7 +1004,7 @@ ReadBehaviorInput(handle) {
 }
 ; End native behavior input boundary.
 
-DoMousePress(keyName, configuredExe := "", modifierFlags := 0, doubleClick := false, deferred := false) {
+WindowMouseInput(keyName, configuredExe) {
     static buttons := Map("lbutton", "Left", "rbutton", "Right", "mbutton", "Middle",
         "xbutton1", "X1", "xbutton2", "X2")
     keyName := StrLower(keyName)
@@ -1017,16 +1017,56 @@ DoMousePress(keyName, configuredExe := "", modifierFlags := 0, doubleClick := fa
     target := WinExist(configuredExe = "" || configuredExe = "*" ? "A" : "ahk_exe " configuredExe)
     if !target
         throw TargetError("Target window not found for mousepress.")
+    return {target: target, button: buttons[keyName], keyName: keyName}
+}
+
+WindowMousePosition(target) {
     MouseGetPos &screenX, &screenY
     WinGetClientPos &clientX, &clientY,,, target
-    position := "X" (screenX - clientX) " Y" (screenY - clientY)
-    operation := WindowMousePress(position, target, buttons[keyName], keyName, modifierFlags, doubleClick)
+    return "X" (screenX - clientX) " Y" (screenY - clientY)
+}
+
+DoMousePress(keyName, configuredExe := "", modifierFlags := 0, doubleClick := false, deferred := false) {
+    input := WindowMouseInput(keyName, configuredExe)
+    operation := WindowMousePress(WindowMousePosition(input.target), input.target, input.button, input.keyName, modifierFlags, doubleClick)
     if deferred
         return operation
     try {
         while !operation.Advance()
             Sleep 5
     } finally operation.Close()
+}
+
+class WindowMouseHold {
+    __New(keyName, output) {
+        this.input := WindowMouseInput(keyName, output.target)
+        this.flags := output.flags
+        this.due := A_TickCount + 30
+        this.down := false
+    }
+
+    Advance() {
+        if !this.down && A_TickCount >= this.due {
+            ; Publish the down before delivery so failure cleanup can release it.
+            this.down := true
+            this.Send(true)
+        }
+    }
+
+    Up() {
+        if this.down {
+            this.Send(false)
+            this.down := false
+        }
+    }
+
+    Send(down) {
+        previousDelay := A_ControlDelay
+        SetControlDelay -1
+        try WindowClick(WindowMousePosition(this.input.target), this.input.target, this.input.button,
+            down ? "NA Pos D" : "NA Pos U", this.flags)
+        finally SetControlDelay previousDelay
+    }
 }
 
 class WindowMousePress {
@@ -1063,12 +1103,30 @@ class WindowMousePress {
         return false
     }
 
-    Send(down, secondDown := false) {
+    Send(down, secondDown := false, position := "", flags := unset) {
         previousDelay := A_ControlDelay
         SetControlDelay -1
-        try WindowClick(this.position, this.target, this.button, down ? "NA Pos D" : "NA Pos U",
-            this.flags, secondDown, this.doubleClick || this.flags)
+        flags := flags ?? this.flags
+        try WindowClick(position = "" ? this.position : position, this.target, this.button, down ? "NA Pos D" : "NA Pos U",
+            flags, secondDown, this.doubleClick || flags)
         finally SetControlDelay previousDelay
+    }
+
+    ResumeHold(physicalOwner := 0, flags := 0) {
+        global heldOutputCounts
+        if !PhysicalOwnsOutput(this.keyName, physicalOwner) && !heldOutputCounts.Has(this.keyName)
+            return
+        MouseGetPos &x, &y
+        WinGetClientPos &clientX, &clientY,,, this.target
+        position := "X" (x - clientX) " Y" (y - clientY)
+        try {
+            this.Send(true, false, position, flags)
+            if !PhysicalOwnsOutput(this.keyName, physicalOwner) && !heldOutputCounts.Has(this.keyName)
+                this.Send(false, false, position, flags)
+        } catch Error as failure {
+            try this.Send(false, false, position, flags)
+            throw failure
+        }
     }
 
     Close(exitReason := "", *) {
@@ -1091,6 +1149,7 @@ FinishMousePress(position, target, button, keyName, exitReason := "", modifierFl
     global heldOutputCounts
     ; Reasserting a physical hold here starts another press on the clicked UI, so a
     ; later restorecursor drags it. Only an explicit hold behavior owns a remaining down.
+    ; Restore cursor resumes interrupted physical holds at their saved position instead.
     ; Exit cleanup has already released those behavior-owned holds.
     held := exitReason = "" && heldOutputCounts.Has(keyName)
     previousDelay := A_ControlDelay
@@ -1325,8 +1384,12 @@ SendOwnedKeyDown(keyName, preserveHooks, downMode := "Down", blind := "{Blind}")
 
 SendOwnedKeyUp(keyName, preserveHooks, blind := "{Blind}") {
     global syntheticDown
-    SendKeyEvents(blind "{" keyName " Up}", preserveHooks)
-    if syntheticDown.Has(keyName)
+    output := syntheticDown.Get(keyName, 0)
+    if IsObject(output)
+        output.Up()
+    else
+        SendKeyEvents(blind "{" keyName " Up}", preserveHooks)
+    if syntheticDown.Has(keyName) && syntheticDown[keyName] = output
         syntheticDown.Delete(keyName)
 }
 
@@ -1337,8 +1400,12 @@ ReleaseSyntheticHeld(*) {
     ; Never cancel a real held input. Its eventual hardware key-up will clear Windows' logical
     ; state; everything not physically held is state owned solely by this script and must go up.
     for keyName in syntheticDown {
-        if !GetKeyState(keyName, "P")
-            SendEvent("{Blind}{" keyName " Up}")
+        if !GetKeyState(keyName, "P") {
+            if IsObject(syntheticDown[keyName])
+                syntheticDown[keyName].Up()
+            else
+                SendEvent("{Blind}{" keyName " Up}")
+        }
     }
     syntheticDown.Clear()
 }
@@ -1384,7 +1451,7 @@ TriggerChordHeld(chordKeys) {
 ;   - Each physical trigger owns one output reference. Hardware auto-repeat is ignored so a held
 ;     output remains one uninterrupted down rather than repeating while the trigger stays held.
 ; Global key-up handlers release owners independently of profile enabled/focus conditions.
-HoldKeyDown(owner, keyStr, triggerModifiers := "", ordered := true) {
+HoldKeyDown(owner, keyStr, triggerModifiers := "", ordered := true, mouseOutput := 0) {
     global chordHolds
     SetKeyDelay -1, -1
     SetMouseDelay -1
@@ -1394,7 +1461,7 @@ HoldKeyDown(owner, keyStr, triggerModifiers := "", ordered := true) {
     for index, keyName in keys {
         ; Track each acquisition before its send can fail; later keys remain unowned.
         state["keys"] := (state["keys"] = "") ? keyName : state["keys"] " " keyName
-        AcquireHeldOutput(keyName, blind)
+        AcquireHeldOutput(keyName, blind, mouseOutput)
         ; Preserve the configured order as distinct transitions: the first output remains down
         ; before the next one is pressed. Some games miss simultaneous synthetic mouse downs.
         if (ordered && index < keys.Length)
@@ -1414,12 +1481,25 @@ PhysicalOwnsOutput(keyName, physicalOwner := 0) {
     return IsObject(physicalOwner) ? physicalOwner.Call(keyName) : GetKeyState(keyName, "P")
 }
 
-AcquireHeldOutput(keyName, blind) {
-    global heldOutputCounts
+AcquireHeldOutput(keyName, blind, mouseOutput := 0) {
+    global heldOutputCounts, syntheticDown
     count := heldOutputCounts.Has(keyName) ? heldOutputCounts[keyName] : 0
     heldOutputCounts[keyName] := count + 1
-    if (count = 0) && !(RegExMatch(keyName, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") && GetKeyState(keyName))
-        SendOwnedKeyDown(keyName, true, "DownR", blind)
+    if (count = 0) && !(RegExMatch(keyName, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") && GetKeyState(keyName)) {
+        if IsObject(mouseOutput) && RegExMatch(keyName, "i)^(?:[LRM]Button|XButton[12])$")
+            ; The shared output retains its delivery owner until its last holder
+            ; stops, including when another behavior borrowed that mouse button.
+            syntheticDown[keyName] := WindowMouseHold(keyName, mouseOutput)
+        else
+            SendOwnedKeyDown(keyName, true, "DownR", blind)
+    }
+}
+
+AdvanceHeldOutputs(keys) {
+    global syntheticDown
+    for keyName in keys
+        if syntheticDown.Has(keyName) && IsObject(syntheticDown[keyName])
+            syntheticDown[keyName].Advance()
 }
 
 ReleaseHeldOutputsTogether(keys, blind, physicalOwner := 0) {
@@ -1447,21 +1527,35 @@ ReleaseHeldOutputsTogether(keys, blind, physicalOwner := 0) {
     if (releases.Length = 0)
         return
 
-    ; Send every releasable output in one event batch with all inter-event delays disabled.
-    ; Windows still represents individual ups, but no sleep or separate Send call can split them.
-    events := blind
-    for keyName in releases
-        events .= "{" keyName " Up}"
-    SendKeyEvents(events, true)
+    ; Window buttons go up before their modifiers. Native outputs still share one
+    ; event batch, and failure of either delivery path must not abandon the other.
+    events := blind, nativeReleases := [], failure := 0
     for keyName in releases {
-        if syntheticDown.Has(keyName)
-            syntheticDown.Delete(keyName)
+        if IsObject(syntheticDown[keyName]) {
+            try SendOwnedKeyUp(keyName, true, blind)
+            catch Error as caught
+                failure := caught
+        } else {
+            events .= "{" keyName " Up}"
+            nativeReleases.Push(keyName)
+        }
     }
+    if nativeReleases.Length {
+        try {
+            SendKeyEvents(events, true)
+            for keyName in nativeReleases
+                if syntheticDown.Has(keyName) && !IsObject(syntheticDown[keyName])
+                    syntheticDown.Delete(keyName)
+        } catch Error as caught
+            failure := caught
+    }
+    if IsObject(failure)
+        throw failure
 }
 
 ; Track every single-key or multi-input trigger independently. Global key-up handlers call
 ; ReleaseTriggerHolds for every physical member, so releasing any member ends its whole chord.
-HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true, physicalOwner := 0) {
+HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true, physicalOwner := 0, mouseOutput := 0) {
     global chordHolds
     ; Keep a trigger-up buffered until the ordered down sequence is complete. Otherwise a quick
     ; release during its inter-key delay could release the first output before the second is owned.
@@ -1476,7 +1570,7 @@ HoldChordDown(owner, keyStr, chordKeys, triggerModifiers := "", ordered := true,
             "chord", chordKeys,
             "modifiers", triggerModifiers
         )
-        HoldKeyDown(owner, keyStr, triggerModifiers, ordered)
+        HoldKeyDown(owner, keyStr, triggerModifiers, ordered, mouseOutput)
     } catch Error as err {
         HoldChordUp(owner, physicalOwner)
         throw err
@@ -1601,6 +1695,17 @@ mod tests {
             assert_eq!(binding["exact"], true);
             assert_eq!(binding["trigger"], "rctrl o");
         }
+    }
+    #[test]
+    fn profile_controls_reach_the_hook_while_output_modifiers_are_held() {
+        let mut profile = profile("press(x)");
+        profile.toggle_hotkeys_key = Some("lctrl lshift `".into());
+        let profiles = vec![profile];
+        let contexts = [ProfileContext { siblings: &profiles, profile: &profiles[0], exe: "Game.exe" }];
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &[]).unwrap()).unwrap();
+        let control = data[0]["bindings"].as_array().unwrap().iter().find(|binding| binding["toggle"] == true).unwrap();
+        assert_eq!(control["key"], "$*<^<+SC029");
+        assert_eq!(control["trigger"], "lctrl lshift `");
     }
     #[test]
     fn changes_update_data_without_replacing_the_shared_hook_script() {

@@ -63,6 +63,8 @@ if ($Engine -eq 'runtime') {
     $isolatedEngine = [regex]::Replace($isolatedEngine, '\bSendRuntimeAction\b(?=\()', 'TestRuntimeAction')
     # The fixture supplies the operation sink; keep the production error-reporting path.
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^TestRuntimeAction\(profile, kind, id, value := ""\) \{.*?^\}', '')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '\bSendProfilesEnabled\b', 'TestSendProfilesEnabled')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^TestSendProfilesEnabled\(profiles, value\) \{.*?^\}', '')
 }
 if ($Engine -eq 'copilot') {
     foreach ($binding in @('$*LWin::CopilotWinDown()', '$*LWin up::CopilotWinUp()', '$*LShift::CopilotShiftDown()', '~$*LShift::ObserveCopilotShiftDown()', '~$*LShift up::ObserveCopilotShiftUp()')) {

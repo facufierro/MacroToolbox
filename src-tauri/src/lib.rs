@@ -345,6 +345,11 @@ fn get_database(state: State<AppState>) -> Result<Database, String> {
     config::load_db(&state.db_path)
 }
 
+#[tauri::command]
+fn get_disabled_profiles(state: State<AppState>) -> Vec<String> {
+    state.runtime.lock().unwrap().disabled_profiles()
+}
+
 fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) -> Result<(), String> {
     config::validate_variables(&db.variables)?;
     config::normalize_states(db);
@@ -482,18 +487,26 @@ fn set_profile_armed(app: tauri::AppHandle, state: State<AppState>, profile_id: 
         return Err("Profile not found".to_string());
     }
     save_database(&app, &state, &mut db)?;
+    if armed {
+        state.runtime.lock().unwrap().set_enabled(&db, &profile_id, true, runtime::now_ms())?;
+    }
     sync_hotkeys(&state, &db)?;
     if !armed {
         kill_profile_scripts(&state, &profile_id);
 
     }
+    publish_runtime(&app);
     Ok(db)
 }
 
 fn publish_runtime(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let snapshot = state.runtime.lock().unwrap().snapshot();
+    let (snapshot, disabled) = {
+        let runtime = state.runtime.lock().unwrap();
+        (runtime.snapshot(), runtime.disabled_profiles())
+    };
     if let Some(window) = app.get_webview_window("overlay") { let _ = window.emit("overlay-snapshot", snapshot); }
+    if let Some(window) = app.get_webview_window("main") { let _ = window.emit("disabled-profiles", disabled); }
 }
 
 #[tauri::command]
@@ -720,6 +733,14 @@ fn sync_hotkeys(state: &AppState, db: &Database) -> Result<(), String> {
         Err(error) if mgr.is_running() => return Err(error),
         Err(error) => ("[]".to_string(), Some(error)),
     };
+    let mut profiles: Vec<serde_json::Value> = serde_json::from_str(&profiles).map_err(|e| e.to_string())?;
+    {
+        let runtime = state.runtime.lock().unwrap();
+        for profile in &mut profiles {
+            profile["enabled"] = serde_json::json!(profile["armed"] == true && runtime.enabled(profile["id"].as_str().unwrap()));
+        }
+    }
+    let profiles = serde_json::to_string(&profiles).map_err(|e| e.to_string())?;
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     profiles.hash(&mut hash);
@@ -864,10 +885,7 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
     match kind {
         "enabled" => {
             if value != "0" && value != "1" { return Err("Enabled must be 0 or 1.".into()); }
-            let _access = state.db_access.lock().unwrap();
-            let db = config::load_db(&state.db_path)?;
-            state.runtime.lock().unwrap().set_enabled(&db, profile, value == "1", runtime::now_ms())?;
-            if value != "1" { kill_profile_scripts(&state, profile); }
+            return set_runtime_profiles_enabled(app, &[profile.to_string()], value == "1");
         }
         "script" => run_script_for_profile(app, scope, id, if matches!(value, "hotkeys" | "events" | "scripts") { value } else { scope.section() })?,
         "behavior" => {
@@ -878,6 +896,19 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
         "error" => { app.emit("runtime-error", value).map_err(|e| e.to_string())?; }
         _ => state.runtime.lock().unwrap().action(profile, kind, id, value, runtime::now_ms())?,
     }
+    publish_runtime(app);
+    Ok(())
+}
+
+fn set_runtime_profiles_enabled(app: &tauri::AppHandle, profiles: &[String], enabled: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _access = state.db_access.lock().unwrap();
+    let db = config::load_db(&state.db_path)?;
+    state.runtime.lock().unwrap().set_profiles_enabled(&db, profiles, enabled, runtime::now_ms())?;
+    if !enabled {
+        for profile in profiles { kill_profile_scripts(&state, profile); }
+    }
+    sync_hotkeys(&state, &db)?;
     publish_runtime(app);
     Ok(())
 }
@@ -920,6 +951,14 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                             },
                             Err(error) => ("400 Bad Request", error.to_string().into_bytes()),
                         }
+                    } else if route == "/profiles-enabled" {
+                        let profiles: Vec<_> = action.split_once('?').map(|(_, query)| query.split('&').filter_map(|pair| pair.split_once('='))
+                            .filter(|(name, _)| *name == "profile").map(|(_, value)| decode_query_value(value)).collect()).unwrap_or_default();
+                        let result = match get_query_param(action, "value").as_deref() {
+                            Some(value @ ("0" | "1")) if !profiles.is_empty() => set_runtime_profiles_enabled(&handle, &profiles, value == "1"),
+                            _ => Err("Profiles and enabled value are required.".into()),
+                        };
+                        match result { Ok(()) => ("200 OK", Vec::new()), Err(error) => ("422 Unprocessable Entity", error.into_bytes()) }
                     } else if route == "/activated" {
                         handle.state::<AppState>().hotkeys_ahk.lock().unwrap().activate_revision(get_query_param(action, "revision").unwrap_or_default());
                         ("200 OK", Vec::new())
@@ -2039,6 +2078,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            get_disabled_profiles,
             debug_overlay_log,
             get_overlay_config,
             get_overlay_snapshot,

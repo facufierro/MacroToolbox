@@ -448,23 +448,24 @@ function useLibraryWidth(savedWidth?: number | null) {
   return { w, onPointerDown };
 }
 
-function ProfileRow({ profile, folderExe, openExes, selected, onSelect, onToggleArmed, onContext }: {
-  profile: Profile; folderExe: string; openExes: Set<string>; selected: boolean;
+function ProfileRow({ profile, enabled, folderExe, openExes, selected, onSelect, onToggleArmed, onContext }: {
+  profile: Profile; enabled: boolean; folderExe: string; openExes: Set<string>; selected: boolean;
   onSelect: () => void; onToggleArmed: (a: boolean) => void; onContext: (e: ReactMouseEvent) => void;
 }) {
   return (
     <button
-      className={`profile-row ${selected ? "profile-row--active" : ""} ${profile.armed ? "profile-row--armed" : ""}`}
+      className={`profile-row ${selected ? "profile-row--active" : ""} ${enabled ? "profile-row--armed" : ""}`}
       onClick={onSelect} onContextMenu={onContext} title={profile.name}>
-      <StatusDot armed={profile.armed} active={profileAppActive(folderExe, openExes)} />
+      <StatusDot armed={enabled} active={profileAppActive(folderExe, openExes)} />
       <span className="profile-row__name">{profile.name || "Untitled"}</span>
-      <ArmSwitch armed={profile.armed} onChange={onToggleArmed} />
+      <ArmSwitch armed={enabled} onChange={onToggleArmed} />
     </button>
   );
 }
 
-function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfiles, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
+function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfileId, visibleProfiles, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   folder: Scope; openExes: Set<string>; open: boolean; selectedProfileId?: string;
+  disabledProfiles: ReadonlySet<string>;
   visibleProfiles: Profile[];
   onToggle: () => void; onSelectProfile: (id: string) => void; onToggleArmed: (pid: string, a: boolean) => void;
   onProfileContext: (e: ReactMouseEvent, folderId: string, profile: Profile) => void;
@@ -488,7 +489,7 @@ function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfile
             onDb(await api.upsertGame({ ...folder, profiles: moveItem(folder.profiles, profile => profile.id, from, to, after) }));
           }}>
           {p => (
-            <ProfileRow profile={p} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
+            <ProfileRow profile={p} enabled={p.armed && !disabledProfiles.has(p.id)} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
               onSelect={() => onSelectProfile(p.id)} onToggleArmed={a => onToggleArmed(p.id, a)}
               onContext={e => onProfileContext(e, folder.id, p)} />
           )}
@@ -498,8 +499,9 @@ function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfile
   );
 }
 
-function Library({ db, openExes, selection, query, collapsed, width, onQuery, onToggleCollapse, onSelect, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
+function Library({ db, disabledProfiles, openExes, selection, query, collapsed, width, onQuery, onToggleCollapse, onSelect, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   db: Database; openExes: Set<string>; selection: Selection;
+  disabledProfiles: ReadonlySet<string>;
   query: string; collapsed: Set<string>; width: number;
   onQuery: (s: string) => void; onToggleCollapse: (id: string) => void;
   onSelect: (s: Selection) => void; onToggleArmed: (pid: string, armed: boolean) => void;
@@ -528,7 +530,7 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
           onDb(await api.reorderFolders(moveItem(db.scopes, folder => folder.id, from, to, after).map(folder => folder.id)));
         }} empty={<div className="library__empty">{db.scopes.length === 0 ? "No folders yet" : "No matches"}</div>}>
         {({ f, visible }) => (
-          <FolderGroup folder={f} openExes={openExes}
+          <FolderGroup folder={f} disabledProfiles={disabledProfiles} openExes={openExes}
             open={!collapsed.has(f.id) || filtering} selectedProfileId={selectedProfileId} visibleProfiles={visible}
             onToggle={() => onToggleCollapse(f.id)}
             onSelectProfile={pid => onSelect({ kind: "profile", folderId: f.id, profileId: pid })}
@@ -1356,9 +1358,10 @@ function ScriptModal({ initial, onSave, onClose }: {
 
 // ── Game detail view ──────────────────────────────────────────────────────────
 
-function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb, onModal }: {
+function ProfileEditor({ folder, profile, enabled = profile.armed, variables, showStates, onContext, onDb, onModal }: {
   folder: Scope;
   profile: Profile;
+  enabled?: boolean;
   variables: Variable[];
   showStates: boolean;
   onContext: (e: ReactMouseEvent) => void;
@@ -1443,7 +1446,7 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
           </div>
           <div style={{ flex: 1 }} />
           <IconButton icon="gear" label="Profile settings" className="btn btn--ghost btn--sm" onClick={() => onModal({ type: "profileSettings", gameId: folder.id, profile, isNew: false })} />
-          <ArmSwitch armed={profile.armed} size="lg" onChange={setArmed} />
+          <ArmSwitch armed={enabled} size="lg" onChange={setArmed} />
         </div>
       </div>
 
@@ -1688,6 +1691,7 @@ function semverGt(a: string, b: string): boolean {
 export default function App() {
   const reportError = useErrorReporter();
   const [db, setDb] = useState<Database | null>(null);
+  const [disabledProfiles, setDisabledProfiles] = useState<ReadonlySet<string>>(new Set());
   const [loadFailed, setLoadFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>({ kind: "empty" });
   const [query, setQuery] = useState("");
@@ -1723,6 +1727,18 @@ export default function App() {
       throw error;
     }
   }, []);
+
+  useEffect(() => {
+    let disposed = false, receivedUpdate = false;
+    const subscription = listen<string[]>("disabled-profiles", event => {
+      receivedUpdate = true;
+      if (!disposed) setDisabledProfiles(new Set(event.payload));
+    });
+    void subscription.then(() => api.getDisabledProfiles()).then(profiles => {
+      if (!disposed && !receivedUpdate) setDisabledProfiles(new Set(profiles));
+    }).catch(reportError);
+    return () => { disposed = true; void subscription.then(unlisten => unlisten()); };
+  }, [reportError]);
 
   useEffect(() => {
     const subscription = listen("firebase-restored", () => {
@@ -2080,7 +2096,7 @@ export default function App() {
         </div>
       )}
       <div className="layout__body">
-        <Library db={db} openExes={openExes} selection={selection}
+        <Library db={db} disabledProfiles={disabledProfiles} openExes={openExes} selection={selection}
           query={query} collapsed={collapsed} width={libW}
           onQuery={setQuery} onToggleCollapse={toggleCollapse}
           onSelect={selectProfile} onToggleArmed={toggleArmed} onProfileContext={onProfileContext} onFolderContext={onFolderContext} onDb={handleDb} onModal={setModal} />
@@ -2093,7 +2109,7 @@ export default function App() {
             <div className="detail__scroll"><VariablesView db={db} onDb={handleDb} /></div>
           )}
           {selProfile && selFolder && (
-            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile}
+            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile} enabled={selProfile.armed && !disabledProfiles.has(selProfile.id)}
               showStates={statesFor === selProfile.id}
               onContext={e => onProfileContext(e, selFolder.id, selProfile)}
               onDb={handleDb} onModal={setModal} />

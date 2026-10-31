@@ -153,11 +153,23 @@ impl Runtime {
 
     pub fn enabled(&self, profile: &str) -> bool { !self.disabled.contains(profile) }
 
+    pub fn disabled_profiles(&self) -> Vec<String> {
+        let mut profiles: Vec<_> = self.disabled.iter().cloned().collect();
+        profiles.sort();
+        profiles
+    }
+
     pub fn set_enabled(&mut self, db: &Database, profile: &str, enabled: bool, now: u64) -> Result<(), String> {
-        if !db.games.iter().any(|game| game.profiles.iter().any(|p| p.id == profile && p.armed)) {
+        self.set_profiles_enabled(db, &[profile.to_string()], enabled, now)
+    }
+
+    pub fn set_profiles_enabled(&mut self, db: &Database, profiles: &[String], enabled: bool, now: u64) -> Result<(), String> {
+        if profiles.iter().any(|id| !db.games.iter().any(|game| game.profiles.iter().any(|p| &p.id == id && p.armed))) {
             return Err("Profile is not enabled in the configuration.".into());
         }
-        if enabled { self.disabled.remove(profile); } else { self.disabled.insert(profile.into()); }
+        for profile in profiles {
+            if enabled { self.disabled.remove(profile); } else { self.disabled.insert(profile.clone()); }
+        }
         self.reconcile(db, now);
         Ok(())
     }
@@ -305,6 +317,32 @@ mod tests {
                 {"type":"timer","id":"timer","x":0,"y":0,"duration_ms":500,"timer_state_id":"buff"},
                 {"type":"bar","id":"health","x":0,"y":0,"w":100,"h":10,"color":"#fff","max_value":100}
             ]}]}],"settings":{"ahk_exe":"","python_exe":""}})).unwrap()
+    }
+    #[test]
+    fn shared_profile_status_is_atomic_and_cancels_queued_work() {
+        let db = database();
+        let mut runtime = Runtime::default();
+        runtime.reconcile(&db, 0);
+        runtime.enqueue(&db, &ExecutionScope { profile: "keys".into(), ..Default::default() }, "press(x)").unwrap();
+        let profiles = vec!["keys".to_string(), "overlay".to_string()];
+        runtime.set_profiles_enabled(&db, &profiles, false, 1).unwrap();
+        assert_eq!(runtime.disabled_profiles(), profiles);
+        assert!(runtime.take_commands().is_empty());
+        assert!(runtime.profile_snapshot("overlay").is_none());
+        runtime.reconcile(&db, 2);
+        assert_eq!(runtime.disabled_profiles(), profiles);
+        runtime.set_profiles_enabled(&db, &profiles, true, 3).unwrap();
+        assert!(runtime.disabled_profiles().is_empty());
+        assert!(runtime.profile_snapshot("overlay").unwrap().config.items.len() > 0);
+    }
+    #[test]
+    fn invalid_shared_profile_status_does_not_apply_a_partial_change() {
+        let db = database();
+        let mut runtime = Runtime::default();
+        runtime.reconcile(&db, 0);
+        assert!(runtime.set_profiles_enabled(&db, &["keys".into(), "missing".into()], false, 1).is_err());
+        assert!(runtime.disabled_profiles().is_empty());
+        assert!(runtime.enabled("keys"));
     }
     #[test]
     fn script_behavior_requests_resolve_shared_variables_without_changing_the_source() {

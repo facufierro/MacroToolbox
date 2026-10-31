@@ -96,7 +96,11 @@ class BindingHost {
             previous[old["id"]] := old
         for profile in profiles {
             id := profile["id"]
-            if !previous.Has(id) || previous[id]["armed"] != profile["armed"]
+            if profile.Has("enabled") {
+                enabled[id] := profile["armed"] && profile["enabled"]
+                if !enabled[id]
+                    behaviorRuntime.CancelProfile(id)
+            } else if !previous.Has(id) || previous[id]["armed"] != profile["armed"]
                 enabled[id] := profile["armed"]
         }
         this.profiles := profiles
@@ -127,8 +131,9 @@ class BindingHost {
         return profile["armed"] && (binding["toggle"] || enabled.Get(profile["id"], false))
             && (profile["target"] = "*" || WinActive("ahk_exe " profile["target"]))
             && (binding["prerequisites"] = "" || TriggerChordHeld(binding["prerequisites"]))
-            && (!binding["exact"] || TriggerModifiersAllowed(binding["trigger"], false,
-                binding["toggle"] ? "" : behaviorRuntime.ToggleModifiers(profile["id"] ":" binding["trigger"])))
+            && (binding["toggle"] ? TriggerModifiersAllowed(binding["trigger"], true, behaviorRuntime.OwnedModifiers())
+                : !binding["exact"] || TriggerModifiersAllowed(binding["trigger"], false,
+                    behaviorRuntime.ToggleModifiers(profile["id"] ":" binding["trigger"])))
     }
 
     Find(key) {
@@ -144,25 +149,44 @@ class BindingHost {
             if !IsObject(first)
                 first := binding
         }
+        ; A non-wildcard behavior can win AHK's native dispatch over a wildcard
+        ; profile control. Resolve that collision before executing either action.
+        if IsObject(first)
+            for otherKey, bindings in this.bindings
+                for binding in bindings
+                    if binding["toggle"] && binding["chord"] = first["chord"] && this.Matches(binding)
+                        return binding
         return first
     }
 
     ToggleProfiles(selected) {
-        global enabled
+        global enabled, behaviorRuntime
         profiles := Map(selected["profile"]["id"], true)
         ; Equivalent shortcuts can have different native names (modifier order or
         ; generic/sided Ctrl). Match the held shortcut, not just its native key string.
         for key, bindings in this.bindings
             for binding in bindings
                 if binding["toggle"] && binding["chord"] = selected["chord"] && this.Matches(binding)
-                    && TriggerModifiersAllowed(binding["trigger"], true)
                     profiles[binding["profile"]["id"]] := true
         value := true
         for id in profiles
             if enabled.Get(id, false)
                 value := false
-        for id in profiles
-            SetProfileEnabled(id, value)
+        ; Stopping input cannot depend on a successful HTTP round trip. Disable
+        ; the entire group before publishing the change, including active holds.
+        if !value {
+            for id in profiles
+                enabled[id] := false
+            for id in profiles
+                behaviorRuntime.CancelProfile(id)
+        }
+        try {
+            SendProfilesEnabled(profiles, value)
+            if value
+                for id in profiles
+                    enabled[id] := true
+        } catch Error as failure
+            ReportBehaviorError("", failure.Message)
     }
 
     Allowed(key, *) {
@@ -306,10 +330,9 @@ class BindingHost {
     }
 }
 
-SetProfileEnabled(id, value) {
-    global enabled, behaviorRuntime
-    SendRuntimeAction(id, "enabled", "", value ? "1" : "0")
-    enabled[id] := value
-    if !value
-        behaviorRuntime.CancelProfile(id)
+SendProfilesEnabled(profiles, value) {
+    command := "profiles-enabled?value=" (value ? "1" : "0")
+    for id in profiles
+        command .= "&profile=" UriEncode(id)
+    SendOverlayCommand(command)
 }

@@ -6,6 +6,7 @@ global inputErrorUnwound := false, inputErrorContinued := false
 global literalPackets := [], literalBuffer := 0, literalFailure := false, literalDeliveryResults := [], literalDeliveryCalls := []
 global suspendDuringText := false
 global literalOnPacket := 0
+global testOnProfilesEnabled := 0
 RunRuntimeTest("parallel branches make progress while a sibling holds", TestParallelHold)
 RunRuntimeTest("sequences wait for their previous action", TestStructuredSequence)
 RunRuntimeTest("focus loss cancels delays and releases owned keys", TestRuntimeFocusLoss)
@@ -38,6 +39,18 @@ RunRuntimeTest("native chords preserve independently held modifiers", TestRuntim
 RunRuntimeTest("early trigger release skips later holds without skipping presses", TestRuntimeEarlyRelease)
 RunRuntimeTest("repeated key combinations press every member", TestRuntimeRepeatChord)
 RunRuntimeTest("cursor actions keep their target independently of overlays", TestRuntimeViewport)
+RunRuntimeTest("Restore cursor resumes held mouse buttons after returning from a single click", TestCursorHeldButtons.Bind(false))
+RunRuntimeTest("Restore cursor resumes held mouse buttons after returning from a double click", TestCursorHeldButtons.Bind(true))
+RunRuntimeTest("implicit and explicit cursor saves retain their position and held buttons", TestCursorSavedState)
+RunRuntimeTest("Lock cursor captures buttons pressed after the behavior started", TestCursorLockSnapshot)
+RunRuntimeTest("Restore cursor respects releases and buttons first pressed after locking", TestCursorChangedButtons)
+RunRuntimeTest("Restore cursor does not replay a consumed mouse trigger", TestCursorConsumedButton)
+RunRuntimeTest("Restore cursor leaves uninterrupted physical holds alone", TestCursorUntouchedButton)
+RunRuntimeTest("Restore cursor preserves another behavior's held button without dragging the clicked UI", TestCursorSharedHold)
+RunRuntimeTest("cancellation unlocks the cursor without resuming an interrupted hold", TestCursorCancellation)
+RunRuntimeTest("a button released during cursor restoration stays released", TestCursorResumeCleanup.Bind(false))
+RunRuntimeTest("failed cursor restoration releases its window input and unlocks", TestCursorResumeCleanup.Bind(true))
+RunRuntimeTest("native cursor restoration resumes the hold at the original client position", TestNativeCursorRestore)
 RunRuntimeTest("live configuration preserves unrelated running behaviors", TestLiveConfiguration)
 RunRuntimeTest("disabling one section preserves the other sections", TestSectionCancellation)
 RunRuntimeTest("script work retains its calling section and defining owner", TestScriptSectionOwnership)
@@ -106,7 +119,22 @@ RunRuntimeTest("toggle actions without a hotkey reject the whole tree before its
 RunRuntimeTest("a failed toggle releases its output and permits a fresh activation", TestToggleFailure)
 RunRuntimeTest("exact toggle shortcuts ignore their own held modifiers while stopping", TestToggleOwnedModifiers.Bind(false))
 RunRuntimeTest("exact toggle shortcuts distinguish physical and Copilot modifiers from their own output", TestToggleOwnedModifiers.Bind(true))
-FileAppend("All 101 structured runtime tests passed.`n", "*")
+RunRuntimeTest("mouse toggles hold every button and modified combination until the next press", TestMouseToggleButtons)
+RunRuntimeTest("mouse toggles share the first output owner until its last reference stops", TestMouseToggleShared)
+RunRuntimeTest("stopping mouse toggles preserves an independently held physical button", TestMouseTogglePhysical)
+RunRuntimeTest("mouse toggle cancellation releases the button and modifiers", TestMouseToggleCancellation.Bind(false))
+RunRuntimeTest("cancelling a pending mouse toggle sends no click", TestMouseToggleCancellation.Bind(true))
+RunRuntimeTest("failed mouse toggle downs release the button and modifiers", TestMouseToggleFailure.Bind(false))
+RunRuntimeTest("failed mouse toggle ups retry release without abandoning modifiers", TestMouseToggleFailure.Bind(true))
+RunRuntimeTest("mousepress preserves a toggled window button", TestMouseToggleClick)
+RunRuntimeTest("native mouse toggles hold once and release at the current cursor position", TestNativeMouseToggle)
+RunRuntimeTest("the shared profile shortcut stops active mouse toggles and rejects later hotkeys", TestProfileToggleStopsMouse)
+RunRuntimeTest("shared profile disable stops input before a failed synchronization and permits retry", TestProfileToggleSyncFailure)
+RunRuntimeTest("runtime profile status survives reloads and resumes from the switch", TestProfileEnabledReload)
+RunRuntimeTest("profile controls ignore macro-owned extra modifiers while preserving physical exactness", TestProfileToggleHeldModifiers)
+RunRuntimeTest("profile controls take priority across native wildcard and exact key variants", TestProfileToggleNativePriority)
+RunRuntimeTest("retriggering during window button release preserves the new output owner", TestMouseToggleRetrigger)
+FileAppend("All 128 structured runtime tests passed.`n", "*")
 ExitApp 0
 
 TestToggleOwnedModifiers(sided) {
@@ -213,7 +241,8 @@ TestToggleNested() {
     StartBehaviorRun("nested-toggle", steps, "", "*", "", "q")
     Assert(!testInputCallbacks.Count && !behaviorRuntime.runs.Count, "stopping toggle left a sibling wait running")
     Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "stopping toggle left the cursor locked")
-    AssertKeys(["{blind}{w downr}", "{blind}{lbutton downr}", "{blind}{lbutton up}{w up}"])
+    AssertKeys(["{blind}{w downr}", "{blind}{w up}"])
+    Assert(!testClicks.Length, "stopping a pending nested toggle delivered a click")
     ReleaseToggleKey()
 }
 
@@ -316,6 +345,293 @@ TestToggleFailure() {
     Assert(behaviorRuntime.runs.Count = 1, "a failed toggle prevented a fresh activation")
     ReleaseToggleKey()
     behaviorRuntime.Cancel("failed-toggle")
+}
+
+AwaitMouseToggle() {
+    deadline := A_TickCount + 2000
+    while !nativePosts.Length && !testClicks.Length {
+        Assert(A_TickCount < deadline, "mouse toggle did not deliver its held button")
+        Sleep 5
+    }
+}
+
+TestMouseToggleButtons() {
+    global testHeldKeys, testEvents, nativePosts
+    for mouseKey, downMessage in Map("LButton", 0x201, "RButton", 0x204, "MButton", 0x207,
+        "XButton1", 0x20B, "XButton2", 0x20B, "m1", 0x201, "m2", 0x204) {
+        testHeldKeys := Map("q", true), testEvents := [], nativePosts := []
+        steps := [Action("toggle", "key", "lctrl rshift " mouseKey)]
+        StartBehaviorRun("mouse-toggle", steps, "", "Game.exe", "", "q")
+        Assert(!nativePosts.Length, "mouse toggle did not let its modifiers settle")
+        ReleaseToggleKey()
+        AwaitMouseToggle()
+        Sleep 40
+        Assert(nativePosts.Length = 1 && nativePosts[1].message = downMessage, "mouse toggle clicked instead of holding, or repeated its down")
+        Assert((nativePosts[1].buttons & 12) = 12, "mouse toggle omitted Ctrl or Shift")
+        AssertKeys(["{blind}{lctrl downr}", "{blind}{rshift downr}"])
+        testHeldKeys["q"] := true
+        StartBehaviorRun("mouse-toggle", steps, "", "Game.exe", "", "q")
+        Assert(nativePosts.Length = 2 && nativePosts[2].message = downMessage + 1, "second toggle press did not release the button")
+        AssertKeys(["{blind}{lctrl downr}", "{blind}{rshift downr}", "{blind}{rshift up}{lctrl up}"])
+        Assert(!behaviorRuntime.runs.Count && !syntheticDown.Count && !heldOutputCounts.Count, "mouse toggle left owned input")
+        ReleaseToggleKey()
+    }
+}
+
+TestMouseToggleShared() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true, "w", true)
+    steps := [Action("toggle", "key", "rctrl LButton")]
+    StartBehaviorRun("first-mouse", steps, "", "Game.exe", "", "q")
+    StartBehaviorRun("second-mouse", steps, "", "Game.exe", "", "w")
+    AwaitMouseToggle()
+    Assert(nativePosts.Length = 1 && heldOutputCounts["lbutton"] = 2, "shared toggle pressed the button twice")
+    behaviorRuntime.Cancel("first-mouse")
+    Assert(nativePosts.Length = 1 && heldOutputCounts["lbutton"] = 1, "stopping one toggle released its shared button")
+    behaviorRuntime.Cancel("second-mouse")
+    Assert(nativePosts.Length = 2 && nativePosts[2].message = 0x202, "last toggle did not release its shared button")
+    AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+    ReleaseToggleKey(), ReleaseToggleKey("w")
+}
+
+TestMouseTogglePhysical() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("physical-mouse", [Action("toggle", "key", "LButton")], "", "Game.exe", "", "q")
+    AwaitMouseToggle()
+    testHeldKeys["lbutton"] := true
+    behaviorRuntime.Cancel("physical-mouse")
+    AssertClickOptions(["NA Pos D"])
+    Assert(!syntheticDown.Count && !heldOutputCounts.Count && testHeldKeys["lbutton"], "stopping toggle released an independent physical hold")
+    ReleaseToggleKey()
+}
+
+TestMouseToggleCancellation(pending) {
+    global testHeldKeys, nativePosts, testEvents, enabled, testFocusActive
+    for reason in ["focus", "disable", "edit", "section", "exit"] {
+        testHeldKeys := Map("q", true), nativePosts := [], testEvents := [], testFocusActive := true, enabled["profile"] := true
+        StartBehaviorRun("cancel-mouse", [Action("toggle", "key", "rctrl LButton")], "", "Game.exe", "profile", "q", false, "hotkeys")
+        if !pending
+            AwaitMouseToggle()
+        switch reason {
+            case "focus": testFocusActive := false
+            case "disable": enabled["profile"] := false
+            case "edit": behaviorRuntime.CancelProfile("profile")
+            case "section": behaviorRuntime.CancelSection("profile", "hotkeys")
+            case "exit": behaviorRuntime.Stop()
+        }
+        AwaitRuns()
+        Sleep 40
+        if pending
+            Assert(!nativePosts.Length, "cancelled pending mouse toggle clicked later")
+        else
+            Assert(nativePosts.Length = 2 && nativePosts[2].message = 0x202, "cancelled mouse toggle left its button down")
+        AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+        Assert(!syntheticDown.Count && !heldOutputCounts.Count, "cancelled mouse toggle left owned input")
+        ReleaseToggleKey()
+    }
+    testFocusActive := true
+}
+
+TestMouseToggleFailure(onRelease) {
+    global testHeldKeys, testOnPost
+    testHeldKeys := Map("q", true)
+    testOnPost := FailToggleMouseMessage.Bind(onRelease)
+    StartBehaviorRun("failed-mouse-toggle", [Action("toggle", "key", "rctrl LButton")], "", "Game.exe", "", "q")
+    if onRelease {
+        AwaitMouseToggle()
+        behaviorRuntime.Cancel("failed-mouse-toggle")
+    }
+    AwaitRuns()
+    Assert(nativePosts.Length = (onRelease ? 3 : 2) && nativePosts[nativePosts.Length].message = 0x202, "failed mouse toggle did not release or retry its button")
+    AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "mouse toggle delivery error was hidden")
+    Assert(!syntheticDown.Count && !heldOutputCounts.Count, "failed mouse toggle left owned input")
+    ReleaseToggleKey()
+}
+
+FailToggleMouseMessage(onRelease, message) {
+    if nativePosts.Length = (onRelease ? 2 : 1)
+        throw Error("simulated mouse toggle delivery failure")
+}
+
+TestMouseToggleClick() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("toggled-button", [Action("toggle", "key", "LButton")], "", "Game.exe", "", "q")
+    AwaitMouseToggle()
+    StartBehaviorRun("click-toggled-button", [Action("mousepress", "key", "LButton")], "", "Game.exe")
+    deadline := A_TickCount + 2000
+    while behaviorRuntime.runs.Has("click-toggled-button") {
+        Assert(A_TickCount < deadline, "click did not finish alongside a mouse toggle")
+        Sleep 5
+    }
+    AssertClickOptions(["NA Pos D", "NA Pos U", "NA Pos D", "NA Pos U", "NA Pos D"])
+    Assert(heldOutputCounts["lbutton"] = 1, "click released the toggle's ownership")
+    behaviorRuntime.Cancel("toggled-button")
+    Assert(testClicks.Length = 6 && testClicks[6].options = "NA Pos U", "stopping toggle did not release the resumed hold")
+    ReleaseToggleKey()
+}
+
+TestNativeMouseToggle() {
+    global testWindowId, testNativeTarget, testNativeMessages, testHeldKeys, testCursor
+    window := Gui("+ToolWindow -Caption")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd
+        testNativeMessages := [], testHeldKeys := Map("q", true)
+        OnMessage 0x201, RecordNativeClick
+        OnMessage 0x202, RecordNativeClick
+        steps := [Action("toggle", "key", "lctrl LButton")]
+        StartBehaviorRun("native-mouse-toggle", steps, "", "Test.exe", "", "q")
+        ReleaseToggleKey()
+        AwaitMouseToggle()
+        Sleep 60
+        Assert(testNativeMessages.Length = 1 && testNativeMessages[1].message = 0x201 && (testNativeMessages[1].buttons & 8), "native toggle did not deliver one Ctrl+button down")
+        testCursor := {x: 480, y: 320}, testHeldKeys["q"] := true
+        StartBehaviorRun("native-mouse-toggle", steps, "", "Test.exe", "", "q")
+        Sleep 20
+        Assert(testNativeMessages.Length = 2 && testNativeMessages[2].message = 0x202, "native toggle did not release its button")
+        Assert(testNativeMessages[2].position = (380 | (270 << 16)), "native button release used a stale cursor position")
+        AssertKeys(["{blind}{lctrl downr}", "{blind}{lctrl up}"])
+        ReleaseToggleKey()
+    } finally {
+        behaviorRuntime.Stop()
+        OnMessage 0x201, RecordNativeClick, 0
+        OnMessage 0x202, RecordNativeClick, 0
+        testNativeTarget := 0
+        window.Destroy()
+    }
+}
+
+TestProfileToggleStopsMouse() {
+    global enabled, behaviorRuntime, testHeldKeys
+    profile := ToggleTestProfile("professions")
+    binding := Map("key", "$*SC032", "trigger", "m", "modifiers", "", "chord", "SC032",
+        "prerequisites", "", "specificity", 0, "exact", false, "toggle", false, "section", "hotkeys",
+        "steps", [Action("toggle", "key", "lctrl LButton")])
+    profile["bindings"].Push(binding)
+    host := BindingHost()
+    host.Apply([profile, ToggleTestProfile("main")])
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    testHeldKeys := Map("SC032", true)
+    DispatchTestHotkey("$*SC032")
+    testHeldKeys["SC032"] := false
+    DispatchTestHotkey("$*SC032 up")
+    AwaitMouseToggle()
+    testHeldKeys["LCtrl"] := true, testHeldKeys["LShift"] := true
+    PressProfileToggle(host)
+    Assert(!enabled["professions"] && !enabled["main"], "shared shortcut did not disable its profiles")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count, "shared shortcut did not stop the mouse toggle")
+    testHeldKeys["SC032"] := true
+    Assert(!IsObject(DispatchTestHotkey("$*SC032")), "disabled profile still started a mouse toggle")
+    Assert(nativePosts.Length = 2 && nativePosts[2].message = 0x202, "disabling profile left a mouse button held")
+}
+
+TestProfileToggleSyncFailure() {
+    global testHeldKeys, testOnProfilesEnabled, enabled, testEvents
+    host := BindingHost()
+    host.Apply([ToggleTestProfile("main"), ToggleTestProfile("buffs"), ToggleTestProfile("spells")])
+    testHeldKeys := Map("LCtrl", true, "LShift", true, "q", true)
+    StartBehaviorRun("main:hold", [Action("hold", "key", "x")], "", "*", "main", "q")
+    StartBehaviorRun("buffs:hold", [Action("hold", "key", "y")], "", "*", "buffs", "q")
+    testOnProfilesEnabled := FailStoppedProfileSync
+    PressProfileToggle(host)
+    Assert(!enabled["main"] && !enabled["buffs"] && !enabled["spells"], "failed synchronization left profiles enabled")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count && !testInputSuspended, "failed synchronization left held input or suspended the input host")
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "failed synchronization was hidden")
+    testOnProfilesEnabled := 0
+    PressProfileToggle(host)
+    Assert(enabled["main"] && enabled["buffs"] && enabled["spells"], "profile shortcut could not recover after a failed synchronization")
+}
+
+FailStoppedProfileSync(profiles, value) {
+    Assert(!value && profiles.Count = 3, "profile disable was not published as one group")
+    for id in profiles
+        Assert(!enabled[id], "a profile was still enabled when synchronization began")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count, "synchronization began before held inputs stopped")
+    throw Error("simulated profile synchronization failure")
+}
+
+TestProfileEnabledReload() {
+    global enabled, testHeldKeys
+    profile := ToggleTestProfile("main")
+    profile["enabled"] := false
+    host := BindingHost()
+    host.Apply([profile])
+    Assert(!enabled["main"], "runtime-disabled profile became active on reload")
+    updated := ToggleTestProfile("main")
+    updated["enabled"] := false, updated["revision"] := "edited"
+    host.Apply([updated])
+    Assert(!enabled["main"], "editing a runtime-disabled profile enabled it")
+    updated := ToggleTestProfile("main")
+    updated["enabled"] := true
+    host.Apply([updated])
+    Assert(enabled["main"], "switch enable did not resume the profile")
+    testHeldKeys["q"] := true
+    StartBehaviorRun("main:hold", [Action("hold", "key", "x")], "", "*", "main", "q")
+    updated := ToggleTestProfile("main")
+    updated["enabled"] := false
+    host.Apply([updated])
+    Assert(!enabled["main"] && !behaviorRuntime.runs.Count && !heldOutputCounts.Count, "runtime reload did not stop the disabled profile's held input")
+}
+
+TestProfileToggleHeldModifiers() {
+    global enabled, testHeldKeys, testLogicalKeys, testOnSend
+    host := BindingHost()
+    host.Apply([ToggleTestProfile("main",, "$*<^<+SC029"), ToggleTestProfile("buffs",, "$*<^<+SC029")])
+    testHeldKeys := Map("LCtrl", true, "LShift", true, "q", true)
+    testOnSend := ObserveToggleModifiers
+    StartBehaviorRun("main:toggle", [Action("toggle", "key", "ralt w")], "", "*", "main", "q")
+    Assert(!TriggerModifiersAllowed("lctrl lshift " Chr(96), true), "fixture did not establish an extra output modifier")
+    testHeldKeys["RAlt"] := true
+    Assert(!IsObject(host.Find("$*<^<+SC029")), "profile control ignored an independently held physical modifier")
+    testHeldKeys["RAlt"] := false
+    testHeldKeys["LShift"] := false
+    Assert(!IsObject(host.Find("$*<^<+SC029")), "profile control accepted a missing required modifier")
+    testHeldKeys["LShift"] := true
+    PressProfileToggle(host, "$*<^<+SC029")
+    Assert(!enabled["main"] && !enabled["buffs"] && !behaviorRuntime.runs.Count, "held output modifiers blocked shared profile disable")
+    Assert(!syntheticDown.Count && !heldOutputCounts.Count, "profile control left its toggle held")
+}
+
+TestProfileToggleNativePriority() {
+    global testHeldKeys, enabled
+    profile := ToggleTestProfile("main",, "$*<^<+SC029")
+    stretch := profile["bindings"][1].Clone()
+    stretch["key"] := "$<^<+SC029", stretch["toggle"] := false
+    stretch["steps"] := [Action("send", "text", "must not run")]
+    profile["bindings"].InsertAt(1, stretch)
+    host := BindingHost()
+    host.Apply([profile])
+    testHeldKeys := Map("LCtrl", true, "LShift", true)
+    PressProfileToggle(host)
+    Assert(!enabled["main"] && !testEvents.Length, "native exact-key behavior intercepted the wildcard profile control")
+    PressProfileToggle(host, "$*<^<+SC029")
+    Assert(enabled["main"], "wildcard profile control could not re-enable the profile")
+}
+
+TestMouseToggleRetrigger() {
+    global testHeldKeys, testOnClick
+    testHeldKeys := Map("q", true, "w", true)
+    StartBehaviorRun("old-mouse", [Action("toggle", "key", "LButton")], "", "Game.exe", "", "q")
+    AwaitMouseToggle()
+    testOnClick := ReplaceMouseToggleOnRelease
+    behaviorRuntime.Cancel("old-mouse")
+    Sleep 60
+    AssertClickOptions(["NA Pos D", "NA Pos U", "NA Pos D"])
+    Assert(heldOutputCounts["lbutton"] = 1 && syntheticDown.Has("lbutton"), "old button release deleted its replacement's output owner")
+    behaviorRuntime.Cancel("replacement-mouse")
+    Assert(testClicks.Length = 4 && testClicks[4].options = "NA Pos U", "replacement button could not release its output")
+    ReleaseToggleKey(), ReleaseToggleKey("w")
+}
+
+ReplaceMouseToggleOnRelease(options) {
+    global testOnClick
+    if options != "NA Pos U"
+        return
+    testOnClick := 0
+    StartBehaviorRun("replacement-mouse", [Action("toggle", "key", "LButton")], "", "Game.exe", "", "w")
 }
 
 FailToggleDown(keys) {
@@ -677,13 +993,14 @@ TestSecureSequence() {
 
 RunRuntimeTest(name, test) {
     global runtimeActions, nativePosts, testOnPost, testHotkeys, testHotCriterion, behaviorRuntime
-    global testInputSuspended
+    global testInputSuspended, testOnProfilesEnabled
     runtimeActions := []
     nativePosts := []
     testOnPost := 0
     testHotkeys := []
     testHotCriterion := 0
     testInputSuspended := false
+    testOnProfilesEnabled := 0
     RunTest(name, test)
     Assert(behaviorRuntime.runs.Count = 0, name " left a running behavior")
     behaviorRuntime.Stop()
@@ -1848,6 +2165,13 @@ TestRuntimeAction(profile, kind, id, value := "") {
     runtimeActions.Push({profile: profile, kind: kind, id: id, value: value})
 }
 
+TestSendProfilesEnabled(profiles, value) {
+    if IsObject(testOnProfilesEnabled)
+        testOnProfilesEnabled.Call(profiles, value)
+    for id in profiles
+        TestRuntimeAction(id, "enabled", "", value ? "1" : "0")
+}
+
 TestPostMessage(message, buttons, position, control := "", target := "") {
     nativePosts.Push({message: message, buttons: buttons, position: position})
     if IsObject(testOnPost)
@@ -1861,4 +2185,196 @@ TestRuntimeViewport() {
     AwaitRuns()
     Assert(testViewportTarget = "Game.exe", "cursor action used an overlay's target")
     Assert(testMoves[1].x = 600 && testMoves[1].y = 450, "cursor action used the wrong viewport")
+}
+
+CursorClickSteps(button := "LButton", doubleClick := false) {
+    return [Action("lock"), Action("goto", "x", "20", "y", "20"),
+        Action("mousepress", "key", button, "doubleClick", doubleClick), Action("restorecursor")]
+}
+
+TestCursorHeldButtons(doubleClick) {
+    global testHeldKeys, testClicks, nativePosts, testMoves, testCursor
+    global testOnClick, testDragArmed, testDragged
+    testOnClick := TrackPickupClick
+    for button in ["LButton", "RButton", "MButton", "XButton1", "XButton2", "m1", "m2"] {
+        key := button = "m1" ? "lbutton" : button = "m2" ? "rbutton" : StrLower(button)
+        testHeldKeys := Map(key, true, "RCtrl", true, "LShift", true, "LWin", true)
+        testClicks := [], nativePosts := [], testMoves := [], testCursor := {x: 450, y: 300}
+        testDragArmed := false, testDragged := false
+        steps := CursorClickSteps(button, doubleClick)
+        steps.Push(Action("restorecursor"))
+        StartBehaviorRun("restore-held", steps, "", "Game.exe")
+        AwaitRuns()
+        Assert(!testDragged, "restoration dragged the UI clicked by the behavior")
+        Assert(testMoves[2].x = 450 && testMoves[2].y = 300, "restoration lost the saved position")
+        if doubleClick {
+            Assert(nativePosts.Length = 6, "restoration lost the double click or resumed the hold twice")
+            Assert(nativePosts[6].position = (350 | (250 << 16)), "double-click hold resumed at the clicked position")
+        } else {
+            AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U", "NA Pos D"])
+            Assert(testClicks[5].position = "X350 Y250", "hold resumed before the cursor returned")
+        }
+        Assert(!testEvents.Length, "cursor restoration sent global input")
+        for heldKey, held in testHeldKeys
+            Assert(held, "restoration disturbed physical " heldKey)
+    }
+}
+
+TestCursorSavedState() {
+    global testHeldKeys, testCursor, testClicks, testMoves
+    for explicitSave in [false, true] {
+        testHeldKeys := Map("lbutton", true)
+        testClicks := [], testMoves := [], testCursor := {x: 450, y: 300}
+        steps := [Action("sleep", "ms", "30")]
+        if explicitSave
+            steps.Push(Action("savecursor"))
+        steps.Push(Action("goto", "x", "20", "y", "20"), Action("mousepress", "key", "LButton"), Action("restorecursor"))
+        StartBehaviorRun("saved-state", steps, "", "Game.exe")
+        testCursor := {x: 500, y: 330}
+        AwaitRuns()
+        expected := explicitSave ? "X400 Y280" : "X350 Y250"
+        Assert(testClicks.Length = 5 && testClicks[5].position = expected, "cursor save did not retain its position and held button together")
+    }
+}
+
+TestCursorLockSnapshot() {
+    global testHeldKeys
+    steps := [Action("sleep", "ms", "30")]
+    for node in CursorClickSteps()
+        steps.Push(node)
+    StartBehaviorRun("lock-state", steps, "", "Game.exe")
+    testHeldKeys["lbutton"] := true
+    AwaitRuns()
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U", "NA Pos D"])
+}
+
+TestCursorChangedButtons() {
+    global testHeldKeys, testClicks, testOnClick
+    for initiallyHeld in [false, true] {
+        testClicks := [], testHeldKeys := Map("lbutton", initiallyHeld)
+        steps := CursorClickSteps()
+        steps.InsertAt(3, Action("sleep", "ms", "30"))
+        StartBehaviorRun("changed-state", steps, "", "Game.exe")
+        testHeldKeys["lbutton"] := !initiallyHeld
+        AwaitRuns()
+        expected := initiallyHeld ? ["NA Pos D", "NA Pos U"] : ["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"]
+        AssertClickOptions(expected)
+    }
+    testClicks := [], testHeldKeys := Map("lbutton", true), testOnClick := ReleaseMouseDuringTap
+    StartBehaviorRun("released-during-click", CursorClickSteps(), "", "Game.exe")
+    AwaitRuns()
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
+}
+
+TestCursorConsumedButton() {
+    global behaviorRuntime, testHeldKeys
+    host := BindingHost()
+    host.consumed["lbutton"] := true
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    testHeldKeys := Map("lbutton", true)
+    StartBehaviorRun("consumed-cursor", CursorClickSteps(), "", "Game.exe", "", "lbutton")
+    AwaitRuns()
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
+}
+
+TestCursorUntouchedButton() {
+    global testHeldKeys
+    testHeldKeys := Map("lbutton", true)
+    StartBehaviorRun("untouched-cursor", [Action("lock"), Action("goto", "x", "20", "y", "20"), Action("restorecursor")])
+    AwaitRuns()
+    Assert(!testClicks.Length && !testEvents.Length && testHeldKeys["lbutton"], "restoration replayed an uninterrupted hold")
+}
+
+TestCursorSharedHold() {
+    global testOnClick
+    testOnClick := TrackPickupClick
+    HoldChordDown("other-button", "LButton", "")
+    try {
+        StartBehaviorRun("shared-cursor", CursorClickSteps(), "", "Game.exe")
+        AwaitRuns()
+        AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos D", "NA Pos U", "NA Pos D"])
+        Assert(!testDragged && testClicks[6].position = "X350 Y250", "shared hold dragged the clicked UI or resumed at the wrong position")
+        Assert(heldOutputCounts["lbutton"] = 1, "restoration changed another behavior's ownership")
+    } finally HoldChordUp("other-button")
+}
+
+TestCursorCancellation() {
+    global testHeldKeys, testClicks, testFocusActive, enabled
+    for reason in ["cancel", "focus", "disable"] {
+        testClicks := [], testHeldKeys := Map("lbutton", true), testFocusActive := true, enabled["profile"] := true
+        steps := CursorClickSteps()
+        steps.InsertAt(4, Action("sleep", "ms", "500"))
+        StartBehaviorRun("cancel-cursor", steps, "", "Game.exe", "profile")
+        deadline := A_TickCount + 2000
+        while testClicks.Length < 4 {
+            Assert(A_TickCount < deadline, "cursor click did not complete")
+            Sleep 5
+        }
+        if reason = "focus"
+            testFocusActive := false
+        else if reason = "disable"
+            enabled["profile"] := false
+        else
+            behaviorRuntime.Cancel("cancel-cursor")
+        AwaitRuns()
+        AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
+        Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "cancellation left the cursor locked")
+    }
+    testFocusActive := true
+}
+
+TestCursorResumeCleanup(fail) {
+    global testHeldKeys, testOnClick
+    testHeldKeys := Map("lbutton", true)
+    testOnClick := InterruptCursorResume.Bind(fail)
+    steps := CursorClickSteps()
+    steps.Push(Action("send", "text", "tail"))
+    StartBehaviorRun("restore-cleanup", steps, "", "Game.exe")
+    AwaitRuns()
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U", "NA Pos D", "NA Pos U"])
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "restoration failure left the cursor locked")
+    if fail
+        Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error" && !testEvents.Length, "failed restoration continued the sequence or hid its error")
+    else
+        Assert(!testHeldKeys["lbutton"] && testEvents.Length = 1, "restoration ignored a physical release")
+}
+
+InterruptCursorResume(fail, options) {
+    global testHeldKeys
+    recordedClick := testClicks[testClicks.Length]
+    if options = "NA Pos D" && recordedClick.position = "X350 Y250" {
+        if fail
+            throw Error("simulated cursor restoration failure")
+        testHeldKeys["lbutton"] := false
+    }
+}
+
+TestNativeCursorRestore() {
+    global testWindowId, testNativeTarget, testNativeMessages, testHeldKeys
+    window := Gui("+ToolWindow -Caption")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd
+        testNativeMessages := [], testHeldKeys := Map("lbutton", true)
+        OnMessage 0x201, RecordNativeClick
+        OnMessage 0x202, RecordNativeClick
+        StartBehaviorRun("native-cursor", CursorClickSteps(), "", "Test.exe")
+        AwaitRuns()
+        Sleep 20
+        Assert(testNativeMessages.Length = 5, "native restoration lost a click transition or the resumed hold")
+        final := testNativeMessages[5]
+        Assert(final.message = 0x201 && final.position = (350 | (250 << 16)), "native hold resumed at the wrong client position")
+        previousDelay := A_ControlDelay
+        SetControlDelay -1
+        try WindowClick("X350 Y250", window.Hwnd, "Left", "NA Pos U")
+        finally SetControlDelay previousDelay
+        Sleep 20
+        Assert(testNativeMessages.Length = 6 && testNativeMessages[6].message = 0x202, "resumed hold could not be released")
+    } finally {
+        behaviorRuntime.Stop()
+        OnMessage 0x201, RecordNativeClick, 0
+        OnMessage 0x202, RecordNativeClick, 0
+        testNativeTarget := 0
+        window.Destroy()
+    }
 }

@@ -12,6 +12,7 @@ export const api = {
   setLibraryWidth: (width: number) => invoke<void>("set_library_width", { width }),
   getDatabase: () =>
     invoke<Database>("get_database"),
+  getDisabledProfiles: () => invoke<string[]>("get_disabled_profiles"),
 
   readImageAsDataUrl: (path: string) =>
     invoke<string>("read_image_as_data_url", { path }),

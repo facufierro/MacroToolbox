@@ -31,6 +31,7 @@ class BehaviorExecutor {
         MouseGetPos &x, &y
         execution := {id: this.nextId, owner: owner, target: target, profile: profile,
             modifiers: modifiers, chord: chord, triggerHeld: true, x: x, y: y,
+            cursorButtons: this.CursorButtons(), cursorClicks: Map(),
             locked: false, cancelled: false, section: section, scriptOwner: scriptOwner, background: background && !BehaviorContextActive(target, profile), task: this.Task(Map("type", "sequence", "steps", steps)), failure: 0}
         this.runs[owner] := execution
         if chord != ""
@@ -65,6 +66,13 @@ class BehaviorExecutor {
         if !this.runs.Has(owner) || !BehaviorHasToggle(this.runs[owner].task.node["steps"])
             return ""
         return this.HeldModifiers(this.runs[owner].task)
+    }
+
+    OwnedModifiers() {
+        modifiers := ""
+        for owner, execution in this.runs
+            modifiers .= this.HeldModifiers(execution.task)
+        return modifiers
     }
 
     HeldModifiers(task) {
@@ -173,7 +181,8 @@ class BehaviorExecutor {
                 task.held := true
                 keys := RegExReplace(node["key"], "[,\s]+", " ")
                 task.keys := HoldKeyList(keys)
-                HoldChordDown(task.id, keys, "", execution.modifiers, false, this.physicalOwner)
+                mouseOutput := kind = "toggle" ? {target: execution.target, flags: MousePressFlags(keys, execution.modifiers)} : 0
+                HoldChordDown(task.id, keys, "", execution.modifiers, false, this.physicalOwner, mouseOutput)
                 duration := Integer(node.Get("duration", "30"))
                 task.due := now + duration
                 if kind = "press" && duration <= 6 {
@@ -181,6 +190,8 @@ class BehaviorExecutor {
                     task.due := now
                 }
             }
+            if task.held
+                AdvanceHeldOutputs(task.keys)
             if task.held && (kind = "toggle" || (kind = "hold" ? execution.triggerHeld : now < task.due))
                 return
             this.Release(task)
@@ -228,6 +239,8 @@ class BehaviorExecutor {
                 task.mouse.clicked := true
                 flags := MousePressFlags(node["key"], execution.modifiers)
                 task.mouse.click := DoMousePress(task.mouse.button, execution.target, flags, node.Get("doubleClick", false), true)
+                if task.mouse.click.borrowed
+                    execution.cursorClicks[task.mouse.click.keyName] := task.mouse.click
             }
             if task.mouse.HasOwnProp("click") && !task.mouse.click.Advance()
                 return
@@ -249,12 +262,12 @@ class BehaviorExecutor {
         } else if kind = "savecursor" {
             MouseGetPos &x, &y
             execution.x := x, execution.y := y
+            execution.cursorButtons := this.CursorButtons()
         } else if kind = "restorecursor" {
-            this.Unlock(execution)
-            SendMode "Event"
-            SetMouseDelay -1
-            MouseMove execution.x, execution.y, 0
+            this.RestoreCursor(execution)
         } else if kind = "lock" {
+            if !execution.locked
+                execution.cursorButtons := this.CursorButtons()
             execution.locked := true
             BlockInput "MouseMove"
         } else if kind = "goto" {
@@ -270,6 +283,33 @@ class BehaviorExecutor {
             throw ValueError("Unsupported behavior node: " kind)
         }
         task.done := true
+    }
+
+    CursorButtons() {
+        global heldOutputCounts
+        buttons := Map()
+        for key in ["lbutton", "rbutton", "mbutton", "xbutton1", "xbutton2"]
+            if PhysicalOwnsOutput(key, this.physicalOwner) || heldOutputCounts.Has(key)
+                buttons[key] := true
+        return buttons
+    }
+
+    RestoreCursor(execution) {
+        global heldOutputCounts
+        clicks := execution.cursorClicks
+        execution.cursorClicks := Map()
+        ; Window clicks can interrupt a real hold. Resume it only after returning,
+        ; so the intervening movement cannot drag the UI clicked by the macro.
+        for key, mousePress in clicks
+            if execution.cursorButtons.Has(key) && heldOutputCounts.Has(key)
+                mousePress.Send(false)
+        SendMode "Event"
+        SetMouseDelay -1
+        MouseMove execution.x, execution.y, 0
+        for key, mousePress in clicks
+            if execution.cursorButtons.Has(key) && !execution.cancelled
+                mousePress.ResumeHold(this.physicalOwner, MousePressFlags(""))
+        this.Unlock(execution)
     }
 
     Release(task) {
