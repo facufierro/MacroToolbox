@@ -50,7 +50,7 @@ impl WindowClientBounds {
 
 #[cfg(all(test, target_os = "windows"))]
 mod overlay_position_tests {
-    use super::{fit_overlay_to_desktop, get_global_viewport, get_window_client_bounds, PhysicalCoordinates, WindowClientBounds};
+    use super::{fit_overlay_to_desktop, start_overlay_maintenance, get_global_viewport, get_window_client_bounds, PhysicalCoordinates, WindowClientBounds};
     use tauri::PhysicalPosition;
     use winapi::shared::windef::HWND;
     use winapi::um::winuser::*;
@@ -128,6 +128,58 @@ mod overlay_position_tests {
     fn invalid_canvas_cannot_report_valid_overlay_bounds() {
         let _dpi = PhysicalCoordinates::enter().unwrap();
         assert!(fit_overlay_to_desktop(std::ptr::null_mut(), get_global_viewport()).is_err());
+        assert!(start_overlay_maintenance(std::ptr::null_mut()).is_err());
+    }
+
+    #[test]
+    fn native_timer_recovers_overlay_order_without_renderer_requests_and_leaves_hidden_overlays_alone() {
+        let _dpi = PhysicalCoordinates::enter().unwrap();
+        let overlay = Canvas::new();
+        let game = Canvas::new();
+        let desktop = get_global_viewport();
+        let foreground = unsafe { GetForegroundWindow() };
+        // A visible, fully transparent fixture exercises native visibility without covering apps.
+        unsafe {
+            SetWindowLongPtrW(overlay.0, GWL_EXSTYLE, (WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED) as isize);
+            assert_ne!(SetLayeredWindowAttributes(overlay.0, 0, 0, LWA_ALPHA), 0);
+            ShowWindow(overlay.0, SW_SHOWNOACTIVATE);
+        }
+        start_overlay_maintenance(overlay.0).unwrap();
+        let above_game = || {
+            let mut previous = unsafe { GetWindow(game.0, GW_HWNDPREV) };
+            while !previous.is_null() {
+                if previous == overlay.0 { return true; }
+                previous = unsafe { GetWindow(previous, GW_HWNDPREV) };
+            }
+            false
+        };
+        let pump = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+            while std::time::Instant::now() < deadline {
+                unsafe {
+                    let mut message = std::mem::zeroed();
+                    while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        for visible in [true, false, true] {
+            unsafe {
+                ShowWindow(overlay.0, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                assert_ne!(SetWindowPos(game.0, HWND_TOPMOST, desktop.left, desktop.top, 0, 0,
+                    SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOOWNERZORDER), 0);
+            }
+            assert!(!above_game(), "fixture must put the game above the overlay");
+            // Only the native message loop runs: no webview or get_overlay_origin calls.
+            pump();
+            assert_eq!(above_game(), visible);
+            assert_eq!(unsafe { IsWindowVisible(overlay.0) != 0 }, visible);
+            assert_eq!(get_window_client_bounds(overlay.0).unwrap(), desktop);
+            assert_eq!(unsafe { GetForegroundWindow() }, foreground);
+        }
     }
 
     #[test]
@@ -750,9 +802,8 @@ fn get_overlay_origin(window: tauri::WebviewWindow, state: State<AppState>, fold
             let Some(hwnd) = find_window_by_exe(&game.exe) else { return Ok(None); };
             (get_window_client_bounds(hwnd)?, unsafe { winapi::um::winuser::IsIconic(hwnd) != 0 })
         };
-        let desktop = get_global_viewport();
         let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
-        let canvas = fit_overlay_to_desktop(hwnd, desktop)?;
+        let canvas = get_window_client_bounds(hwnd)?;
         let position = tauri::PhysicalPosition::new(canvas.left, canvas.top);
         Ok(bounds.overlay_origin(position, minimized))
     }
@@ -1267,6 +1318,31 @@ fn fit_overlay_to_desktop(
         return Err("Overlay window does not cover the virtual desktop".into());
     }
     Ok(canvas)
+}
+
+#[cfg(target_os = "windows")]
+fn start_overlay_maintenance(hwnd: winapi::shared::windef::HWND) -> Result<(), String> {
+    use winapi::shared::basetsd::UINT_PTR;
+    use winapi::shared::minwindef::{DWORD, UINT};
+    use winapi::shared::windef::HWND;
+    use winapi::um::winuser::{IsWindowVisible, SetTimer};
+
+    unsafe extern "system" fn refresh(hwnd: HWND, _message: UINT, _timer: UINT_PTR, _time: DWORD) {
+        if IsWindowVisible(hwnd) == 0 { return; }
+        let result = PhysicalCoordinates::enter().and_then(|_dpi| fit_overlay_to_desktop(hwnd, get_global_viewport()));
+        if let Err(error) = result {
+            debug_log_once("overlay_canvas", format!("[overlay] {error}"));
+        }
+    }
+
+    let _dpi = PhysicalCoordinates::enter()?;
+    fit_overlay_to_desktop(hwnd, get_global_viewport())?;
+    // This timer belongs to the HWND and is destroyed with it. Keeping the canvas above
+    // games must not depend on JavaScript timers in an occluded or throttled webview.
+    if unsafe { SetTimer(hwnd, 0x4D544F, 250, Some(refresh)) } == 0 {
+        return Err(format!("Failed to maintain overlay window: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1920,6 +1996,8 @@ pub fn run() {
             .shadow(false)
             .transparent(true)
             .always_on_top(true)
+            .focusable(false)
+            .focused(false)
             .skip_taskbar(true)
             .visible(false)
             .build()
@@ -1927,9 +2005,8 @@ pub fn run() {
                 Ok(overlay) => {
                     #[cfg(target_os = "windows")]
                     let result = (|| -> Result<(), String> {
-                        let _dpi = PhysicalCoordinates::enter()?;
                         let hwnd = overlay.hwnd().map_err(|e| e.to_string())?.0 as winapi::shared::windef::HWND;
-                        fit_overlay_to_desktop(hwnd, get_global_viewport()).map(|_| ())
+                        start_overlay_maintenance(hwnd)
                     })();
                     #[cfg(not(target_os = "windows"))]
                     let result = overlay.set_position(tauri::PhysicalPosition::new(overlay_left, overlay_top))
