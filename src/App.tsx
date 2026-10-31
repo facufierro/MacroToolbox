@@ -13,7 +13,7 @@ import { TriggerInput } from "./TriggerInput";
 import { triggerIdentity, triggerLabel, isTriggerValid } from "./triggers";
 import { SortableList } from "./SortableList";
 import { moveItem, orderOwnedSlots } from "./listOrder";
-import { exportVariables, importVariables } from "./variables";
+import { exportVariables, importVariables, mapVariableBehaviors, readVariable } from "./variables";
 import { KeyInput } from "./KeyInput";
 import { EnableSwitch } from "./EnableSwitch";
 import { ProfileSection } from "./ProfileSection";
@@ -24,7 +24,7 @@ import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step }
 import { allowsExtraModifiers } from "./hotkeyModifiers";
 import { usedSecureTexts } from "./secureText";
 import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
-import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, removeOverlayGroup, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
+import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, removeOverlayGroup, remapOverlayReferences, mapOverlayActions, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
 import type {
   Database,
   Scope,
@@ -101,14 +101,18 @@ function blankScript(): Script { return { id: uid(), name: "", enabled: true, tr
 type LegacyProfileExport = Profile & { exe?: string };
 type LegacyScopeExport = Omit<Scope, "exe" | "profiles"> & { exe?: string; profiles: LegacyProfileExport[] };
 
+function remapBehaviorIds(behavior: string, states: Map<string, string>, items: Map<string, string>, scripts: Map<string, string>, groups: Map<string, string>): string {
+  return mapOverlayActions(mapScriptActions(mapStateActions(behavior, id => states.get(id) ?? id), id => scripts.get(id) ?? id), id => items.get(id) ?? groups.get(id) ?? id);
+}
+
 function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, string>, stateIds?: Map<string, string>, itemIds?: Map<string, string>, scriptIds?: Map<string, string>, groupIds?: Map<string, string>): Profile {
   const { exe: _legacyExe, ...profileData } = profile;
   const stateMap = stateIds ?? new Map(profile.states.map(s => [s.id, uid()]));
   const stateId = (id: string) => stateMap.get(id) ?? id;
   const itemMap = itemIds ?? new Map(profile.overlay_items.map(item => [item.id, uid()]));
   const scriptMap = scriptIds ?? new Map((profile.scripts ?? []).map(script => [script.id, uid()]));
-  const remapBehavior = (behavior: string) => mapScriptActions(mapStateActions(behavior, stateId), id => scriptMap.get(id) ?? id);
   const groupMap = groupIds ?? new Map((profile.overlay_groups ?? []).map(g => [g.id, uid()]));
+  const remapBehavior = (behavior: string) => remapBehaviorIds(behavior, stateMap, itemMap, scriptMap, groupMap);
   const mapped: Profile = {
     ...profileData,
     id: profileIds?.get(profile.id) ?? uid(),
@@ -152,7 +156,7 @@ async function exportProfile(profile: Profile, folder: Scope, variables: Variabl
   });
   if (!path) return;
   const states = folder.states;
-  const data = withReferencedScripts(withReferencedStates(withReferencedOverlayParts(materializeProfile(profile, profiles), profiles), states), profiles.flatMap(profile => profile.scripts));
+  const data = withReferencedScripts(withReferencedStates(withReferencedOverlayParts(materializeProfile(profile, profiles), profiles, variables), states, variables), profiles.flatMap(profile => profile.scripts), variables);
   await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data, variables: exportVariables([data], variables) }, null, 2));
 }
 
@@ -175,7 +179,13 @@ async function importProfile(existing: Variable[]): Promise<{ profile: Profile; 
   if (!path) return null;
   const raw = JSON.parse(await api.readTextFile(path as string));
   if (raw.type !== "profile") throw new Error("File is not a profile export");
-  const imported = importVariables([remapProfileIds(raw.data as Profile)], raw.variables ?? [], existing);
+  const source = raw.data as Profile;
+  const stateIds = new Map(source.states.map(state => [state.id, uid()]));
+  const itemIds = new Map(source.overlay_items.map(item => [item.id, uid()]));
+  const scriptIds = new Map((source.scripts ?? []).map(script => [script.id, uid()]));
+  const groupIds = new Map((source.overlay_groups ?? []).map(group => [group.id, uid()]));
+  const incoming = mapVariableBehaviors((raw.variables ?? []).map(readVariable), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
+  const imported = importVariables([remapProfileIds(source, undefined, stateIds, itemIds, scriptIds, groupIds)], incoming, existing);
   return { profile: imported.profiles[0], variables: imported.variables };
 }
 
@@ -189,13 +199,14 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
   const raw = JSON.parse(await api.readTextFile(path as string));
   if (raw.type !== "scope") throw new Error("File is not a scope export");
   const source = raw.data as LegacyScopeExport;
-  const imported = importVariables(source.profiles, raw.variables ?? [], existing);
+  const profileIds = new Map(source.profiles.map(profile => [profile.id, uid()]));
+  const stateIds = new Map([...(source.states ?? []), ...source.profiles.flatMap(profile => profile.states ?? [])].map(state => [state.id, uid()] as const));
+  const itemIds = new Map(source.profiles.flatMap(profile => profile.overlay_items.map(item => [item.id, uid()] as const)));
+  const scriptIds = new Map(source.profiles.flatMap(profile => (profile.scripts ?? []).map(script => [script.id, uid()] as const)));
+  const groupIds = new Map(source.profiles.flatMap(profile => (profile.overlay_groups ?? []).map(group => [group.id, uid()] as const)));
+  const incoming = mapVariableBehaviors((raw.variables ?? []).map(readVariable), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
+  const imported = importVariables(source.profiles, incoming, existing);
   const scope = { ...source, profiles: imported.profiles };
-  const profileIds = new Map(scope.profiles.map(profile => [profile.id, uid()]));
-  const stateIds = new Map([...(scope.states ?? []), ...scope.profiles.flatMap(profile => profile.states ?? [])].map(state => [state.id, uid()] as const));
-  const itemIds = new Map(scope.profiles.flatMap(profile => profile.overlay_items.map(item => [item.id, uid()] as const)));
-  const scriptIds = new Map(scope.profiles.flatMap(profile => (profile.scripts ?? []).map(script => [script.id, uid()] as const)));
-  const groupIds = new Map(scope.profiles.flatMap(profile => (profile.overlay_groups ?? []).map(group => [group.id, uid()] as const)));
   let entries = scope.profiles.map(profile => ({
     target: typeof scope.exe === "string" ? scope.exe.trim() : (profile.exe ?? "").trim(),
     profile: remapProfileIds(profile, profileIds, stateIds, itemIds, scriptIds, groupIds),
@@ -1999,7 +2010,7 @@ export default function App() {
   async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
     try {
       const source = db!.scopes.find(folder => folder.id === sourceGameId)!;
-      const portable = withReferencedOverlayParts(materializeProfile(profile, source.profiles), source.profiles);
+      const portable = withReferencedOverlayParts(materializeProfile(profile, source.profiles), source.profiles, db!.variables);
       const copy: Profile = { ...remapProfileIds(portable, undefined, new Map()), name, parent_id: null };
       const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, profile.id, targetGameId, copy));
       handleDb(updated);
@@ -2012,7 +2023,7 @@ export default function App() {
     const target = db!.scopes.find(folder => folder.id === targetGameId)!;
     const sourceStates = source.states;
     const targetStates = target.states;
-    return carryReferencedScripts(carryReferencedStates(carryReferencedOverlayParts(profile, source.profiles, target.profiles), sourceStates, targetStates), source.profiles.flatMap(profile => profile.scripts), target.profiles.flatMap(profile => profile.scripts));
+    return carryReferencedScripts(carryReferencedStates(carryReferencedOverlayParts(profile, source.profiles, target.profiles, db!.variables), sourceStates, targetStates, db!.variables), source.profiles.flatMap(profile => profile.scripts), target.profiles.flatMap(profile => profile.scripts), db!.variables);
   }
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {

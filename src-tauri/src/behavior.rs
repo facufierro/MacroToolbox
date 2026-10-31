@@ -45,6 +45,7 @@ pub enum Action {
     Sleep { ms: Parameter },
     Send { text: Parameter },
     Securesend { #[serde(rename = "credentialId")] credential_id: String },
+    Behavior { #[serde(rename = "variableId")] variable_id: String },
     Borderless,
     Fit,
     Killprocess,
@@ -135,6 +136,7 @@ pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
         }
         let valid = match action {
             Action::Sequence { steps } | Action::Parallel { steps } => { validate(steps, has_trigger)?; !steps.is_empty() }
+            Action::Press { key: Parameter::Matched(_), .. } => has_trigger,
             Action::Press { key, .. } | Action::Hold { key } | Action::Waitfor { key } => !key.literal()?.trim().is_empty(),
             Action::Mousepress { key, .. } => valid_mouse_input(key.literal()?),
             Action::Repeat { key, interval, hold } => !key.literal()?.trim().is_empty() && number(interval.literal()?, 1) && number(hold.literal()?, 0),
@@ -148,6 +150,7 @@ pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
             Action::Securesend { credential_id } => has_trigger && valid_credential_id(credential_id),
             Action::Script { script_id } => !script_id.is_empty(),
             Action::Unknown { source } => return Err(format!("Unsupported behavior action: {source}")),
+            Action::Behavior { variable_id } => return Err(format!("Unresolved behavior variable: {variable_id}")),
             _ => true,
         };
         if !valid { return Err(format!("Invalid behavior action: {action:?}")); }
@@ -192,10 +195,59 @@ fn normalize_legacy_references(actions: &mut [Action]) -> Result<(), String> {
 
 /// Resolve typed values at the runtime boundary. Literal strings are never interpolated.
 pub fn resolve(source: &str, variables: &[crate::variables::Variable], matched_trigger: Option<&str>) -> Result<Vec<Action>, String> {
+    let mut actions = expand(parse(source)?, variables, &mut Vec::new())?;
+    resolve_values(&mut actions, variables, matched_trigger, false)?;
+    if matched_trigger.is_none() && requires_trigger(&actions) {
+        return Err("This behavior requires a hotkey trigger.".into());
+    }
+    Ok(actions)
+}
+
+fn requires_trigger(actions: &[Action]) -> bool {
+    actions.iter().any(|action| match action {
+        Action::Securesend { .. } | Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. } => true,
+        Action::Sequence { steps } | Action::Parallel { steps } => requires_trigger(steps),
+        _ => false,
+    })
+}
+
+fn expand(actions: Vec<Action>, variables: &[crate::variables::Variable], visiting: &mut Vec<String>) -> Result<Vec<Action>, String> {
     use crate::variables::VariableValue;
-    let mut actions = parse(source)?;
-    visit_values(&mut actions, &mut |value, kind| {
+    actions.into_iter().map(|action| Ok(match action {
+        Action::Behavior { variable_id } => {
+            let variable = variables.iter().find(|variable| variable.id == variable_id)
+                .ok_or_else(|| format!("Missing behavior variable: {variable_id}"))?;
+            let VariableValue::Behavior(source) = &variable.value else { return Err(format!("{} must be a Behavior variable", variable.name)); };
+            if visiting.contains(&variable_id) { return Err(format!("Circular behavior variable: {}", variable.name)); }
+            visiting.push(variable_id);
+            let steps = expand(parse(source)?, variables, visiting)?;
+            visiting.pop();
+            // A reference is one sequential branch even when its caller is parallel.
+            Action::Sequence { steps }
+        }
+        Action::Sequence { steps } => Action::Sequence { steps: expand(steps, variables, visiting)? },
+        Action::Parallel { steps } => Action::Parallel { steps: expand(steps, variables, visiting)? },
+        other => other,
+    })).collect()
+}
+
+pub fn validate_variable_behaviors(variables: &[crate::variables::Variable]) -> Result<(), String> {
+    for variable in variables {
+        if let crate::variables::VariableValue::Behavior(source) = &variable.value {
+            let mut actions = expand(parse(source)?, variables, &mut vec![variable.id.clone()])?;
+            if actions.is_empty() { return Err(format!("Enter behavior steps: {}", variable.name)); }
+            resolve_values(&mut actions, variables, None, true)?;
+            validate(&actions, true)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_values(actions: &mut [Action], variables: &[crate::variables::Variable], matched_trigger: Option<&str>, template: bool) -> Result<(), String> {
+    use crate::variables::VariableValue;
+    visit_values(actions, &mut |value, kind| {
         if matches!(value, Parameter::Matched(_)) {
+            if template && matches!(kind, ValueKind::Press) { return Ok(()); }
             if let (ValueKind::Press, Some(trigger)) = (kind, matched_trigger) {
                 if !trigger.trim().is_empty() {
                     *value = Parameter::Literal(trigger.into());
@@ -221,8 +273,7 @@ pub fn resolve(source: &str, variables: &[crate::variables::Variable], matched_t
         };
         *value = Parameter::Literal(literal);
         Ok(())
-    })?;
-    Ok(actions)
+    })
 }
 
 fn modifier(value: &str) -> bool {
@@ -232,6 +283,56 @@ fn modifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared(id: &str, steps: serde_json::Value) -> crate::variables::Variable {
+        serde_json::from_value(serde_json::json!({"id":id,"name":id,"type":"behavior","value":steps.to_string()})).unwrap()
+    }
+
+    #[test]
+    fn behavior_variables_expand_as_sequential_branches_with_the_callers_trigger() {
+        let inner = shared("cast", serde_json::json!([
+            {"type":"press","key":{"source":"trigger"},"onRelease":true},
+            {"type":"sleep","ms":{"variable":"timer"}},
+            {"type":"mousepress","key":"LButton","doubleClick":true}
+        ]));
+        let outer = shared("chain", serde_json::json!([{"type":"behavior","variableId":"cast"},{"type":"press","key":"e"}]));
+        let timer = serde_json::from_value(serde_json::json!({"id":"timer","name":"Delay","type":"number","value":150})).unwrap();
+        let variables = vec![outer, inner.clone(), timer];
+        crate::config::validate_variables(&variables).unwrap();
+        let source = r#"[{"type":"parallel","steps":[{"type":"behavior","variableId":"chain"},{"type":"hold","key":"x"}]}]"#;
+        for trigger in ["lctrl 1", "rctrl shift n"] {
+            let actions = resolve(source, &variables, Some(trigger)).unwrap();
+            validate(&actions, true).unwrap();
+            assert_eq!(serde_json::to_value(actions).unwrap(), serde_json::json!([
+                {"type":"parallel","steps":[{"type":"sequence","steps":[{"type":"sequence","steps":[
+                    {"type":"press","key":trigger,"onRelease":true},{"type":"sleep","ms":"150"},
+                    {"type":"mousepress","key":"LButton","doubleClick":true}
+                ]},{"type":"press","key":"e"}]},{"type":"hold","key":"x"}]}
+            ]));
+        }
+        assert!(resolve(source, &variables, None).is_err());
+        assert_eq!(variables[1], inner);
+        let ordinary = shared("ordinary", serde_json::json!([{"type":"send","text":"hello"},{"type":"sleep","ms":"10"}]));
+        validate(&resolve(r#"[{"type":"behavior","variableId":"ordinary"}]"#, &[ordinary], None).unwrap(), false).unwrap();
+    }
+
+    #[test]
+    fn shared_behavior_graphs_reject_cycles_wrong_types_missing_dependencies_and_invalid_values() {
+        for variables in [
+            vec![shared("a", serde_json::json!([{"type":"behavior","variableId":"a"}]))],
+            vec![shared("a", serde_json::json!([{"type":"behavior","variableId":"b"}])), shared("b", serde_json::json!([{"type":"behavior","variableId":"a"}]))],
+            vec![shared("a", serde_json::json!([{"type":"behavior","variableId":"missing"}]))],
+            vec![shared("a", serde_json::json!([{"type":"sleep","ms":{"variable":"missing"}}]))],
+            vec![shared("a", serde_json::json!([{"type":"sleep","ms":"-1"}]))],
+            vec![shared("a", serde_json::json!([]))],
+        ] { assert!(crate::config::validate_variables(&variables).is_err(), "{variables:?}"); }
+        let keys = serde_json::from_value(serde_json::json!({"id":"keys","name":"Keys","type":"keys","value":"rctrl n"})).unwrap();
+        assert!(crate::config::validate_variables(&[keys, shared("a", serde_json::json!([{"type":"behavior","variableId":"keys"}]))]).is_err());
+        let secure = shared("secure", serde_json::json!([{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]));
+        crate::config::validate_variables(std::slice::from_ref(&secure)).unwrap();
+        assert!(resolve(r#"[{"type":"behavior","variableId":"secure"}]"#, std::slice::from_ref(&secure), None).is_err());
+        validate(&resolve(r#"[{"type":"behavior","variableId":"secure"}]"#, &[secure], Some("f1")).unwrap(), true).unwrap();
+    }
 
     #[test]
     fn secure_send_only_serializes_a_reference_and_requires_a_hotkey() {

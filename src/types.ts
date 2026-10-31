@@ -150,11 +150,11 @@ export interface Database {
   variables: Variable[];
 }
 
-export type VariableType = "number" | "text" | "keys" | "triggers";
-export type ValueType = Exclude<VariableType, "triggers">;
+export type VariableType = "number" | "text" | "keys" | "triggers" | "behavior";
+export type ValueType = "number" | "text" | "keys";
 export type Variable = { id: string; name: string } & (
   | { type: "number"; value: number }
-  | { type: "text" | "keys"; value: string }
+  | { type: "text" | "keys" | "behavior"; value: string }
   | { type: "triggers"; value: string[] }
 );
 export type VariableReference = { variable: string };

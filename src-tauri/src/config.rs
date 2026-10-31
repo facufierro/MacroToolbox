@@ -17,7 +17,12 @@ pub struct Database {
     pub variables: Vec<Variable>,
 }
 
-pub use crate::variables::{validate_variables, Variable};
+pub use crate::variables::Variable;
+
+pub fn validate_variables(variables: &[Variable]) -> Result<(), String> {
+    crate::variables::validate_variables(variables)?;
+    crate::behavior::validate_variable_behaviors(variables)
+}
 
 impl Database {
     pub fn reorder_folders(&mut self, ids: &[String]) -> Result<(), String> {

@@ -12,6 +12,7 @@ pub enum VariableValue {
     Text(String),
     Keys(String),
     Triggers(Vec<String>),
+    Behavior(String),
 }
 
 impl From<f64> for VariableValue {
@@ -29,7 +30,7 @@ pub struct Variable {
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum VariableType { #[default] Number, Text, Keys, Triggers }
+enum VariableType { #[default] Number, Text, Keys, Triggers, Behavior }
 
 #[derive(Deserialize)]
 struct VariableWire {
@@ -48,6 +49,7 @@ impl TryFrom<VariableWire> for Variable {
             VariableType::Number => VariableValue::Number(wire.value.as_f64().ok_or("Expected a number variable value")?),
             VariableType::Text => VariableValue::Text(wire.value.as_str().ok_or("Expected a text variable value")?.into()),
             VariableType::Keys => VariableValue::Keys(wire.value.as_str().ok_or("Expected a keys variable value")?.into()),
+            VariableType::Behavior => VariableValue::Behavior(wire.value.as_str().ok_or("Expected a behavior variable value")?.into()),
             VariableType::Triggers => {
                 let entries = wire.value.as_array().ok_or("Expected a trigger list")?.iter()
                     .map(|value| value.as_str().map(String::from).ok_or("Expected trigger keys".to_string())).collect::<Result<Vec<_>, _>>()?;
@@ -77,6 +79,7 @@ pub fn validate_variables(variables: &[Variable]) -> Result<(), String> {
             VariableValue::Number(value) => value.is_finite(),
             VariableValue::Keys(value) => value.split(|character: char| character.is_whitespace() || character == ',').any(|part| !part.is_empty()),
             VariableValue::Text(_) => true,
+            VariableValue::Behavior(source) => !source.trim().is_empty(),
             VariableValue::Triggers(entries) => read_trigger_list(entries).is_ok(),
         };
         if variable.id.trim().is_empty() || !ids.insert(&variable.id)
@@ -96,6 +99,7 @@ mod tests {
             r#"{"id":"n","name":"Timer","type":"number","value":5000}"#,
             r#"{"id":"t","name":"Message","type":"text","value":"$n; hello\nworld"}"#,
             r#"{"id":"k","name":"Cast","type":"keys","value":"rctrl shift n"}"#,
+            r#"{"id":"b","name":"Cast sequence","type":"behavior","value":"press(rctrl n);sleep(150)"}"#,
             r#"{"id":"c","name":"Shortcuts","type":"triggers","value":["lctrl 1","lctrl 2"]}"#] {
             let variable: Variable = serde_json::from_str(source).unwrap();
             validate_variables(std::slice::from_ref(&variable)).unwrap();

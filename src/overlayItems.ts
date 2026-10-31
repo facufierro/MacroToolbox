@@ -1,6 +1,6 @@
-import { mapBehavior } from "./behaviors.ts";
+import { expandBehavior, mapBehavior } from "./behaviors.ts";
 import { orderOwnedSlots } from "./listOrder.ts";
-import type { OverlayGroup, OverlayItem, OverlayTarget, Profile, Scope } from "./types";
+import type { OverlayGroup, OverlayItem, OverlayTarget, Profile, Scope, Variable } from "./types";
 
 // Part names are a view of their overlay and order; legacy saved names are not editable.
 export function nameOverlayParts(items: OverlayItem[], groups: OverlayGroup[]): OverlayItem[] {
@@ -101,7 +101,7 @@ export function remapOverlayReferences(profile: Profile, mapId: (id: string) => 
   };
 }
 
-export function withReferencedOverlayParts(profile: Profile, profiles: Profile[]): Profile {
+export function withReferencedOverlayParts(profile: Profile, profiles: Profile[], variables: Variable[] = []): Profile {
   const pool = availableOverlayItems(profiles, profile.overlay_items);
   const items = new Map(profile.overlay_items.map(item => [item.id, item]));
   const groups = new Map((profile.overlay_groups ?? []).map(group => [group.id, group]));
@@ -109,7 +109,7 @@ export function withReferencedOverlayParts(profile: Profile, profiles: Profile[]
   for (const candidate of profiles) for (const group of candidate.overlay_groups ?? []) if (!allGroups.has(group.id)) allGroups.set(group.id, group);
   const pending = [...items.keys(), ...groups.keys()];
   const expandGroups = new Set(groups.keys());
-  for (const action of [...profile.hotkeys, ...profile.events]) mapOverlayActions(action.behavior, id => { pending.push(id); expandGroups.add(id); return id; });
+  for (const action of [...profile.hotkeys, ...profile.events]) mapOverlayActions(expandBehavior(action.behavior, variables), id => { pending.push(id); expandGroups.add(id); return id; });
   const visited = new Set<string>();
   while (pending.length) {
     const id = pending.pop()!;
@@ -131,8 +131,8 @@ export function withReferencedOverlayParts(profile: Profile, profiles: Profile[]
   return { ...profile, overlay_items: [...items.values()], overlay_groups: [...groups.values()] };
 }
 
-export function carryReferencedOverlayParts(profile: Profile, source: Profile[], target: Profile[]): Profile {
-  const portable = withReferencedOverlayParts(profile, source);
+export function carryReferencedOverlayParts(profile: Profile, source: Profile[], target: Profile[], variables: Variable[] = []): Profile {
+  const portable = withReferencedOverlayParts(profile, source, variables);
   const existing = new Set(target.flatMap(profile => [...profile.overlay_items.map(item => item.id), ...(profile.overlay_groups ?? []).map(group => group.id)]));
   const owned = new Set([...profile.overlay_items.map(item => item.id), ...(profile.overlay_groups ?? []).map(group => group.id)]);
   return { ...profile,

@@ -1617,10 +1617,12 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Se
 }
 
 #[tauri::command]
-fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::Variable>) -> Result<Database, String> {
+fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::Variable>, secure_texts: Option<Vec<secure_send::PasswordDraft>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     config::validate_variables(&variables)?;
+    let previous_passwords = secure_send::database_ids(&db);
+    let password_write = secure_send::PasswordWrite::prepare_variables(&secure_texts.unwrap_or_default(), &variables)?;
     // Even disarmed profiles must keep their references and valid numeric parameters.
     for profile in db.games.iter().flat_map(|game| &game.profiles) {
         for hotkey in &profile.hotkeys {
@@ -1636,6 +1638,8 @@ fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<
     }
     db.variables = variables;
     save_database(&app, &state, &mut db)?;
+    password_write.commit();
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }

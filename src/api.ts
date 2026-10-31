@@ -74,8 +74,13 @@ export const api = {
   saveSettings: (settings: Settings) =>
     invoke<Database>("save_settings", { settings }),
 
-  saveVariables: (variables: Variable[]) =>
-    invoke<Database>("save_variables", { variables }),
+  saveVariables: async (variables: Variable[], secureTexts: SecureTextDraft[] = []) => {
+    try { return await invoke<Database>("save_variables", { variables, secureTexts }); }
+    catch (error) {
+      if (secureTexts.length) throw new Error("Could not save the behavior's password.");
+      throw error;
+    }
+  },
 
   writeTextFile: (path: string, content: string) =>
     invoke<void>("write_text_file", { path, content }),

@@ -35,15 +35,34 @@ pub fn profile_ids(profile: &Profile) -> HashSet<String> {
 }
 
 pub fn database_ids(db: &Database) -> HashSet<String> {
-    db.games.iter().flat_map(|game| &game.profiles).flat_map(profile_ids).collect()
+    let mut ids = variable_ids(&db.variables);
+    ids.extend(db.games.iter().flat_map(|game| &game.profiles).flat_map(profile_ids));
+    ids
 }
 
-/// Newly written credentials are rolled back unless the profile was persisted.
+fn variable_ids(variables: &[crate::variables::Variable]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for variable in variables {
+        if let crate::variables::VariableValue::Behavior(source) = &variable.value {
+            if let Ok(actions) = crate::behavior::parse(source) { action_ids(&actions, &mut ids); }
+        }
+    }
+    ids
+}
+
+/// Newly written credentials are rolled back unless their definition was persisted.
 pub struct PasswordWrite { created: Vec<String> }
 
 impl PasswordWrite {
     pub fn prepare(drafts: &[PasswordDraft], profile: &Profile) -> Result<Self, String> {
-        let referenced = profile_ids(profile);
+        Self::prepare_referenced(drafts, &profile_ids(profile))
+    }
+
+    pub fn prepare_variables(drafts: &[PasswordDraft], variables: &[crate::variables::Variable]) -> Result<Self, String> {
+        Self::prepare_referenced(drafts, &variable_ids(variables))
+    }
+
+    fn prepare_referenced(drafts: &[PasswordDraft], referenced: &HashSet<String>) -> Result<Self, String> {
         let mut pending = Self { created: Vec::new() };
         for draft in drafts {
             if !valid_credential_id(&draft.credential_id) || !referenced.contains(&draft.credential_id) {
@@ -53,7 +72,7 @@ impl PasswordWrite {
                 return Err("Enter a password of at most 1280 UTF-16 characters without null characters.".into());
             }
             // Edits receive a new ID; the previous credential is never overwritten by a draft.
-            if native::exists(&draft.credential_id)? { return Err("Secure send credential already exists. Reopen the hotkey and enter the password again.".into()); }
+            if native::exists(&draft.credential_id)? { return Err("Secure send credential already exists. Reopen the editor and enter the password again.".into()); }
             native::write(&draft.credential_id, &draft.password)?;
             pending.created.push(draft.credential_id.clone());
         }
@@ -182,6 +201,12 @@ mod tests {
         assert!(native::exists(&id).unwrap());
         drop(pending);
         assert!(!native::exists(&id).unwrap());
+        let variable = crate::variables::Variable { id: "shared".into(), name: "Shared login".into(),
+            value: crate::variables::VariableValue::Behavior(serde_json::json!([{"type":"securesend","credentialId":id}]).to_string()) };
+        let pending = PasswordWrite::prepare_variables(&drafts, std::slice::from_ref(&variable)).unwrap();
+        assert!(native::exists(&id).unwrap());
+        drop(pending);
+        assert!(!native::exists(&id).unwrap());
         PasswordWrite::prepare(&drafts, &profile).unwrap().commit();
         assert!(native::exists(&id).unwrap());
         assert!(PasswordWrite::prepare(&drafts, &profile).is_err());
@@ -193,7 +218,11 @@ mod tests {
         db.games[0].profiles.remove(0);
         retire_unused(before.clone(), &db);
         assert!(native::exists(&id).unwrap());
+        db.variables.push(variable);
         db.games[0].profiles.clear();
+        retire_unused(before.clone(), &db);
+        assert!(native::exists(&id).unwrap());
+        db.variables.clear();
         retire_unused(before, &db);
         assert!(!native::exists(&id).unwrap());
     }

@@ -17,6 +17,7 @@ export type Step =
   | { type: "sleep"; ms: BehaviorValue }
   | { type: "send"; text: BehaviorValue }
   | { type: "securesend"; credentialId: string }
+  | { type: "behavior"; variableId: string }
   | { type: "unknown"; source: string }
   | { type: "borderless" | "fit" | "killprocess" | "lock" | "savecursor" | "restorecursor" | "stretch" };
 
@@ -83,7 +84,7 @@ function structuredStep(value: unknown): Step {
     press: ["key"], hold: ["key"], mousepress: ["key"], waitfor: ["key"],
     repeat: ["key", "interval", "hold"], goto: ["x", "y"], resolution: ["width", "height"],
     state: ["stateId"], startoverlay: ["itemId"], stopoverlay: ["itemId"], bar: ["itemId", "value"],
-    script: ["scriptId"], sleep: ["ms"], send: ["text"], securesend: ["credentialId"], unknown: ["source"],
+    script: ["scriptId"], sleep: ["ms"], send: ["text"], securesend: ["credentialId"], behavior: ["variableId"], unknown: ["source"],
     borderless: [], fit: [], killprocess: [], lock: [], savecursor: [], restorecursor: [], stretch: [],
   };
   const required = fields[String(step.type)];
@@ -97,6 +98,19 @@ function structuredStep(value: unknown): Step {
 
 export function stepsToString(steps: Step[]): string {
   return steps.length ? JSON.stringify(steps) : "";
+}
+
+export function expandBehavior(behavior: string, variables: Variable[], visiting: string[] = []): string {
+  const expand = (steps: Step[]): Step[] => steps.map(step => {
+    if (step.type === "behavior") {
+      const variable = variables.find(variable => variable.id === step.variableId);
+      if (!variable || variable.type !== "behavior") throw new Error("Select a Behavior variable");
+      if (visiting.includes(variable.id)) throw new Error("Circular behavior variable");
+      return { type: "sequence", steps: parseSteps(expandBehavior(variable.value, variables, [...visiting, variable.id])) };
+    }
+    return step.type === "sequence" || step.type === "parallel" ? { ...step, steps: expand(step.steps) } : step;
+  });
+  return stepsToString(expand(parseSteps(behavior)));
 }
 
 export const keyInputPattern = /^(?:(?:[lr]?(?:ctrl|shift|alt|win))\s+)*(?:[^\s,]+)(?:[\s,]+[^\s,]+)*$/i;
@@ -123,13 +137,18 @@ function normalizeLegacyValues(step: Step): Step {
     ? { variable: value.slice(1) } : value);
 }
 
-export function areStepsValid(steps: Step[], variables: Variable[] = [], hasTrigger = true, secureTexts: SecureTextDraft[] = []): boolean {
+export function areStepsValid(steps: Step[], variables: Variable[] = [], hasTrigger = true, secureTexts: SecureTextDraft[] = [], visiting: string[] = []): boolean {
   return steps.every(step => {
     try { step = mapStepValues(step, (value, type, field) => step.type === "press" && field === "key" && isMatchedTrigger(value)
       ? value : resolveValue(value, type, variables)); }
     catch { return false; }
     switch (step.type) {
-      case "sequence": case "parallel": return step.steps.length > 0 && areStepsValid(step.steps, variables, hasTrigger, secureTexts);
+      case "sequence": case "parallel": return step.steps.length > 0 && areStepsValid(step.steps, variables, hasTrigger, secureTexts, visiting);
+      case "behavior": {
+        const variable = variables.find(variable => variable.id === step.variableId);
+        return variable?.type === "behavior" && !visiting.includes(variable.id)
+          && areStepsValid(parseSteps(variable.value), variables, hasTrigger, secureTexts, [...visiting, variable.id]);
+      }
       case "securesend": return hasTrigger && isCredentialId(step.credentialId)
         && secureTexts.filter(draft => draft.credentialId === step.credentialId).every(draft => isPasswordValid(draft.password));
       case "hold": case "waitfor": return keyInputPattern.test(String(step.key).trim());
@@ -178,6 +197,7 @@ export function describeBehavior(behavior: string, stateName: (id: string) => st
       case "sleep": return `sleep(${step.ms})`;
       case "send": return `send(${step.text})`;
       case "securesend": return "Secure send";
+      case "behavior": return variableName(step.variableId);
       case "goto": return `goto(${step.x},${step.y})`;
       case "resolution": return `resolution(${step.width},${step.height})`;
       case "unknown": return step.source;

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
-import { parseSteps, stepsToString } from "../src/behaviors.ts";
+import { areStepsValid, parseSteps, stepsToString } from "../src/behaviors.ts";
 
 const require = createRequire(import.meta.url);
 const valueInputs = { ValueInput() {} };
@@ -13,6 +13,8 @@ const compiled = ts.transpileModule(readFileSync(new URL("../src/BehaviorEditor.
 }).outputText;
 const exports = {};
 runInNewContext(compiled, { exports, require(name) {
+  if (name === "react") return { ...require("react"), useState: initial => [initial, () => {}] };
+  if (name === "./behaviors") return { areStepsValid };
   if (name === "./ValueInput") return valueInputs;
   if (name.startsWith(".")) return {};
   return require(name);
