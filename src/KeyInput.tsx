@@ -220,8 +220,8 @@ export function KeyInput({ value, onChange, placeholder = "Key", allowChord = fa
     </div>
   ) : (
     <div className="input-row key-input">
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
-      <IconButton showLabel icon="keyboard" label="Record key" className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} />
+      <input aria-label={placeholder} title={placeholder} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
+      <IconButton icon="keyboard" label="Record key" className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} />
     </div>
   );
 }

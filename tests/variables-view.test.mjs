@@ -18,6 +18,10 @@ async function scenario() {
     await wait();
   };
   const click = async selector => { get(selector).click(); await wait(); };
+  const add = async (label, section = get('#editor > .steps-section')) => {
+    section.querySelector(':scope > .step-add-btns > [aria-label="Add action"]').click(); await wait();
+    section.querySelector(`:scope > .action-picker [aria-label="${label}"]`).click(); await wait();
+  };
   const button = async text => {
     const element = [...document.querySelectorAll("button")].find(button => button.getAttribute("aria-label") === text || button.textContent.trim() === text);
     if (!element) throw new Error(`Missing button: ${text}`);
@@ -72,9 +76,9 @@ async function scenario() {
     check("renaming updates the selector while retaining its identity", get('[aria-label="Sleep (ms) variable"]').selectedOptions[0].textContent === "buff timer renamed" && get('[aria-label="Sleep (ms) value"]').textContent === "6000" && window.snapshot.steps[0].ms.variable === id);
     const sleepChoices = [...get('[aria-label="Sleep (ms) variable"]').options].map(option => option.textContent);
     check("Sleep only offers Number variables", !sleepChoices.includes("chat message") && !sleepChoices.includes("cast keys"));
-    await button("Type text");
+    await add("Type text");
     await set('[aria-label="Text source"]', "variable");
-    await button("Press keys");
+    await add("Press keys");
     await set('[aria-label="Keys source"]', "variable");
     check("Press defaults to On press", get('[aria-label="Activation"]').value === "press");
     await set('[aria-label="Activation"]', "release");
@@ -85,10 +89,10 @@ async function scenario() {
     check("switching text back to Value preserves literal dollar-prefixed content and visible line breaks", window.snapshot.steps[1].text === "$buff; hello\nworld" && get('[aria-label="Text"]').value === "$buff; hello\nworld");
     await set('[aria-label="Sleep (ms) source"]', "value");
     check("switching Sleep back to Value uses the resolved number", get('[aria-label="Sleep (ms)"]').value === "6000");
-    await button("Sequence");
+    await add("Sequence");
     const group = [...document.querySelectorAll('.step-row__type')].find(element => element.textContent === "sequence").closest('.step-row');
     const nested = group.querySelector('.steps-section');
-    nested.querySelector('button[aria-label="Sleep"]').click(); await wait();
+    await add("Sleep", nested);
     const sources = document.querySelectorAll('[aria-label="Sleep (ms) source"]');
     const nestedSource = sources[sources.length - 1];
     Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(nestedSource, "variable");
@@ -96,14 +100,15 @@ async function scenario() {
     nested.querySelector('.step-row button[aria-label="Delete step"]').click(); await wait();
     check("nested Sleep steps can select the shared variable and save", window.snapshot.steps[3].steps[0].ms.variable === id && !get("#save-behavior").disabled);
     await click("#save-behavior");
-    await click('#editor > .steps-section > .step-add-btns button[aria-label="Mouse press"]');
+    await click('#editor > .steps-section > .step-add-btns button[aria-label="Add action"]');
+    await click('#editor > .steps-section > .action-picker button[aria-label="Mouse press"]');
     check("Mouse press defaults to On press and Single click", get('.step-row:has([aria-label="Click type"]) [aria-label="Activation"]').value === "press" && get('[aria-label="Click type"]').value === "single");
     await set('.step-row:has([aria-label="Click type"]) [aria-label="Activation"]', "release");
     await set('[aria-label="Click type"]', "double");
     await click("#save-behavior");
     check("Mouse press retains On release and Double click after reopening", window.snapshot.steps[4].onRelease === true && window.snapshot.steps[4].doubleClick === true && get('.step-row:has([aria-label="Click type"]) [aria-label="Activation"]').value === "release");
     const sequence = get('.step-row--group .steps-section');
-    sequence.querySelector('button[aria-label="Press keys"]').click(); await wait();
+    await add("Press keys", sequence);
     await set('.step-row--group [aria-label="Keys source"]', "variable");
     await set('.step-row--group [aria-label="Activation"]', "release");
     await click("#save-behavior");

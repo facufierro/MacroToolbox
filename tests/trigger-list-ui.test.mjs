@@ -62,7 +62,8 @@ async function scenario() {
     check('Save and use assigns the saved list while preserving its entry order', get('[aria-label="Trigger variable"]').value === id && list().value.join(',') === 'lctrl 2,lctrl 3,lctrl 1');
     check('the Trigger selector excludes ordinary Keys variables', ![...get('[aria-label="Trigger variable"]').options].some(option => option.textContent === 'Output keys'));
     await set('[aria-label="Activation"]', 'release');
-    await click('.step-add-btns > button[aria-label="Press keys"]');
+    await click('.step-add-btns > button[aria-label="Add action"]');
+    await click('.action-picker button[aria-label="Press keys"]');
     await set('.steps-list > .sortable-item:last-child input[placeholder="Keys"]', 'e');
     await click('button[aria-label="Save"]');
     const saved = window.snapshot.db.scopes[0].profiles[0].hotkeys[0];

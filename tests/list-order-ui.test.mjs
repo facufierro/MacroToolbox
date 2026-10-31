@@ -119,7 +119,7 @@ async function scenario() {
     await click('#save-steps');
     check("saving and reopening behavior steps preserves the dragged order", JSON.stringify(window.snapshot.steps) === serialized);
     await click('#profile');
-    check("saved row controls stay within the editor width", [...document.querySelectorAll('.editor .step-row,.editor .drag-handle')].every(element => {
+    check("saved row controls stay within the editor width", [...document.querySelectorAll('.editor .step-row,.editor .drag-handle')].filter(element => element.getClientRects().length).every(element => {
       const rect = element.getBoundingClientRect(), frame = get('.editor').getBoundingClientRect();
       return rect.left >= frame.left && rect.right <= frame.right;
     }));

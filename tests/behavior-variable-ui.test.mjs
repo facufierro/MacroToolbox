@@ -19,12 +19,15 @@ async function scenario() {
   }
   const variable = name => window.snapshot.db.variables.find(value => value.name === name);
   const row = name => [...document.querySelectorAll('.variable-row')].find(value => value.querySelector('.variable-row__name').textContent === name);
-  const add = label => click(`form.modal .variable-behavior-editor > .steps-section > .step-add-btns > [aria-label="${label}"]`);
+  const add = async (label, section = get('form.modal .variable-behavior-editor > .steps-section')) => {
+    section.querySelector(':scope > .step-add-btns > [aria-label="Add action"]').click(); await wait();
+    section.querySelector(`:scope > .action-picker [aria-label="${label}"]`).click(); await wait();
+  };
   const owner = () => window.snapshot.db.scopes[0].profiles[0];
   const flat = steps => steps.flatMap(step => step.type === 'sequence' || step.type === 'parallel' ? flat(step.steps) : [step]);
   try {
     await wait();
-    await click('.modal--wide > .steps-section > .step-add-btns > [aria-label="Secure send"]');
+    await add('Secure send', get('.modal--wide > .steps-section'));
     await set('[aria-label="Password"]', 'converted-secret');
     await click('.modal--wide > .steps-section > .step-add-btns > [aria-label="Save as variable"]');
     check('Save as variable opens the existing complete action list in the wide editor', get('[aria-label="Variable type"]').value === 'behavior' && document.querySelectorAll('form.modal .step-row').length === 4 && get('form.modal').classList.contains('modal--wide'));

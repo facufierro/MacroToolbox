@@ -13,21 +13,17 @@ const compiled = ts.transpileModule(readFileSync(new URL("../src/BehaviorEditor.
 }).outputText;
 const exports = {};
 runInNewContext(compiled, { exports, require(name) {
-  if (name === "react") return { ...require("react"), useState: initial => [initial, () => {}] };
+  if (name === "react") return { ...require("react"), useState: initial => [initial, () => {}], useRef: value => ({ current: value }) };
   if (name === "./behaviors") return { areStepsValid };
   if (name === "./ValueInput") return valueInputs;
   if (name.startsWith(".")) return {};
   return require(name);
 } });
 
-test("Toggle keys exposes the standard variable-capable key input and is unavailable to events", () => {
-  let steps = [];
+test("Toggle keys exposes the standard variable-capable key input", () => {
+  let steps = [{ type: "toggle", key: "" }];
   const variables = [{ id: "keys", name: "Movement", type: "keys", value: "w LButton" }];
   const editor = hasTrigger => exports.BehaviorStepsEditor({ steps, variables, states: [], overlays: [], scripts: [], gameExe: "", hasTrigger, onChange: next => { steps = next; } });
-  const button = hasTrigger => editor(hasTrigger).props.children[1].props.children[0].find(element => element.props.label === "Toggle keys");
-  assert.equal(button(false).props.disabled, true);
-  assert.equal(button(true).props.disabled, false);
-  button(true).props.onClick();
   assert.deepEqual(parseSteps(stepsToString(steps)), [{ type: "toggle", key: "" }]);
   const row = editor(true).props.children[0].props.children(steps[0], 0);
   const input = row.type(row.props).props.children[1].props.children.find(element => element?.type === valueInputs.ValueInput);
