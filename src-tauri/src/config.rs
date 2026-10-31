@@ -441,48 +441,29 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         v if v == CURRENT_DB_VERSION => {
             (serde_json::from_value(value).map_err(|e| e.to_string())?, false)
         }
-        6 => {
+        // These versions share the folder-owned profile shape. Defaults, typed
+        // variable deserialization, and normalization below upgrade their fields.
+        3..=6 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut backup = path.as_os_str().to_owned(); backup.push(".v6.bak");
-            std::fs::copy(path, std::path::Path::new(&backup)).map_err(|e| format!("Could not back up settings: {e}"))?;
-            db.version = CURRENT_DB_VERSION;
-            (db, true)
-        }
-        5 => {
-            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            db.version = CURRENT_DB_VERSION;
-            (db, true)
-        }
-        4 => {
-            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut backup = path.as_os_str().to_owned(); backup.push(".v4.bak");
-            std::fs::copy(path, std::path::Path::new(&backup)).map_err(|e| format!("Could not back up settings: {e}"))?;
-            db.version = CURRENT_DB_VERSION;
-            (db, true)
-        }
-        3 => {
-            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut backup = path.as_os_str().to_owned();
-            backup.push(".v3.bak");
-            let _ = std::fs::copy(path, std::path::Path::new(&backup));
             db.version = CURRENT_DB_VERSION;
             (db, true)
         }
         2 => {
             let legacy: legacy_v2::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut backup = path.as_os_str().to_owned();
-            backup.push(".v2.bak");
-            let _ = std::fs::copy(path, std::path::Path::new(&backup));
             (legacy_v2::migrate(legacy), true)
         }
         _ => {
             let legacy: legacy_v1::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut backup = path.as_os_str().to_owned();
-            backup.push(".v1.bak");
-            let _ = std::fs::copy(path, std::path::Path::new(&backup));
             (legacy_v1::migrate(legacy), true)
         }
     };
+
+    if migrated {
+        let mut backup = path.as_os_str().to_owned();
+        backup.push(format!(".v{}.bak", version.max(1)));
+        std::fs::copy(path, std::path::Path::new(&backup))
+            .map_err(|e| format!("Could not back up settings: {e}"))?;
+    }
 
     // Self-heal the always-present global folder, then persist only when something changed.
     let added_global = ensure_global_folder(&mut db);
@@ -994,6 +975,7 @@ mod tests {
         db.variables.push(super::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() });
         super::save_db(&path, &db).unwrap();
         assert_eq!(load_db(&path).unwrap().variables, db.variables);
+        std::fs::remove_file(path.with_extension("json.v5.bak")).unwrap();
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -1010,6 +992,73 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
         assert_eq!(load_db(&path).unwrap().variables, migrated.variables);
         std::fs::remove_file(&path).unwrap(); std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
+    fn skipped_schema_versions_upgrade_with_backups_and_reopen_without_rewriting() {
+        for version in 0..super::CURRENT_DB_VERSION {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-upgrade-{version}-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let mut fixture = serde_json::json!({
+                "version": version,
+                "scopes": [{"id":"game", "name":"Game", "exe":"game.exe", "profiles":[{
+                    "id":"keys", "name":"Keys", "armed":true,
+                    "hotkeys":[{"trigger":"rctrl o", "behavior":"send(ø)"}],
+                    "states":[{"id":"buff", "name":"Buff", "duration_ms":5000}]
+                }]}],
+                "settings":{"ahk_exe":"AutoHotkey64.exe", "close_to_tray":true}
+            });
+            if version == 0 { fixture.as_object_mut().unwrap().remove("version"); }
+            if version <= 1 { fixture["scopes"][0]["active_profile"] = serde_json::json!("keys"); }
+            if version == 2 { fixture["scopes"][0]["profiles"][0]["exe"] = serde_json::json!("game.exe"); }
+            let source = fixture.to_string();
+            std::fs::write(&path, &source).unwrap();
+            let migrated = load_db(&path).unwrap();
+            let backup = std::path::PathBuf::from(format!("{}.v{}.bak", path.display(), version.max(1)));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
+            assert_eq!(migrated.games[0].id, "game");
+            assert_eq!(migrated.games[0].exe, "game.exe");
+            assert_eq!(migrated.games[0].states[0].id, "buff");
+            let profile = &migrated.games[0].profiles[0];
+            assert!(profile.armed);
+            assert_eq!(profile.id, "keys");
+            assert_eq!(profile.hotkeys[0].behavior, "send(ø)");
+            assert_eq!(migrated.settings.ahk_exe, "AutoHotkey64.exe");
+            assert!(migrated.settings.close_to_tray);
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            load_db(&path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_upgrade_backup_leaves_the_original_settings_untouched() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-upgrade-failure-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = r#"{"version":5,"scopes":[],"settings":{"ahk_exe":""}}"#;
+        let backup = std::path::PathBuf::from(format!("{}.v5.bak", path.display()));
+        std::fs::write(&path, source).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        assert!(load_db(&path).unwrap_err().contains("Could not back up settings"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(backup).unwrap();
+    }
+
+    #[test]
+    fn a_newer_unsupported_schema_is_never_downgraded_or_overwritten() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-future-schema-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let version = super::CURRENT_DB_VERSION + 1;
+        let source = serde_json::json!({"version":version, "future_data":{"preserve":true}}).to_string();
+        std::fs::write(&path, &source).unwrap();
+        assert!(load_db(&path).unwrap_err().contains("requires a newer MacroToolbox version"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        assert!(!path.with_extension(format!("json.v{version}.bak")).exists());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -11,6 +11,24 @@ These instructions apply to the entire repository.
   and colors. Keep new UI as concise as comparable existing controls; do not redesign adjacent UI
   unless requested.
 
+## Settings must migrate automatically on upgrade
+
+- Opening a newer MacroToolbox version must automatically upgrade existing saved settings
+  before startup uses them. Users must not need to edit `db.json`, reset their setup, or run
+  a separate migration command.
+- Every persisted schema change must include the required startup migration in the same change.
+  Preserve existing folders, profiles, hotkeys, variables, references, and behavior, including
+  when users skip releases. Changing only the saved version number is not a migration.
+- Back up the original settings before migrating and persist the result atomically. A failed
+  migration must leave the original settings intact. Reopening the app must not repeat an
+  already completed migration.
+- Add regression coverage for upgrading older saved settings, skipping versions, preserving
+  configured behavior, and reopening the migrated settings.
+- Opening a newer executable while an older copy is running must hand ownership to the
+  newer build before migration. The single-instance handoff must not discard the newer
+  executable and restore the older app instead. Close the old input host cleanly before
+  the new build starts its own.
+
 ## Copilot key remap invariants
 
 The Copilot key is not a standalone key: on the target Windows hardware it arrives as the

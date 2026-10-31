@@ -86,9 +86,9 @@ fn keep_process_responsive(child: &Child) {
 }
 
 /// Ask AutoHotkey's hidden main window to close so its OnExit input cleanup runs. Returns
-/// false when no window for this child exists, in which case waiting cannot help.
+/// false when no window for this process exists, in which case waiting cannot help.
 #[cfg(target_os = "windows")]
-fn request_graceful_exit(child: &Child) -> bool {
+pub(crate) fn request_graceful_exit(pid: u32) -> bool {
     use winapi::shared::minwindef::{BOOL, DWORD, LPARAM, TRUE};
     use winapi::shared::windef::HWND;
     use winapi::um::winuser::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
@@ -109,7 +109,7 @@ fn request_graceful_exit(child: &Child) -> bool {
     }
 
     let mut request = ExitRequest {
-        pid: child.id(),
+        pid,
         posted: false,
     };
     unsafe { EnumWindows(Some(enum_window), &mut request as *mut _ as LPARAM); }
@@ -118,7 +118,7 @@ fn request_graceful_exit(child: &Child) -> bool {
 
 fn stop_process(mut child: Child) {
     #[cfg(target_os = "windows")]
-    if request_graceful_exit(&child) {
+    if request_graceful_exit(child.id()) {
         let deadline = Instant::now() + Duration::from_millis(750);
         while Instant::now() < deadline {
             match child.try_wait() {
