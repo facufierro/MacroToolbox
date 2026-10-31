@@ -1158,8 +1158,13 @@ SendSecureText(credentialId, target := "", profile := "") {
 }
 
 SendLiteralText(text) {
+    global heldOutputCounts
+    if text = ""
+        return
     ; AHK's text sender restores its initial modifier snapshot for each character,
     ; even in Blind mode. Send only text packets so a native Ctrl-up stays up.
+    ; Alt still has to be neutralized: otherwise Windows delivers system characters.
+    altKeys := []
     inputSize := A_PtrSize = 8 ? 40 : 28, keyOffset := A_PtrSize = 8 ? 8 : 4
     inputs := Buffer(inputSize * 2, 0)
     loop 2 {
@@ -1170,6 +1175,12 @@ SendLiteralText(text) {
         NumPut("UPtr", 0xFFC3D44D - A_SendLevel, inputs, offset + keyOffset + (A_PtrSize = 8 ? 16 : 12))
     }
     try {
+        for key in ["LAlt", "RAlt"] {
+            if GetKeyState(key) {
+                altKeys.Push(key)
+                SendEvent("{Blind}{" key " up}")
+            }
+        }
         index := 0
         while index < StrLen(text) {
             if A_IsSuspended
@@ -1187,7 +1198,13 @@ SendLiteralText(text) {
             if A_KeyDelay >= 0
                 Sleep A_KeyDelay
         }
-    } finally DllCall("msvcrt\memset", "Ptr", inputs.Ptr, "Int", 0, "UPtr", inputs.Size, "CDecl Ptr")
+    } finally {
+        DllCall("msvcrt\memset", "Ptr", inputs.Ptr, "Int", 0, "UPtr", inputs.Size, "CDecl Ptr")
+        for key in altKeys {
+            if GetKeyState(key, "P") || heldOutputCounts.Get(key, 0) || (key = "LAlt" && heldOutputCounts.Get("Alt", 0))
+                SendEvent("{Blind}{" key " down}")
+        }
+    }
 }
 
 SendLiteralInput(inputs, inputSize) {

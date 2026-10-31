@@ -6,6 +6,8 @@
 global enabled := Map(), behaviorClipboardBackup := "", behaviorClipboardPending := false, behaviorClipboardSequence := 0
 global modifierEvents := [], capturedText := "", trackModifiers := false
 global releaseAtText := false, ownerReleased := false
+global heldOutputCounts := Map(), textHadAlt := false
+global releaseAltAtText := 0, altOwnerReleased := false
 OnError(TextInputFailure)
 InstallKeybdHook true, true
 callback := CallbackCreate(ObserveTextModifiers, "", 3)
@@ -54,6 +56,40 @@ try {
             throw Error("Ctrl remained down after its owner's release.")
         FileAppend("PASS: " (secure ? "Secure send" : "Type text") (scenario.release ? " respects Ctrl released during output." : " preserves external Ctrl without extra modifier events.") "`n", "*")
     }
+    for alt in [{key: "LAlt", vk: 0xA4, flags: 0}, {key: "RAlt", vk: 0xA5, flags: 1}] {
+        for scenario in [{secure: false, release: false}, {secure: true, release: false}, {secure: false, release: true}, {secure: true, release: true}] {
+            secure := scenario.secure
+            fixtureText := "!trade rep"
+            if secure
+                fixtureCredential := SecureCredentialFixture(fixtureText)
+            heldOutputCounts[alt.key] := 1
+            DllCall("keybd_event", "UChar", 0xA3, "UChar", 0x1D, "UInt", 1, "UPtr", 0)
+            DllCall("keybd_event", "UChar", alt.vk, "UChar", 0x38, "UInt", alt.flags, "UPtr", 0)
+            Sleep 20
+            if !(DllCall("GetAsyncKeyState", "Int", alt.vk, "Short") & 0x8000)
+                throw Error("The test Alt hold was not established.")
+            capturedText := "", textHadAlt := false, modifierEvents := [], trackModifiers := true
+            releaseAltAtText := scenario.release ? alt : 0, altOwnerReleased := false
+            if secure
+                SendSecureText(fixtureCredential.id, "*")
+            else
+                SendBehaviorText(fixtureText)
+            Sleep 20
+            trackModifiers := false
+            if textHadAlt || capturedText != fixtureText
+                throw Error("Literal text still carries Alt instead of ordinary character input.")
+            if modifierEvents.Length || !(DllCall("GetAsyncKeyState", "Int", 0xA3, "Short") & 0x8000)
+                throw Error("Alt text changed Ctrl while neutralizing Alt.")
+            if !!(DllCall("GetAsyncKeyState", "Int", alt.vk, "Short") & 0x8000) = scenario.release
+                throw Error("Literal text did not preserve its current Alt ownership.")
+            if scenario.release && !altOwnerReleased
+                throw Error("The fixture did not release its Alt owner during output.")
+            heldOutputCounts.Clear()
+            DllCall("keybd_event", "UChar", 0xA3, "UChar", 0x1D, "UInt", 3, "UPtr", 0)
+            DllCall("keybd_event", "UChar", alt.vk, "UChar", 0x38, "UInt", alt.flags | 2, "UPtr", 0)
+            FileAppend("PASS: " (secure ? "Secure send" : "Type text") " neutralizes " alt.key (scenario.release ? " without restoring a released owner." : " and restores its held owner.") "`n", "*")
+        }
+    }
 } finally CleanupTextFixture()
 ExitApp 0
 
@@ -64,6 +100,8 @@ CleanupTextFixture(*) {
     fixtureCleaned := true
     trackModifiers := false
     DllCall("keybd_event", "UChar", 0xA3, "UChar", 0x1D, "UInt", 3, "UPtr", 0)
+    DllCall("keybd_event", "UChar", 0xA4, "UChar", 0x38, "UInt", 2, "UPtr", 0)
+    DllCall("keybd_event", "UChar", 0xA5, "UChar", 0x38, "UInt", 3, "UPtr", 0)
     DllCall("UnhookWindowsHookEx", "Ptr", hook)
     CallbackFree callback
 }
@@ -78,17 +116,25 @@ FixtureWinGetProcessName(*) {
 }
 
 ObserveTextModifiers(code, message, data) {
-    global capturedText, releaseAtText, ownerReleased
+    global capturedText, releaseAtText, ownerReleased, textHadAlt, releaseAltAtText, altOwnerReleased
     if code >= 0 && trackModifiers {
         vk := NumGet(data, 0, "UInt"), flags := NumGet(data, 8, "UInt")
         if (vk = 0xA3 || vk = 0xA2) && (flags & 0x10)
             modifierEvents.Push({vk: vk, flags: flags})
-        else if flags & 0x10 {
+        else if (vk = 0xA4 || vk = 0xA5) && (flags & 0x10) {
+            ; Let the fixture's Alt ownership transitions reach Windows.
+        } else if flags & 0x10 {
             if vk = 0xE7 && !(flags & 0x80) {
                 capturedText .= Chr(NumGet(data, 4, "UInt"))
+                textHadAlt := textHadAlt || !!(flags & 0x20)
                 if releaseAtText {
                     releaseAtText := false, ownerReleased := true
                     DllCall("keybd_event", "UChar", 0xA3, "UChar", 0x1D, "UInt", 3, "UPtr", 0)
+                }
+                if IsObject(releaseAltAtText) {
+                    releasedAlt := releaseAltAtText, releaseAltAtText := 0, altOwnerReleased := true
+                    heldOutputCounts.Delete(releasedAlt.key)
+                    DllCall("keybd_event", "UChar", releasedAlt.vk, "UChar", 0x38, "UInt", releasedAlt.flags | 2, "UPtr", 0)
                 }
             }
             ; Consume fixture output before it can reach any application.

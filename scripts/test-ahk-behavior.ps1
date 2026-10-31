@@ -32,11 +32,11 @@ $isolatedEngine = [regex]::Replace($engineText, '\bSend(Input|Event)\b', 'TestSe
 $isolatedEngine = [regex]::Replace($isolatedEngine, '\bGetKeyState\b', 'TestGetKeyState')
 if ($Engine -in @('behavior', 'runtime')) {
     $literalSender = [regex]::Match($engineText, '(?ms)^SendLiteralText\([^\r\n]*\) \{.*?^\}').Value
-    $isolatedEngine = $isolatedEngine.Replace($literalSender, 'SendLiteralText(text) {' + [Environment]::NewLine + '    TestSend("{Text}" text)' + [Environment]::NewLine + '}')
+    $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^SendLiteralText\([^\r\n]*\) \{.*?^\}', 'SendLiteralText(text) {' + [Environment]::NewLine + '    TestSend("{Text}" text)' + [Environment]::NewLine + '}')
     $literalInput = [regex]::Match($engineText, '(?ms)^SendLiteralInput\([^\r\n]*\) \{.*?^\}').Value
     $isolatedEngine = [regex]::Replace($isolatedEngine, '(?ms)^SendLiteralInput\([^\r\n]*\) \{.*?^\}', '')
     if ($Engine -eq 'runtime') {
-        $literalTestPrimitives = [Environment]::NewLine + $literalSender.Replace('SendLiteralText(', 'NativeSendLiteralText(').Replace('SendLiteralInput(', 'TestLiteralInput(').Replace('A_IsSuspended', 'testInputSuspended')
+        $literalTestPrimitives = [Environment]::NewLine + $literalSender.Replace('SendLiteralText(', 'NativeSendLiteralText(').Replace('SendLiteralInput(', 'TestLiteralInput(').Replace('A_IsSuspended', 'testInputSuspended').Replace('SendEvent(', 'TestSend(').Replace('GetKeyState(', 'TestGetKeyState(')
         $literalTestPrimitives += [Environment]::NewLine + $literalInput.Replace('SendLiteralInput(', 'NativeSendLiteralInput(').Replace('DllCall("SendInput", ', 'TestTextDelivery(')
         $isolatedEngine += $literalTestPrimitives
     }

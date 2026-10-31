@@ -5,6 +5,7 @@ global testInputSuspended := false, recoveryTimerTicks := 0
 global inputErrorUnwound := false, inputErrorContinued := false
 global literalPackets := [], literalBuffer := 0, literalFailure := false, literalDeliveryResults := [], literalDeliveryCalls := []
 global suspendDuringText := false
+global literalOnPacket := 0
 RunRuntimeTest("parallel branches make progress while a sibling holds", TestParallelHold)
 RunRuntimeTest("sequences wait for their previous action", TestStructuredSequence)
 RunRuntimeTest("focus loss cancels delays and releases owned keys", TestRuntimeFocusLoss)
@@ -91,8 +92,61 @@ RunRuntimeTest("literal text preserves Unicode, line endings, Tab, and Backspace
 RunRuntimeTest("literal text clears its packet buffer after a delivery failure", TestLiteralPacketFailure)
 RunRuntimeTest("partial text delivery releases its unfinished key and reports a safe error", TestPartialLiteralDelivery)
 RunRuntimeTest("suspension interrupts an in-progress text send and clears its buffer", TestSuspendedLiteralText)
-FileAppend("All 87 structured runtime tests passed.`n", "*")
+RunRuntimeTest("text neutralizes either Alt and restores only current physical or macro owners", TestLiteralAltOwnership)
+RunRuntimeTest("text restores both held Alt keys after input failure or suspension", TestLiteralAltCleanup)
+FileAppend("All 89 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestLiteralAltOwnership() {
+    global testHeldKeys, testLogicalKeys, heldOutputCounts, testEvents, literalOnPacket
+    for key in ["LAlt", "RAlt"] {
+        for physical in [true, false] {
+            for released in [false, true] {
+                testEvents := []
+                testHeldKeys := Map("LShift", true, "LWin", true)
+                testLogicalKeys := Map("RCtrl", true, key, true)
+                heldOutputCounts := Map()
+                if physical
+                    testHeldKeys[key] := true
+                else
+                    heldOutputCounts[key] := 1
+                literalOnPacket := released ? ReleaseTextAlt.Bind(key) : 0
+                try NativeSendLiteralText("!trade rep")
+                finally literalOnPacket := 0
+                expected := ["{blind}{" StrLower(key) " up}"]
+                if !released
+                    expected.Push("{blind}{" StrLower(key) " down}")
+                AssertKeys(expected)
+                Assert(testLogicalKeys["RCtrl"] && testHeldKeys["LShift"] && testHeldKeys["LWin"], "Alt text changed an independent modifier")
+                AssertLiteralBufferCleared()
+            }
+        }
+    }
+}
+
+ReleaseTextAlt(key) {
+    global literalOnPacket
+    literalOnPacket := 0
+    testHeldKeys[key] := false
+    if heldOutputCounts.Has(key)
+        heldOutputCounts.Delete(key)
+}
+
+TestLiteralAltCleanup() {
+    global testHeldKeys, testLogicalKeys, testEvents, literalFailure, suspendDuringText, testInputSuspended
+    for failure in [true, false] {
+        testEvents := [], testHeldKeys := Map("LAlt", true, "RAlt", true), testLogicalKeys := Map("RCtrl", true)
+        literalFailure := failure, suspendDuringText := !failure, testInputSuspended := false
+        failed := false
+        try NativeSendLiteralText("!trade rep")
+        catch Error
+            failed := true
+        finally literalFailure := false, suspendDuringText := false, testInputSuspended := false
+        Assert(failed = failure, "Alt cleanup changed text delivery's failure result")
+        AssertKeys(["{blind}{lalt up}", "{blind}{ralt up}", "{blind}{lalt down}", "{blind}{ralt down}"])
+        AssertLiteralBufferCleared()
+    }
+}
 
 TestLiteralPackets() {
     global literalPackets, literalBuffer
@@ -138,6 +192,8 @@ TestLiteralInput(inputs, inputSize) {
         extra: NumGet(inputs, keyOffset + (A_PtrSize = 8 ? 16 : 12), "UPtr")})
     if literalFailure
         throw Error("fixture input failure")
+    if IsObject(literalOnPacket)
+        literalOnPacket.Call()
     if suspendDuringText
         testInputSuspended := true
 }
