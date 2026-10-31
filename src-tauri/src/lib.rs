@@ -13,6 +13,8 @@ mod protocol;
 mod config;
 mod firebase;
 mod scripts;
+#[cfg(target_os = "windows")]
+mod startup;
 
 use config::{Database, Game, Profile, Script, Settings};
 
@@ -1894,9 +1896,15 @@ fn start_watcher(handle: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "windows")]
+    if let Err(error) = startup::retire_older_instance(&context.config().identifier) {
+        startup::show_error(&error);
+        return;
+    }
     tauri::Builder::default()
-        // Must be the first plugin: a second launch hands off to the running instance,
-        // which just brings its window to the front instead of opening another copy.
+        // Must be the first plugin. Equal or older launches show the running app;
+        // a newer build has already retired it before reaching this handoff.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -1955,9 +1963,14 @@ pub fn run() {
                 config::save_db(&db_path, &Database::default())
                     .expect("failed to write initial db");
             }
-            let startup_settings = config::load_db(&db_path)
-                .map(|db| db.settings)
-                .unwrap_or_default();
+            let startup_settings = match config::load_db(&db_path) {
+                Ok(db) => db.settings,
+                Err(error) => {
+                    #[cfg(target_os = "windows")]
+                    startup::show_error(&error);
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
             let resource_dir = app.path().resource_dir().ok();
 
             app.manage(AppState {
@@ -2117,12 +2130,15 @@ pub fn run() {
             reveal_main_window,
             download_and_install_update,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                let state = app.state::<AppState>();
+                state.hotkeys_ahk.lock().unwrap().kill();
+                kill_all_scripts(&state);
                 #[cfg(target_os = "windows")]
-                restore_window_transforms(&app.state::<AppState>());
+                restore_window_transforms(&state);
             }
         });
 }
