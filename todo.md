@@ -2,7 +2,7 @@
 - add event detection in specific games, i need to make a way to detect events like buffing my character that show on the app kind of like a wrapper api but not detectable. no dll injection. to activate this there could be a dropdown menu in the folder creation.
 
 - I need to set up the ui to be more user friendly there are too many buttons and things sepparated by windows that should be easy to see and use. like the settings button in overlays.
-- add a toggle show for secure send
+- add key combinations to variables
 
 
 ## Bugs
