@@ -113,7 +113,7 @@ class BindingHost {
             kind := node["type"]
             if kind = "parallel" || kind = "sequence"
                 this.ValidatePlan(node["steps"])
-            if kind = "press" || kind = "hold" || kind = "repeat" || kind = "waitfor" {
+            if kind = "press" || kind = "hold" || kind = "toggle" || kind = "repeat" || kind = "waitfor" {
                 for key in HoldKeyList(RegExReplace(node["key"], "[,\s]+", " "))
                     if !GetKeyVK(key) && !GetKeySC(key)
                         throw ValueError("Unknown input key: " key)
@@ -122,12 +122,13 @@ class BindingHost {
     }
 
     Matches(binding) {
-        global enabled
+        global enabled, behaviorRuntime
         profile := binding["profile"]
         return profile["armed"] && (binding["toggle"] || enabled.Get(profile["id"], false))
             && (profile["target"] = "*" || WinActive("ahk_exe " profile["target"]))
             && (binding["prerequisites"] = "" || TriggerChordHeld(binding["prerequisites"]))
-            && (!binding["exact"] || TriggerModifiersAllowed(binding["trigger"]))
+            && (!binding["exact"] || TriggerModifiersAllowed(binding["trigger"], false,
+                binding["toggle"] ? "" : behaviorRuntime.ToggleModifiers(profile["id"] ":" binding["trigger"])))
     }
 
     Find(key) {

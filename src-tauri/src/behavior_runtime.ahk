@@ -18,9 +18,14 @@ class BehaviorExecutor {
         if this.runs.Has(owner) {
             if chord = ""
                 return
-            ; A fresh physical press owns a new activation. A previous wait or delay
-            ; must not consume it; cancel that run before sending the new prefix.
+            stoppingToggle := BehaviorHasToggle(this.runs[owner].task.node["steps"])
+            if stoppingToggle
+                this.latches[owner] := chord
+            ; Toggle runs consume the next fresh press as Stop. Other runs restart
+            ; from the prefix, replacing any previous wait or delay.
             this.Cancel(owner)
+            if stoppingToggle
+                return
         }
         this.nextId++
         MouseGetPos &x, &y
@@ -54,6 +59,30 @@ class BehaviorExecutor {
             if this.runs.Has(owner)
                 this.runs[owner].triggerHeld := false
         }
+    }
+
+    ToggleModifiers(owner) {
+        if !this.runs.Has(owner) || !BehaviorHasToggle(this.runs[owner].task.node["steps"])
+            return ""
+        return this.HeldModifiers(this.runs[owner].task)
+    }
+
+    HeldModifiers(task) {
+        modifiers := " "
+        if task.held {
+            for key in task.keys {
+                if RegExMatch(key, "^(Ctrl|Shift|Alt)$")
+                    key := "L" key
+                if RegExMatch(key, "^(L|R)(Ctrl|Shift|Alt|Win)$")
+                    modifiers .= key " "
+                ; AltGr contributes a synthetic Left Ctrl alongside Right Alt.
+                if key = "RAlt"
+                    modifiers .= "LCtrl "
+            }
+        }
+        for child in task.children
+            modifiers .= this.HeldModifiers(child)
+        return modifiers
     }
 
     Tick(*) {
@@ -105,7 +134,7 @@ class BehaviorExecutor {
         node := task.node
         kind := node["type"]
         if execution.background && !BehaviorContextActive(execution.target, execution.profile)
-            && InStr("|press|hold|repeat|mousepress|send|securesend|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
+            && InStr("|press|hold|toggle|repeat|mousepress|send|securesend|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
             throw TargetError("Input behavior requires the target app to be focused.")
         if !task.started && (kind = "press" || kind = "mousepress") && node.Get("onRelease", false) && execution.triggerHeld
             return
@@ -139,8 +168,8 @@ class BehaviorExecutor {
                 task.due := now + Integer(node["ms"])
             if now < task.due
                 return
-        } else if kind = "hold" || kind = "press" {
-            if first && (kind = "press" || execution.triggerHeld) {
+        } else if kind = "hold" || kind = "press" || kind = "toggle" {
+            if first && (kind != "hold" || execution.triggerHeld) {
                 task.held := true
                 keys := RegExReplace(node["key"], "[,\s]+", " ")
                 task.keys := HoldKeyList(keys)
@@ -152,7 +181,7 @@ class BehaviorExecutor {
                     task.due := now
                 }
             }
-            if task.held && (kind = "hold" ? execution.triggerHeld : now < task.due)
+            if task.held && (kind = "toggle" || (kind = "hold" ? execution.triggerHeld : now < task.due))
                 return
             this.Release(task)
         } else if kind = "repeat" {
@@ -340,9 +369,18 @@ class BehaviorExecutor {
 BehaviorNeedsHotkey(steps) {
     for node in steps {
         kind := node["type"]
-        if kind = "securesend" || ((kind = "press" || kind = "mousepress") && node.Get("onRelease", false))
+        if kind = "toggle" || kind = "securesend" || ((kind = "press" || kind = "mousepress") && node.Get("onRelease", false))
             return true
         if (kind = "sequence" || kind = "parallel") && BehaviorNeedsHotkey(node["steps"])
+            return true
+    }
+    return false
+}
+
+BehaviorHasToggle(steps) {
+    for node in steps {
+        kind := node["type"]
+        if kind = "toggle" || ((kind = "sequence" || kind = "parallel") && BehaviorHasToggle(node["steps"]))
             return true
     }
     return false

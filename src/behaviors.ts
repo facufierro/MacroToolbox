@@ -2,7 +2,7 @@ import type { BehaviorValue, Variable, ValueType, SecureTextDraft } from "./type
 import { isReference, isMatchedTrigger, resolveValue, isCredentialId, isPasswordValid } from "./behaviorValues.ts";
 
 export type Step =
-  | { type: "hold" | "waitfor"; key: BehaviorValue }
+  | { type: "hold" | "toggle" | "waitfor"; key: BehaviorValue }
   | { type: "press"; key: BehaviorValue; onRelease?: boolean }
   | { type: "mousepress"; key: BehaviorValue; doubleClick?: boolean; onRelease?: boolean }
   | { type: "repeat"; key: BehaviorValue; interval: BehaviorValue; hold: BehaviorValue }
@@ -48,7 +48,7 @@ export function parseSteps(behavior: string): Step[] {
       ? { type: source } as Step : { type: "unknown", source };
     const [, command, argument] = match;
     switch (command.toLowerCase()) {
-      case "press": case "hold": case "mousepress": case "waitfor":
+      case "press": case "hold": case "toggle": case "mousepress": case "waitfor":
         return { type: command.toLowerCase(), key: argument } as Step;
       case "pressalt": return { type: "mousepress", key: argument };
       case "repeat": {
@@ -81,7 +81,7 @@ function structuredStep(value: unknown): Step {
     return Array.isArray(step.steps) ? { type: step.type, steps: step.steps.map(structuredStep) } : unknown();
   }
   const fields: Record<string, string[]> = {
-    press: ["key"], hold: ["key"], mousepress: ["key"], waitfor: ["key"],
+    press: ["key"], hold: ["key"], toggle: ["key"], mousepress: ["key"], waitfor: ["key"],
     repeat: ["key", "interval", "hold"], goto: ["x", "y"], resolution: ["width", "height"],
     state: ["stateId"], startoverlay: ["itemId"], stopoverlay: ["itemId"], bar: ["itemId", "value"],
     script: ["scriptId"], sleep: ["ms"], send: ["text"], securesend: ["credentialId"], behavior: ["variableId"], unknown: ["source"],
@@ -120,7 +120,7 @@ const integer = (value: string, minimum: number) => /^\d+$/.test(value) && Numbe
 export function mapStepValues(step: Step, map: (value: BehaviorValue, type: ValueType, field: string) => BehaviorValue): Step {
   switch (step.type) {
     case "sleep": return { ...step, ms: map(step.ms, "number", "ms") };
-    case "press": case "hold": case "waitfor": case "mousepress": return { ...step, key: map(step.key, "keys", "key") };
+    case "press": case "hold": case "toggle": case "waitfor": case "mousepress": return { ...step, key: map(step.key, "keys", "key") };
     case "send": return { ...step, text: map(step.text, "text", "text") };
     case "repeat": return { ...step, key: map(step.key, "keys", "key"), interval: map(step.interval, "number", "interval"), hold: map(step.hold, "number", "hold") };
     case "goto": return { ...step, x: map(step.x, "number", "x"), y: map(step.y, "number", "y") };
@@ -152,6 +152,7 @@ export function areStepsValid(steps: Step[], variables: Variable[] = [], hasTrig
       case "securesend": return hasTrigger && isCredentialId(step.credentialId)
         && secureTexts.filter(draft => draft.credentialId === step.credentialId).every(draft => isPasswordValid(draft.password));
       case "hold": case "waitfor": return keyInputPattern.test(String(step.key).trim());
+      case "toggle": return hasTrigger && keyInputPattern.test(String(step.key).trim());
       case "press": return (isMatchedTrigger(step.key) ? hasTrigger : keyInputPattern.test(String(step.key).trim())) && validActivation(step.onRelease, hasTrigger);
       case "mousepress": return mouse.test(String(step.key).trim()) && (step.doubleClick === undefined || typeof step.doubleClick === "boolean") && validActivation(step.onRelease, hasTrigger);
       case "repeat": return keyInputPattern.test(String(step.key).trim()) && integer(String(step.interval), 1) && integer(String(step.hold), 0);
@@ -187,7 +188,7 @@ export function describeBehavior(behavior: string, stateName: (id: string) => st
     step = mapStepValues(step, value => isReference(value) ? variableName(value.variable) : isMatchedTrigger(value) ? "Matched trigger" : value);
     switch (step.type) {
       case "parallel": case "sequence": return `${step.type}(${describe(step.steps)})`;
-      case "hold": case "repeat": case "waitfor": return `${step.type}(${step.key})`;
+      case "hold": case "toggle": case "repeat": case "waitfor": return `${step.type}(${step.key})`;
       case "press": return `press(${step.key}${step.onRelease ? ", on release" : ""})`;
       case "mousepress": return `${step.type}(${step.key}${step.doubleClick ? ", double" : ""}${step.onRelease ? ", on release" : ""})`;
       case "state": return `${step.action === "set" ? "enter" : step.action === "clear" ? "leave" : "state"}(${stateName(step.stateId)})`;

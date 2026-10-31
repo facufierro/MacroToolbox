@@ -13,7 +13,8 @@ const steps = [
   { type: "sleep", ms: { variable: "after-cast" } },
   { type: "press", key: "v" },
 ];
-const variables = [{ id: "after-cast", name: "after-cast-timer", type: "number", value: 150 }];
+const variables = [{ id: "after-cast", name: "after-cast-timer", type: "number", value: 150 },
+  { id: "movement", name: "Movement", type: "keys", value: "w LButton" }];
 
 async function scenario() {
   const results = [];
@@ -46,6 +47,14 @@ async function scenario() {
     check('nested editors wrap within their available width', fits());
     window.showNested(false); await wait();
     check('recording controls and activation choices remain available', document.querySelectorAll('button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 2);
+    document.querySelector('button[aria-label="Toggle keys"]').click(); await wait();
+    const toggle = [...document.querySelectorAll('.step-row')].find(row => row.querySelector('.step-row__type').textContent === 'toggle');
+    const toggleSource = toggle.querySelector('[aria-label="Keys source"]');
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(toggleSource, 'variable');
+    toggleSource.dispatchEvent(new Event('change', { bubbles: true })); await wait();
+    check('Toggle keys uses the existing compact key-variable controls', toggle.querySelector('[aria-label="Keys variable"]').value === 'movement' && fits() && bounds(toggle).height < 64);
+    document.querySelector('button[aria-label="Save"]').click(); await wait();
+    check('Toggle keys saves as a shared key reference', JSON.stringify(JSON.parse(window.saved.behavior).at(-1)) === JSON.stringify({type:'toggle',key:{variable:'movement'}}));
     document.getElementById('results').textContent = JSON.stringify({ results });
   } catch (error) { document.getElementById('results').textContent = JSON.stringify({ results, error: error.message, stack: error.stack }); }
 }

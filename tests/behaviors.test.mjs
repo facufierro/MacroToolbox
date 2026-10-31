@@ -72,6 +72,21 @@ test("invalid nested actions and timing parameters prevent saving", () => {
   assert.equal(areStepsValid([{ type: "mousepress", key: "rctrl shift XButton2" }]), true);
 });
 
+test("Toggle keys round-trips through shared definitions and retains the caller's trigger requirement", async () => {
+  const { expandBehavior } = await import("../src/behaviors.ts");
+  const { exportVariables, importVariables, validateVariableBehaviors } = await import("../src/variables.ts");
+  const values = [{ id: "movement", name: "Movement", type: "keys", value: "rctrl w LButton" },
+    { id: "walk", name: "Walk", type: "behavior", value: stepsToString([{ type: "toggle", key: { variable: "movement" } }]) }];
+  const source = stepsToString([{ type: "behavior", variableId: "walk" }]);
+  const profile = { hotkeys: [{ trigger: "f1", behavior: source }], events: [] };
+  const imported = importVariables([profile], exportVariables([profile], values), []);
+  assert.equal(validateVariableBehaviors(imported.variables), true);
+  const steps = parseSteps(expandBehavior(imported.profiles[0].hotkeys[0].behavior, imported.variables));
+  assert.equal(areStepsValid(steps, imported.variables), true);
+  assert.equal(areStepsValid(steps, imported.variables, false), false);
+  assert.match(describeBehavior(values[1].value, id => id, id => id, id => values.find(value => value.id === id).name), /toggle\(Movement\)/);
+});
+
 test("reference remapping reaches nested groups without modifying text", () => {
   const source = stepsToString([{ type: "parallel", steps: [{ type: "state", stateId: "buff" }, { type: "send", text: "state(buff)" }] }]);
   const result = mapBehavior(source, step => step.type === "state" ? { ...step, stateId: "new" } : step);

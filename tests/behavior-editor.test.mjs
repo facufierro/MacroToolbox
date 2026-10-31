@@ -20,6 +20,23 @@ runInNewContext(compiled, { exports, require(name) {
   return require(name);
 } });
 
+test("Toggle keys exposes the standard variable-capable key input and is unavailable to events", () => {
+  let steps = [];
+  const variables = [{ id: "keys", name: "Movement", type: "keys", value: "w LButton" }];
+  const editor = hasTrigger => exports.BehaviorStepsEditor({ steps, variables, states: [], overlays: [], scripts: [], gameExe: "", hasTrigger, onChange: next => { steps = next; } });
+  const button = hasTrigger => editor(hasTrigger).props.children[1].props.children[0].find(element => element.props.label === "Toggle keys");
+  assert.equal(button(false).props.disabled, true);
+  assert.equal(button(true).props.disabled, false);
+  button(true).props.onClick();
+  assert.deepEqual(parseSteps(stepsToString(steps)), [{ type: "toggle", key: "" }]);
+  const row = editor(true).props.children[0].props.children(steps[0], 0);
+  const input = row.type(row.props).props.children[1].props.children.find(element => element?.type === valueInputs.ValueInput);
+  assert.equal(input.props.type, "keys");
+  assert.equal(input.props.variables, variables);
+  input.props.onChange({ variable: "keys" });
+  assert.deepEqual(parseSteps(stepsToString(steps)), [{ type: "toggle", key: { variable: "keys" } }]);
+});
+
 test("mousepress editor saves and reopens click type without losing its key combination", () => {
   for (const doubleClick of [undefined, false, true]) {
     let steps = [{ type: "mousepress", key: "rctrl shift LButton", ...(doubleClick === undefined ? {} : { doubleClick }) }];

@@ -94,8 +94,237 @@ RunRuntimeTest("partial text delivery releases its unfinished key and reports a 
 RunRuntimeTest("suspension interrupts an in-progress text send and clears its buffer", TestSuspendedLiteralText)
 RunRuntimeTest("text neutralizes either Alt and restores only current physical or macro owners", TestLiteralAltOwnership)
 RunRuntimeTest("text restores both held Alt keys after input failure or suspension", TestLiteralAltCleanup)
-FileAppend("All 89 structured runtime tests passed.`n", "*")
+RunRuntimeTest("Toggle keys holds through trigger release and stops once on the next fresh press", TestToggleKeys)
+RunRuntimeTest("a second press cancels a toggle's delayed prefix without replaying it", TestTogglePending)
+RunRuntimeTest("stopping a nested toggle cancels sibling waits and mouse locks", TestToggleNested)
+RunRuntimeTest("toggle cleanup runs on focus loss, disabling, edits and exit", TestToggleCancellation)
+RunRuntimeTest("stopping a toggle preserves another owner's held output", TestToggleSharedOutput)
+RunRuntimeTest("toggle cleanup preserves native Right Ctrl, Shift and Win", TestToggleModifiers.Bind(true))
+RunRuntimeTest("toggle cleanup preserves Copilot-owned Right Ctrl, Shift and Win", TestToggleModifiers.Bind(false))
+RunRuntimeTest("a toggle can hold its own consumed trigger and release it on the next press", TestToggleSelfTrigger)
+RunRuntimeTest("toggle actions without a hotkey reject the whole tree before its prefix", TestToggleRequiresTrigger)
+RunRuntimeTest("a failed toggle releases its output and permits a fresh activation", TestToggleFailure)
+RunRuntimeTest("exact toggle shortcuts ignore their own held modifiers while stopping", TestToggleOwnedModifiers.Bind(false))
+RunRuntimeTest("exact toggle shortcuts distinguish physical and Copilot modifiers from their own output", TestToggleOwnedModifiers.Bind(true))
+FileAppend("All 101 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestToggleOwnedModifiers(sided) {
+    global testHeldKeys, testLogicalKeys, testOnSend, copilotCtrlHeld
+    host := SelfTriggerTestHost([Action("sequence", "steps", [Action("toggle", "key", sided ? "rctrl rshift ralt rwin w" : "ctrl shift alt win w")])], true)
+    binding := host.bindings["$*SC012"][1]
+    binding["exact"] := true
+    testOnSend := ObserveToggleModifiers
+    testHeldKeys := Map("e", true, "SC012", true)
+    DispatchTestHotkey("$*SC012")
+    testHeldKeys := Map()
+    DispatchTestHotkey("$*SC012 up")
+    Assert(!TriggerModifiersAllowed("e"), "toggle did not establish its logical modifiers")
+    Assert(host.Matches(binding), "toggle's own modifiers blocked its stop shortcut")
+    Assert(!TriggerModifiersAllowed("x"), "toggle relaxed ordinary hotkey matching")
+    if sided {
+        testLogicalKeys["LCtrl"] := true
+        Assert(host.Matches(binding), "toggle's AltGr output blocked its own stop shortcut")
+        testHeldKeys["LCtrl"] := true
+        Assert(!host.Matches(binding), "AltGr output hid an independent physical Left Ctrl")
+        testHeldKeys["LCtrl"] := false, testLogicalKeys["LCtrl"] := false
+    }
+    for key in sided ? ["RCtrl", "RShift", "RAlt", "RWin"] : ["LCtrl", "LShift", "LAlt", "LWin"] {
+        testHeldKeys[key] := true
+        Assert(!host.Matches(binding), "toggle ignored an independently held physical " key)
+        testHeldKeys[key] := false
+    }
+    if sided {
+        copilotCtrlHeld := true
+        Assert(!host.Matches(binding), "toggle ignored Copilot-owned Right Ctrl")
+        copilotCtrlHeld := false
+    }
+    testHeldKeys["e"] := true, testHeldKeys["SC012"] := true
+    Assert(IsObject(DispatchTestHotkey("$*SC012")), "stop shortcut did not reach the generated hook")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count, "toggle with modifier output could not stop")
+    testHeldKeys := Map()
+    DispatchTestHotkey("$*SC012 up")
+    Assert(TriggerModifiersAllowed("e"), "stopped toggle left a modifier logically down")
+    testOnSend := 0
+}
+
+ObserveToggleModifiers(keys) {
+    for key in ["Ctrl", "Shift", "Alt", "LWin", "RCtrl", "RShift", "RAlt", "RWin"] {
+        logical := RegExMatch(key, "^(Ctrl|Shift|Alt)$") ? "L" key : key
+        if InStr(keys, "{" StrLower(key) " downr}")
+            testLogicalKeys[logical] := true
+        if InStr(keys, "{" StrLower(key) " up}")
+            testLogicalKeys[logical] := false
+    }
+}
+
+ReleaseToggleKey(key := "q") {
+    testHeldKeys[key] := false
+    behaviorRuntime.ReleaseTrigger(key)
+}
+
+TestToggleKeys() {
+    global testHeldKeys
+    steps := [Action("toggle", "key", "w")]
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("toggle", steps, "", "*", "", "q")
+    StartBehaviorRun("toggle", steps, "", "*", "", "q")
+    ReleaseToggleKey()
+    Sleep 60
+    AssertKeys(["{blind}{w downr}"])
+    Assert(behaviorRuntime.runs.Count = 1, "toggle ended when its trigger was released")
+    testHeldKeys["q"] := true
+    StartBehaviorRun("toggle", steps, "", "*", "", "q")
+    StartBehaviorRun("toggle", steps, "", "*", "", "q")
+    AssertKeys(["{blind}{w downr}", "{blind}{w up}"])
+    Assert(!behaviorRuntime.runs.Count && behaviorRuntime.latches.Has("toggle"), "stopping a toggle did not debounce the off press")
+    ReleaseToggleKey()
+    testHeldKeys["q"] := true
+    StartBehaviorRun("toggle", steps, "", "*", "", "q")
+    Assert(testEvents.Length = 3, "a fresh third press did not restart the toggle")
+    ReleaseToggleKey()
+    behaviorRuntime.Cancel("toggle")
+    AssertKeys(["{blind}{w downr}", "{blind}{w up}", "{blind}{w downr}", "{blind}{w up}"])
+}
+
+TestTogglePending() {
+    global testHeldKeys
+    steps := [Action("send", "text", "prefix"), Action("sleep", "ms", "150"), Action("toggle", "key", "w")]
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("delayed-toggle", steps, "", "*", "", "q")
+    ReleaseToggleKey()
+    testHeldKeys["q"] := true
+    StartBehaviorRun("delayed-toggle", steps, "", "*", "", "q")
+    Sleep 200
+    AssertKeys(["{text}prefix"])
+    Assert(!behaviorRuntime.runs.Count, "second press did not stop the delayed toggle")
+    ReleaseToggleKey()
+}
+
+TestToggleNested() {
+    global testHeldKeys, testWaitQueue
+    testHeldKeys := Map("q", true), testWaitQueue := [InputBatch([])]
+    steps := [Action("lock"), Action("parallel", "steps", [Action("sequence", "steps", [Action("toggle", "key", "w LButton")]),
+        Action("waitfor", "key", "x")]), Action("send", "text", "must not run")]
+    StartBehaviorRun("nested-toggle", steps, "", "*", "", "q")
+    ReleaseToggleKey()
+    Assert(testInputCallbacks.Count = 1, "parallel wait did not start")
+    testHeldKeys["q"] := true
+    StartBehaviorRun("nested-toggle", steps, "", "*", "", "q")
+    Assert(!testInputCallbacks.Count && !behaviorRuntime.runs.Count, "stopping toggle left a sibling wait running")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "stopping toggle left the cursor locked")
+    AssertKeys(["{blind}{w downr}", "{blind}{lbutton downr}", "{blind}{lbutton up}{w up}"])
+    ReleaseToggleKey()
+}
+
+TestToggleCancellation() {
+    global testHeldKeys, testFocusActive, enabled
+    for mode in ["focus", "profile", "section", "edit", "exit"] {
+        testHeldKeys := Map("q", true), testFocusActive := true, enabled["profile"] := true
+        steps := [Action("toggle", "key", "w")]
+        StartBehaviorRun("cleanup-toggle", steps, "", "Game.exe", "profile", "q", false, "hotkeys")
+        ReleaseToggleKey()
+        switch mode {
+            case "focus": testFocusActive := false
+            case "profile": enabled["profile"] := false
+            case "section": behaviorRuntime.CancelSection("profile", "hotkeys")
+            case "edit": behaviorRuntime.CancelProfile("profile")
+            case "exit": behaviorRuntime.Stop()
+        }
+        AwaitRuns()
+        Assert(!heldOutputCounts.Count && !syntheticDown.Count, mode " left a toggled key held")
+        testFocusActive := true, enabled["profile"] := true
+        Sleep 20
+        Assert(!behaviorRuntime.runs.Count, "returning to the app restarted a stopped toggle")
+    }
+}
+
+TestToggleSharedOutput() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true, "z", true)
+    steps := [Action("toggle", "key", "w")]
+    StartBehaviorRun("shared-toggle", steps, "", "*", "", "q")
+    ReleaseToggleKey()
+    StartBehaviorRun("other-owner", [Action("hold", "key", "w")], "", "*", "", "z")
+    Assert(heldOutputCounts["w"] = 2, "toggle did not share the existing output owner")
+    testHeldKeys["q"] := true
+    StartBehaviorRun("shared-toggle", steps, "", "*", "", "q")
+    AssertKeys(["{blind}{w downr}"])
+    Assert(heldOutputCounts["w"] = 1, "stopping a toggle released another owner's key")
+    ReleaseToggleKey()
+    testHeldKeys["z"] := false
+    AwaitRuns()
+    AssertKeys(["{blind}{w downr}", "{blind}{w up}"])
+}
+
+TestToggleModifiers(native) {
+    global testHeldKeys, testLogicalKeys, copilotCtrlHeld
+    testHeldKeys := Map("q", true, "LShift", true, "LWin", true)
+    testLogicalKeys := Map("RCtrl", true), copilotCtrlHeld := !native
+    if native
+        testHeldKeys["RCtrl"] := true
+    steps := [Action("toggle", "key", "rctrl lshift lwin w")]
+    try {
+        StartBehaviorRun("modifier-toggle", steps, "", "*", "", "q")
+        ReleaseToggleKey()
+        testHeldKeys["q"] := true
+        StartBehaviorRun("modifier-toggle", steps, "", "*", "", "q")
+        AssertKeys(["{blind}{w downr}", "{blind}{w up}"])
+        Assert(testLogicalKeys["RCtrl"] && testHeldKeys["LShift"] && testHeldKeys["LWin"], "toggle changed independent modifiers")
+        ReleaseToggleKey()
+    } finally copilotCtrlHeld := false
+}
+
+TestToggleSelfTrigger() {
+    global testHeldKeys
+    host := SelfTriggerTestHost([Action("toggle", "key", "e")])
+    loop 2 {
+        testHeldKeys := Map("e", true, "SC012", true)
+        DispatchTestHotkey("$SC012")
+        DispatchTestHotkey("$*SC012")
+        testHeldKeys := Map()
+        event := DispatchTestHotkey("$*SC012 up")
+        Assert(IsObject(event) && !event.passthrough, "toggle leaked its consumed trigger release")
+        Assert(testEvents.Length = A_Index, "toggle leaked a repeat or released its first hold too early")
+    }
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}"])
+}
+
+TestToggleRequiresTrigger() {
+    failed := false
+    try StartBehaviorRun("event", [Action("send", "text", "must not run"), Action("sequence", "steps", [Action("toggle", "key", "w")])])
+    catch ValueError
+        failed := true
+    Assert(failed && !testEvents.Length && !behaviorRuntime.runs.Count, "triggerless toggle ran a prefix or acquired input")
+    failed := false
+    try BindingHost().ValidatePlan([Action("toggle", "key", "fixture_unknown_key")])
+    catch ValueError
+        failed := true
+    Assert(failed, "toggle bypassed validation of its output keys")
+}
+
+TestToggleFailure() {
+    global testHeldKeys, testOnSend
+    testHeldKeys := Map("q", true), testOnSend := FailToggleDown
+    steps := [Action("toggle", "key", "x")]
+    StartBehaviorRun("failed-toggle", steps, "", "*", "", "q")
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}"])
+    Assert(!behaviorRuntime.runs.Count && runtimeActions.Length = 1, "toggle input failure did not stop and report")
+    ReleaseToggleKey()
+    testHeldKeys["q"] := true
+    StartBehaviorRun("failed-toggle", steps, "", "*", "", "q")
+    Assert(behaviorRuntime.runs.Count = 1, "a failed toggle prevented a fresh activation")
+    ReleaseToggleKey()
+    behaviorRuntime.Cancel("failed-toggle")
+}
+
+FailToggleDown(keys) {
+    global testOnSend
+    if InStr(keys, "{x downr}") {
+        testOnSend := 0
+        throw Error("fixture toggle delivery failure")
+    }
+}
 
 TestLiteralAltOwnership() {
     global testHeldKeys, testLogicalKeys, heldOutputCounts, testEvents, literalOnPacket

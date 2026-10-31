@@ -348,7 +348,9 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
         let binding = |trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str| {
             let modifiers = trigger_modifier_symbols(trigger);
             let base = trigger_to_key(trigger);
-            let key = if allow_extra.unwrap_or(modifiers.is_empty()) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
+            // Toggle outputs can hold extra modifiers; the shared hook checks exactness
+            // against their owner so the same shortcut can still stop that run.
+            let key = if allow_extra.unwrap_or(modifiers.is_empty()) || behavior::has_toggle(&steps) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
             let chord = trigger_physical_chord_keys(trigger);
             let prerequisites = trigger_chord_keys(trigger);
             json!({"key":key, "trigger":trigger, "modifiers":modifiers, "chord":chord.join(" "),
@@ -841,7 +843,8 @@ PhysKey(key) {
 }
 
 ; AltGr's synthesized LCtrl is part of RAlt, but other undeclared modifiers are not.
-TriggerModifiersAllowed(trigger, requireHeld := false) {
+TriggerModifiersAllowed(trigger, requireHeld := false, ownModifiers := "") {
+    global copilotCtrlHeld
     static keys := Map("ctrl", "LCtrl RCtrl", "lctrl", "LCtrl", "rctrl", "RCtrl",
         "shift", "LShift RShift", "lshift", "LShift", "rshift", "RShift",
         "alt", "LAlt RAlt", "lalt", "LAlt", "ralt", "LCtrl RAlt",
@@ -861,6 +864,7 @@ TriggerModifiersAllowed(trigger, requireHeld := false) {
     }
     for key in ["LCtrl", "RCtrl", "LShift", "RShift", "LAlt", "RAlt", "LWin", "RWin"]
         if GetKeyState(key) && !InStr(allowed, " " key " ")
+            && !(InStr(ownModifiers, " " key " ") && !GetKeyState(key, "P") && !(key = "RCtrl" && copilotCtrlHeld))
             return false
     return true
 }
@@ -1583,6 +1587,20 @@ mod tests {
         assert_eq!(binding["modifiers"], "^");
         assert_eq!(binding["trigger"], "rctrl o");
         assert_eq!(config[0]["target"], "Game.exe");
+    }
+    #[test]
+    fn toggle_bindings_reach_the_shared_hook_with_exact_modifier_matching_preserved() {
+        for toggle in [false, true] {
+            let source = if toggle { r#"[{"type":"sequence","steps":[{"type":"toggle","key":"rshift w"}]}]"# } else { "hold(rshift w)" };
+            let mut profile = profile(source);
+            profile.hotkeys[0].allow_extra_modifiers = Some(false);
+            let profiles = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+            let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles, &[]).unwrap()).unwrap();
+            let binding = &config[0]["bindings"][0];
+            assert_eq!(binding["key"].as_str().unwrap().starts_with("$*>^"), toggle);
+            assert_eq!(binding["exact"], true);
+            assert_eq!(binding["trigger"], "rctrl o");
+        }
     }
     #[test]
     fn changes_update_data_without_replacing_the_shared_hook_script() {

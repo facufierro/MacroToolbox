@@ -30,6 +30,7 @@ impl Parameter {
 pub enum Action {
     Press { key: Parameter, #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
     Hold { key: Parameter },
+    Toggle { key: Parameter },
     Mousepress { key: Parameter, #[serde(default, rename = "doubleClick", skip_serializing_if = "is_false")] double_click: bool, #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
     Waitfor { key: Parameter },
     Repeat { key: Parameter, interval: Parameter, hold: Parameter },
@@ -107,6 +108,7 @@ fn parse_legacy(source: &str) -> Action {
     match name.to_ascii_lowercase().as_str() {
         "press" => Action::Press { key: argument.into(), on_release: false },
         "hold" => Action::Hold { key: argument.into() },
+        "toggle" => Action::Toggle { key: argument.into() },
         "mousepress" | "pressalt" => Action::Mousepress { key: argument.into(), double_click: false, on_release: false },
         "waitfor" => Action::Waitfor { key: argument.into() },
         "repeat" if parts.len() == 2 || parts.len() == 3 => Action::Repeat {
@@ -138,6 +140,7 @@ pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
             Action::Sequence { steps } | Action::Parallel { steps } => { validate(steps, has_trigger)?; !steps.is_empty() }
             Action::Press { key: Parameter::Matched(_), .. } => has_trigger,
             Action::Press { key, .. } | Action::Hold { key } | Action::Waitfor { key } => !key.literal()?.trim().is_empty(),
+            Action::Toggle { key } => has_trigger && !key.literal()?.trim().is_empty(),
             Action::Mousepress { key, .. } => valid_mouse_input(key.literal()?),
             Action::Repeat { key, interval, hold } => !key.literal()?.trim().is_empty() && number(interval.literal()?, 1) && number(hold.literal()?, 0),
             Action::Sleep { ms } => number(ms.literal()?, 0),
@@ -166,7 +169,7 @@ fn visit_values(actions: &mut [Action], visit: &mut impl FnMut(&mut Parameter, V
         match action {
             Action::Sequence { steps } | Action::Parallel { steps } => visit_values(steps, visit)?,
             Action::Press { key, .. } => visit(key, ValueKind::Press)?,
-            Action::Hold { key } | Action::Waitfor { key } => visit(key, ValueKind::Keys)?,
+            Action::Hold { key } | Action::Toggle { key } | Action::Waitfor { key } => visit(key, ValueKind::Keys)?,
             Action::Mousepress { key, .. } => visit(key, ValueKind::Mouse)?,
             Action::Send { text } => visit(text, ValueKind::Text)?,
             Action::Sleep { ms } => visit(ms, ValueKind::Number(Some(0)))?,
@@ -205,8 +208,16 @@ pub fn resolve(source: &str, variables: &[crate::variables::Variable], matched_t
 
 fn requires_trigger(actions: &[Action]) -> bool {
     actions.iter().any(|action| match action {
-        Action::Securesend { .. } | Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. } => true,
+        Action::Toggle { .. } | Action::Securesend { .. } | Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. } => true,
         Action::Sequence { steps } | Action::Parallel { steps } => requires_trigger(steps),
+        _ => false,
+    })
+}
+
+pub fn has_toggle(actions: &[Action]) -> bool {
+    actions.iter().any(|action| match action {
+        Action::Toggle { .. } => true,
+        Action::Sequence { steps } | Action::Parallel { steps } => has_toggle(steps),
         _ => false,
     })
 }
@@ -345,6 +356,22 @@ mod tests {
     }
 
     #[test]
+    fn toggle_keys_resolve_inside_shared_behaviors_but_reject_triggerless_callers() {
+        let keys = serde_json::from_value(serde_json::json!({"id":"keys","name":"Movement","type":"keys","value":"rctrl w LButton"})).unwrap();
+        let shared = shared("walk", serde_json::json!([{"type":"toggle","key":{"variable":"keys"}}]));
+        let variables = vec![keys, shared];
+        crate::config::validate_variables(&variables).unwrap();
+        let source = r#"[{"type":"send","text":"prefix"},{"type":"behavior","variableId":"walk"}]"#;
+        let resolved = resolve(source, &variables, Some("f1")).unwrap();
+        validate(&resolved, true).unwrap();
+        assert_eq!(serde_json::to_value(&resolved).unwrap(), serde_json::json!([
+            {"type":"send","text":"prefix"},{"type":"sequence","steps":[{"type":"toggle","key":"rctrl w LButton"}]}
+        ]));
+        assert!(validate(&resolved, false).is_err());
+        assert!(resolve(source, &variables, None).is_err());
+    }
+
+    #[test]
     fn matched_trigger_resolves_only_press_and_keeps_nested_release_actions() {
         let source = r#"[{"type":"sequence","steps":[{"type":"press","key":{"source":"trigger"},"onRelease":true},{"type":"press","key":"e"}]}]"#;
         assert_eq!(serde_json::to_value(parse(source).unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(source).unwrap());
@@ -375,7 +402,7 @@ mod tests {
             assert_eq!(serde_json::to_value(&steps).unwrap(), fixture["steps"]);
             let variables: Vec<crate::config::Variable> = serde_json::from_value(fixture.get("variables").cloned().unwrap_or_else(|| serde_json::json!([]))).unwrap();
             let has_trigger = fixture.get("hasTrigger").and_then(|value| value.as_bool()).unwrap_or(true);
-            let matched_trigger = fixture.get("matchedTrigger").and_then(|value| value.as_str());
+            let matched_trigger = fixture.get("matchedTrigger").and_then(|value| value.as_str()).or_else(|| has_trigger.then_some("f1"));
             assert_eq!(resolve(fixture["source"].as_str().unwrap(), &variables, matched_trigger).and_then(|steps| validate(&steps, has_trigger)).is_ok(), fixture["valid"].as_bool().unwrap());
             if let Some(expected) = fixture.get("resolved") {
                 assert_eq!(serde_json::to_value(resolve(fixture["source"].as_str().unwrap(), &variables, matched_trigger).unwrap()).unwrap(), *expected);
