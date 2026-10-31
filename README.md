@@ -16,10 +16,25 @@ Managed scripts receive the calling profile and section as their API context. `M
 
 The bottom console opens for new errors from the app, overlay, cloud backup, and behavior runtime. It keeps the current session's messages with timestamps and repeated-error counts; Copy exports the messages and Clear empties them. Collapsing it does not stop logging. Missing overlay references remain visible in the behavior selector so they can be relinked to an existing part.
 
+Drag the dot handle to reorder folders, profiles, hotkeys, events, overlays and their parts, scripts, shared states, variables, and behavior steps. The insertion line marks the drop position; focused handles also accept Up and Down. Saved lists persist their order immediately. Behavior steps keep their draft order until the behavior is saved. Dragging stays within the same list, folder, or overlay. Inherited entries keep their source order; owned overrides fill their existing slots in the order saved by the current profile.
+
+## Shared variables
+
+Variables are available to every profile. Number variables work in Sleep, Repeat timings, coordinates, resolution, and bar values. Text variables work in Type text. Keys variables work in key inputs, including Press, Hold, Repeat, Wait for input, and Mouse press.
+
+Trigger list variables contain separate shortcuts, such as `lctrl 1`, `lctrl 2`, and `lctrl 3`. Create the list in Variables or from a hotkey's Trigger source, then choose Variable for the trigger. Each shortcut runs the same saved behavior. Choose Matched trigger as the source for a Press step to replay the shortcut that activated it; other steps, such as Press `e`, stay shared. Trigger lists support recording, adding, deleting, and dragging individual entries. Matched trigger also works with a literal hotkey trigger and with On release, including nested steps; it requires a hotkey and cannot be used in app events or standalone script/API calls.
+
+Every supported field has a Value / Variable selector. Choosing Variable opens creation when there are no variables of the matching type. Save and use saves the definition and assigns it to that field. Existing variables can be selected by name, and New variable creates another. Sleep and Repeat timings use milliseconds.
+
+The Variables page lists saved definitions. Add and Edit open a form with explicit Save and Cancel actions. Renames preserve references; saved value changes apply to all uses. Referenced variables keep their type and cannot be deleted until their uses are removed.
+
 ## Behavior and lifetime rules
+
+Secure send types a saved password when its hotkey runs. Add Secure send in the hotkey editor, enter the password in the masked field, then save the hotkey. Cancel discards password edits. Saved fields show a placeholder without retrieving the password. Passwords are stored in the current Windows user's Credential Manager; profiles, exports, cloud backups, runtime configuration, and logs contain only references. Enter the password again after importing or restoring a reference on another computer or Windows account. Changing a password creates a new credential so copies keep their existing password; an unused credential is removed after its last local profile reference is deleted or replaced. Secure send requires a hotkey, sends literal text without the clipboard, and does not append Enter.
 
 - Target folders own application targets and shared state definitions. Profiles own their behaviors, overlay items, scripts, and running work.
 - `press` taps a key combination. `hold` and `repeat` last until trigger release. A sequence waits for each action; a parallel group advances independent branches and completes when every branch finishes.
+- Press and Mouse press offer On press and On release. On release waits for the activating hotkey key or chord to be released, then performs the tap or click. It keeps its place in a sequence and can wait independently in a parallel group. Release actions require a hotkey trigger and are unavailable for app events or standalone script/API behavior calls.
 - Pressing a hotkey again after releasing it replaces that hotkey's pending activation, including click waits and delays. Its configured key presses or text are sent again; the cancelled activation releases its inputs and input observers. Holding the trigger does not restart the behavior.
 - A matched hotkey consumes its activating key's repeats and release until that key is released, even if its modifiers are released first or its behavior has already finished. A later plain press works normally.
 - Sending the trigger itself still produces a complete configured press. Its intercepted physical hold does not extend the output; independent physical keys and shared output owners remain held.
@@ -42,6 +57,8 @@ The bottom console opens for new errors from the app, overlay, cloud backup, and
 Binding changes replace `runtime.json` while the input host remains running. Activation is acknowledged before the UI reports it healthy. Overlay windows render revisioned backend snapshots and do not own state transitions.
 
 New edits serialize action trees as JSON inside the existing `behavior` field. Existing command strings remain readable. The editor and backend share compatibility fixtures in `tests/fixtures/behaviors.json`.
+
+Variable references use `{ "variable": "id" }` in action parameters and hotkey triggers. Trigger lists store an array of shortcut strings; Press uses `{ "source": "trigger" }` for Matched trigger. Literal strings remain literal. The v7 schema reads existing number variables and numeric `$id` references automatically, and keeps `db.json.v6.bak` before upgrading v6 settings. New saves include each variable's Number, Text, Keys, or Trigger list type. Older application versions cannot read the v7 database.
 
 The v5 settings schema moves state definitions into folders and saves `db.json.v4.bak` before upgrading v4 settings. Existing folder definitions take precedence, followed by the first legacy definition for each state ID. Previous profile-local overrides become one shared definition. Older app versions cannot read the new schema.
 

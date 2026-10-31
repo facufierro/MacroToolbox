@@ -9,8 +9,12 @@ import { api } from "./api";
 import { useErrorReporter } from "./AppConsole";
 import { CloudSettings } from "./CloudSettings";
 import { VariablesView } from "./VariablesView";
+import { TriggerInput } from "./TriggerInput";
+import { triggerIdentity, triggerLabel, isTriggerValid } from "./triggers";
+import { SortableList } from "./SortableList";
+import { moveItem, orderOwnedSlots } from "./listOrder";
 import { exportVariables, importVariables } from "./variables";
-import { KeyInput, useBindingRecorder } from "./KeyInput";
+import { KeyInput } from "./KeyInput";
 import { EnableSwitch } from "./EnableSwitch";
 import { ProfileSection } from "./ProfileSection";
 import { OverlayGroupPanel } from "./OverlayGroupPanel";
@@ -18,6 +22,7 @@ import { BehaviorStepsEditor, GotoInput } from "./BehaviorEditor";
 import { mapScriptActions, withReferencedScripts, carryReferencedScripts, removeScriptReferences } from "./scriptReferences";
 import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step } from "./behaviors";
 import { allowsExtraModifiers } from "./hotkeyModifiers";
+import { usedSecureTexts } from "./secureText";
 import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
 import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, removeOverlayGroup, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, moveOverlayPart, removeOverlayItem } from "./overlayItems";
 import type {
@@ -33,7 +38,8 @@ import type {
   ProfileState,
   Script,
   ProfileKind,
-  NumberVariable,
+  Variable,
+  SecureTextDraft,
 } from "./types";
 import "./App.css";
 
@@ -137,7 +143,7 @@ function materializeProfile(profile: Profile, profiles: Profile[]): Profile {
   };
 }
 
-async function exportProfile(profile: Profile, folder: Scope, variables: NumberVariable[]) {
+async function exportProfile(profile: Profile, folder: Scope, variables: Variable[]) {
   const profiles = folder.profiles;
   const path = await saveDialog({
     title: "Export Profile",
@@ -150,7 +156,7 @@ async function exportProfile(profile: Profile, folder: Scope, variables: NumberV
   await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data, variables: exportVariables([data], variables) }, null, 2));
 }
 
-async function exportScope(scope: Scope, variables: NumberVariable[]) {
+async function exportScope(scope: Scope, variables: Variable[]) {
   const path = await saveDialog({
     title: "Export Scope",
     defaultPath: `${scope.name || "scope"}.hkm-scope`,
@@ -160,7 +166,7 @@ async function exportScope(scope: Scope, variables: NumberVariable[]) {
   await api.writeTextFile(path, JSON.stringify({ version: 2, type: "scope", data: scope, variables: exportVariables(scope.profiles, variables) }, null, 2));
 }
 
-async function importProfile(existing: NumberVariable[]): Promise<{ profile: Profile; variables: NumberVariable[] } | null> {
+async function importProfile(existing: Variable[]): Promise<{ profile: Profile; variables: Variable[] } | null> {
   const path = await openDialog({
     title: "Import Profile",
     filters: [{ name: "HKM Profile", extensions: ["hkm-profile", "json"] }],
@@ -173,7 +179,7 @@ async function importProfile(existing: NumberVariable[]): Promise<{ profile: Pro
   return { profile: imported.profiles[0], variables: imported.variables };
 }
 
-async function importScope(existing: NumberVariable[]): Promise<{ scopes: Scope[]; variables: NumberVariable[] } | null> {
+async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; variables: Variable[] } | null> {
   const path = await openDialog({
     title: "Import Scope",
     filters: [{ name: "HKM Scope", extensions: ["hkm-scope", "json"] }],
@@ -284,11 +290,11 @@ function resolveProfileEntries<T>(
     else resolved.push(entry);
   }
 
-  return resolved;
+  return orderOwnedSlots(resolved, select(profile).map(value => ({ value, own: true })), entry => keyOf(entry.value));
 }
 
 function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
-  return resolveProfileEntries(profiles, profile, current => current.hotkeys, hotkey => hotkey.trigger)
+  return resolveProfileEntries(profiles, profile, current => current.hotkeys, hotkey => triggerIdentity(hotkey.trigger))
     .map(({ value, own }) => ({ hotkey: value, own }));
 }
 
@@ -446,12 +452,13 @@ function ProfileRow({ profile, folderExe, openExes, selected, onSelect, onToggle
   );
 }
 
-function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfiles, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onModal }: {
+function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfiles, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   folder: Scope; openExes: Set<string>; open: boolean; selectedProfileId?: string;
   visibleProfiles: Profile[];
   onToggle: () => void; onSelectProfile: (id: string) => void; onToggleArmed: (pid: string, a: boolean) => void;
   onProfileContext: (e: ReactMouseEvent, folderId: string, profile: Profile) => void;
   onFolderContext: (e: ReactMouseEvent, folder: Scope) => void;
+  onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
 }) {
   const newProfile = (kind: ProfileKind) => onModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
@@ -465,13 +472,16 @@ function FolderGroup({ folder, openExes, open, selectedProfileId, visibleProfile
         <IconButton icon="plus" label="New profile" className="icon-btn" onClick={() => newProfile("hotkeys")} />
       </div>
       {open && visibleProfiles.length > 0 && (
-        <div className="folder-group__profiles">
-          {visibleProfiles.map(p => (
-            <ProfileRow key={p.id} profile={p} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
+        <SortableList className="folder-group__profiles" items={visibleProfiles} itemKey={profile => profile.id} itemLabel={profile => profile.name || "profile"}
+          onReorder={async (from, to, after) => {
+            onDb(await api.upsertGame({ ...folder, profiles: moveItem(folder.profiles, profile => profile.id, from, to, after) }));
+          }}>
+          {p => (
+            <ProfileRow profile={p} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
               onSelect={() => onSelectProfile(p.id)} onToggleArmed={a => onToggleArmed(p.id, a)}
               onContext={e => onProfileContext(e, folder.id, p)} />
-          ))}
-        </div>
+          )}
+        </SortableList>
       )}
     </div>
   );
@@ -493,8 +503,7 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
     q === "" || p.name.toLowerCase().includes(q) || folder.exe.toLowerCase().includes(q) || folder.name.toLowerCase().includes(q);
   const selectedProfileId = selection.kind === "profile" ? selection.profileId : undefined;
 
-  const groups = [...db.scopes]
-    .sort((a, b) => a.name.localeCompare(b.name))
+  const groups = db.scopes
     .map(f => ({ f, visible: f.profiles.filter(p => match(p, f)) }))
     .filter(g => !filtering || g.visible.length > 0);
 
@@ -503,17 +512,18 @@ function Library({ db, openExes, selection, query, collapsed, width, onQuery, on
       <div className="library__header">
         <input className="library__search" placeholder="Search profiles…" value={query} onChange={e => onQuery(e.target.value)} />
       </div>
-      <div className="library__list">
-        {groups.map(({ f, visible }) => (
-          <FolderGroup key={f.id} folder={f} openExes={openExes}
+      <SortableList className="library__list" items={groups} itemKey={({ f }) => f.id} itemLabel={({ f }) => f.name || "folder"}
+        onReorder={async (from, to, after) => {
+          onDb(await api.reorderFolders(moveItem(db.scopes, folder => folder.id, from, to, after).map(folder => folder.id)));
+        }} empty={<div className="library__empty">{db.scopes.length === 0 ? "No folders yet" : "No matches"}</div>}>
+        {({ f, visible }) => (
+          <FolderGroup folder={f} openExes={openExes}
             open={!collapsed.has(f.id) || filtering} selectedProfileId={selectedProfileId} visibleProfiles={visible}
             onToggle={() => onToggleCollapse(f.id)}
             onSelectProfile={pid => onSelect({ kind: "profile", folderId: f.id, profileId: pid })}
-            onToggleArmed={onToggleArmed} onProfileContext={onProfileContext} onFolderContext={onFolderContext} onModal={onModal} />
-        ))}
-        {db.scopes.length === 0 && <div className="library__empty">No folders yet</div>}
-        {db.scopes.length > 0 && groups.length === 0 && <div className="library__empty">No matches</div>}
-      </div>
+            onToggleArmed={onToggleArmed} onProfileContext={onProfileContext} onFolderContext={onFolderContext} onDb={onDb} onModal={onModal} />
+        )}
+      </SortableList>
       <div className="library__footer">
         <IconButton icon="folder-plus" label="New folder" className="btn btn--ghost btn--full" onClick={() => onModal({ type: "addGame" })} />
         <IconButton icon="file-import" label="Import folder" className="btn btn--ghost btn--full" onClick={async () => {
@@ -664,20 +674,23 @@ function behaviorEventLabel(event: BehaviorEventKind): string {
 
 // ── Step sub-components ───────────────────────────────────────────────────────
 
-function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, onSave, onClose }: {
+function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
   initial: Hotkey;
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
-  variables: NumberVariable[];
-  onSave: (hk: Hotkey) => void;
+  variables: Variable[];
+  onDb: (db: Database) => void;
+  onSave: (hk: Hotkey, secureTexts: SecureTextDraft[]) => void | Promise<void>;
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial.name);
   const [trigger, setTrigger] = useState(initial.trigger);
   const [allowExtraModifiers, setAllowExtraModifiers] = useState(() => allowsExtraModifiers(initial));
-  const [recordingTrigger, setRecordingTrigger] = useState(false);
+  const [secureTexts, setSecureTexts] = useState<SecureTextDraft[]>([]);
+  const [saving, setSaving] = useState(false);
+  const reportError = useErrorReporter();
   const [steps, setSteps] = useState<Step[]>(() => {
     const parsed = parseSteps(initial.behavior);
     if (initial.state_id) {
@@ -686,50 +699,52 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, o
     return parsed.length || initial.trigger ? parsed : [{ type: "press", key: "" }];
   });
 
-  useBindingRecorder(recordingTrigger, key => {
-    setTrigger(key);
-    setRecordingTrigger(false);
-  }, true);
+  async function save() {
+    if (saving || !isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)) return;
+    setSaving(true);
+    try {
+      await onSave({ name: name.trim(), trigger: typeof trigger === "string" ? trigger.trim() : trigger,
+        behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null }, usedSecureTexts(steps, secureTexts));
+    } catch (error) { reportError(secureTexts.length ? "Could not save the hotkey's password." : error); }
+    finally { setSaving(false); }
+  }
 
   return (
     <div className="modal-overlay">
-      <div className="modal modal--wide" onClick={e => e.stopPropagation()}>
+      <fieldset className="modal modal--wide" style={{ minWidth: 0 }} disabled={saving} onClick={e => e.stopPropagation()}>
         <h2>{initial.trigger ? "Edit Hotkey" : "Add Hotkey"}</h2>
 
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Name" autoFocus />
 
-        <div className="input-row">
-          {recordingTrigger
-            ? <div className="key-recording">Hold the key/button combination, then release…</div>
-            : <input value={trigger} onChange={e => setTrigger(e.target.value)} placeholder="Trigger" />
-          }
-          <IconButton showLabel icon={recordingTrigger ? "arrow-left" : "keyboard"} label={recordingTrigger ? "Cancel recording" : "Record hotkey"} className="btn btn--ghost btn--sm" onClick={() => setRecordingTrigger(r => !r)} />
-        </div>
+        <TriggerInput value={trigger} variables={variables} onChange={setTrigger} onDb={onDb} />
 
         <label className="checkbox-row">
           <input type="checkbox" checked={allowExtraModifiers} onChange={e => setAllowExtraModifiers(e.target.checked)} />
           <span>Allow extra modifiers</span>
         </label>
 
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} onChange={setSteps} secureTexts={secureTexts}
+          onSecureTextChange={(credentialId, password) => setSecureTexts(current => [...current.filter(draft => draft.credentialId !== credentialId), { credentialId, password }])} />
 
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
-          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!areStepsValid(steps, variables)} onClick={() => trigger.trim() && areStepsValid(steps, variables) && onSave({ name: name.trim(), trigger: trigger.trim(), behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null })} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)}
+            onClick={() => void save()} />
         </div>
-      </div>
+      </fieldset>
     </div>
   );
 }
 
-function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, variables, onSave, onClose }: {
+function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
   initial: BehaviorEvent;
   eventKinds: BehaviorEventKind[];
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
-  variables: NumberVariable[];
+  variables: Variable[];
+  onDb: (db: Database) => void;
   onSave: (event: BehaviorEvent) => void;
   onClose: () => void;
 }) {
@@ -746,10 +761,10 @@ function EventModal({ initial, eventKinds, gameExe, states, overlays, scripts, v
             <option key={candidate.value} value={candidate.value}>{candidate.label}</option>
           ))}
         </select>
-        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onChange={setSteps} />
+        <BehaviorStepsEditor steps={steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={false} onDb={onDb} onChange={setSteps} />
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
-          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!behavior || !areStepsValid(steps, variables)} onClick={() => behavior && areStepsValid(steps, variables) && onSave({ event, behavior })} />
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!behavior || !areStepsValid(steps, variables, false)} onClick={() => behavior && areStepsValid(steps, variables, false) && onSave({ event, behavior })} />
         </div>
       </div>
     </div>
@@ -888,18 +903,14 @@ function copyName(name: string, fallback: string) {
   return `${base} (copy)`;
 }
 
-function hotkeyLabel(hotkey: Hotkey): string {
-  return hotkey.name.trim() ? `${hotkey.name} - hotkey` : "hotkey";
-}
-
-function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayTarget[], variables: NumberVariable[]): string {
+function behaviorDesc(behavior: string, states: ProfileState[], overlays: OverlayTarget[], variables: Variable[]): string {
   return describeBehavior(behavior, id => stateNameById(states, id) ?? id, id => {
     const item = overlays.find(item => item.id === id);
     return item ? item.name || (item.type === "group" ? "Overlay" : item.type) : "Missing overlay";
   }, id => variables.find(variable => variable.id === id)?.name ?? "Missing variable");
 }
 
-function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayTarget[], variables: NumberVariable[]): string {
+function hotkeyDesc(hotkey: Hotkey, states: ProfileState[], overlays: OverlayTarget[], variables: Variable[]): string {
   return behaviorDesc(hotkey.behavior, states, overlays, variables);
 }
 
@@ -907,7 +918,7 @@ function HotkeyRow({ hotkey, states, overlays, variables, inherited, onEdit, onC
   hotkey: Hotkey;
   states: ProfileState[];
   overlays: OverlayTarget[];
-  variables: NumberVariable[];
+  variables: Variable[];
   inherited: boolean;
   onEdit?: () => void;
   onCopy?: () => void;
@@ -916,8 +927,9 @@ function HotkeyRow({ hotkey, states, overlays, variables, inherited, onEdit, onC
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className="overlay-type-badge overlay-type-badge--text">{hotkeyLabel(hotkey)}</span>
-      <span className="hotkey-row__trigger">{hotkey.trigger}</span>
+      {hotkey.name.trim() && <span className="step-row__name">{hotkey.name}</span>}
+      <span className="overlay-type-badge overlay-type-badge--text">hotkey</span>
+      <span className="hotkey-row__trigger">{triggerLabel(hotkey.trigger, variables)}</span>
       <span className="overlay-item-desc">{hotkeyDesc(hotkey, states, overlays, variables)}</span>
       <div className="step-row__btns">
         {inherited ? (
@@ -941,7 +953,7 @@ function EventRow({ event, states, overlays, variables, inherited, onEdit, onDel
   event: BehaviorEvent;
   states: ProfileState[];
   overlays: OverlayTarget[];
-  variables: NumberVariable[];
+  variables: Variable[];
   inherited: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
@@ -1008,7 +1020,8 @@ function StateRow({ state, inherited, onEdit, onCopy, onDelete, onOverride }: {
 }) {
   return (
     <div className={`step-row${inherited ? " step-row--muted" : ""}`}>
-      <span className="overlay-type-badge overlay-type-badge--text">{state.name} - state</span>
+      <span className="step-row__name">{state.name}</span>
+      <span className="overlay-type-badge overlay-type-badge--text">state</span>
       <span className="overlay-item-desc">{stateDesc(state)}</span>
       <div className="step-row__btns">
         {inherited ? (
@@ -1271,7 +1284,8 @@ function ScriptRow({ script, onEdit, onToggle, onDelete }: {
 }) {
   return (
     <div className={`step-row${script.enabled ? "" : " step-row--muted"}`}>
-      <span className="overlay-type-badge overlay-type-badge--text">{script.name || "Unnamed"} - script</span>
+      <span className="step-row__name">{script.name || "Unnamed"}</span>
+      <span className="overlay-type-badge overlay-type-badge--text">script</span>
       <span className="overlay-item-desc">{scriptTriggerDesc(script)} · {scriptLanguageLabel(script)} · {script.source === "path" ? "file" : "inline"}</span>
       <div className="step-row__btns">
         <IconButton icon={script.enabled ? "toggle-on" : "toggle-off"} label={script.enabled ? "Disable script" : "Enable script"} aria-pressed={script.enabled} className="icon-btn" onClick={onToggle} />
@@ -1368,7 +1382,7 @@ function ScriptModal({ initial, onSave, onClose }: {
 function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb, onModal }: {
   folder: Scope;
   profile: Profile;
-  variables: NumberVariable[];
+  variables: Variable[];
   showStates: boolean;
   onContext: (e: ReactMouseEvent) => void;
   onDb: (db: Database) => void;
@@ -1448,19 +1462,21 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
         <ProfileSection title="Hotkeys" defaultExpanded enabled={!profile.hotkeys_disabled} onChange={value => setSectionEnabled("hotkeys", value)} actions={<>
 <IconButton icon="plus" label="Add hotkey" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", allow_extra_modifiers: false, state_id: null }, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })} />
         </>}>
-            <div className="steps-list">
-              {resolvedHotkeys.map(({ hotkey: hk, own }, i) => {
-                const ownIndex = own ? profile.hotkeys.findIndex(h => h.trigger === hk.trigger) : -1;
+            <SortableList items={resolvedHotkeys} itemKey={({ hotkey }) => triggerIdentity(hotkey.trigger)} itemLabel={({ hotkey }) => hotkey.name || triggerLabel(hotkey.trigger, variables)}
+              canMove={({ own }) => own}
+              onReorder={async (from, to, after) => { await saveProfile({ ...profile, hotkeys: moveItem(profile.hotkeys, hotkey => triggerIdentity(hotkey.trigger), from, to, after) }); }}
+              empty={<div className="steps-empty">No hotkeys yet</div>}>
+              {({ hotkey: hk, own }) => {
+                const ownIndex = own ? profile.hotkeys.findIndex(h => triggerIdentity(h.trigger) === triggerIdentity(hk.trigger)) : -1;
                 return (
-                  <HotkeyRow variables={variables} key={i} hotkey={hk} states={stateOptions} overlays={overlayOptions} inherited={!own}
+                  <HotkeyRow variables={variables} hotkey={hk} states={stateOptions} overlays={overlayOptions} inherited={!own}
                     onEdit={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: ownIndex, hotkey: hk, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}
                     onCopy={() => onModal({ type: "copyHotkey", sourceGameId: folder.id, sourceProfileId: profileId, hotkey: hk })}
                     onDelete={() => deleteHotkey(ownIndex)}
                     onOverride={() => saveProfile({ ...profile, hotkeys: [...profile.hotkeys, { ...hk }] })} />
                 );
-              })}
-              {resolvedHotkeys.length === 0 && <div className="steps-empty">No hotkeys yet</div>}
-            </div>
+              }}
+            </SortableList>
 
         </ProfileSection>
         <ProfileSection title="Events" defaultExpanded enabled={!profile.events_disabled} onChange={value => setSectionEnabled("events", value)} actions={<>
@@ -1473,8 +1489,11 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
                 }} />
         </>}>
             {!eventTargetAvailable && <div className="steps-empty">Events require a folder with a specific app target.</div>}
-            <div className="steps-list">
-              {resolvedEvents.map(({ event, own }) => {
+            <SortableList items={resolvedEvents} itemKey={({ event }) => event.event} itemLabel={({ event }) => behaviorEventLabel(event.event)}
+              canMove={({ own }) => own}
+              onReorder={async (from, to, after) => { await saveProfile({ ...profile, events: moveItem(profile.events, event => event.event, from, to, after) }); }}
+              empty={eventTargetAvailable && <div className="steps-empty">No events yet</div>}>
+              {({ event, own }) => {
                 const ownIndex = own ? profile.events.findIndex(candidate => candidate.event === event.event) : -1;
                 const eventKinds = BEHAVIOR_EVENTS.map(candidate => candidate.value)
                   .filter(kind => kind === event.event || !profile.events.some((existing, index) => index !== ownIndex && existing.event === kind));
@@ -1484,16 +1503,18 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
                     onDelete={own ? () => deleteEvent(ownIndex) : undefined}
                     onOverride={!own ? () => saveProfile({ ...profile, events: [...profile.events, { ...event }] }) : undefined} />
                 );
-              })}
-              {resolvedEvents.length === 0 && eventTargetAvailable && <div className="steps-empty">No events yet</div>}
-            </div>
+              }}
+            </SortableList>
 
         </ProfileSection>
         <ProfileSection title="Overlays" defaultExpanded enabled={!profile.overlay_disabled} onChange={value => setSectionEnabled("overlay", value)} actions={
           <IconButton icon="plus" label="Add overlay" className="btn btn--ghost btn--sm" onClick={() => saveProfile({ ...profile, overlay_groups: [...profile.overlay_groups, { id: uid(), name: "", x: 0, y: 0, layout: "row", gap: 8 }] }).catch(reportError)} />
         }>
-            <div className="steps-list" style={{ marginTop: 8 }}>
-              {groups.map(group => <OverlayGroupPanel key={group.id} group={group} items={resolvedOverlayItems.filter(({ own }) => own).map(({ item }) => item)} timers={availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item), groups).filter(item => item.type === "timer")} gameExe={profileExe}
+            <SortableList className="steps-list overlay-groups" items={groups} itemKey={group => group.id} itemLabel={group => group.name || "overlay"}
+              canMove={group => profile.overlay_groups.some(candidate => candidate.id === group.id)}
+              onReorder={async (from, to, after) => { await saveProfile({ ...profile, overlay_groups: moveItem(profile.overlay_groups, group => group.id, from, to, after) }); }}
+              empty={<div className="steps-empty">No overlays yet</div>}>
+              {group => <OverlayGroupPanel group={group} items={resolvedOverlayItems.filter(({ own }) => own).map(({ item }) => item)} timers={availableOverlayItems(folder.profiles, resolvedOverlayItems.map(({ item }) => item), groups).filter(item => item.type === "timer")} gameExe={profileExe}
                 onSave={async (next, members) => { await saveProfile(saveOverlayGroup(profile, next, members)); }}
                 onEnabledChange={async value => { onDb(await api.setProfilePartEnabled(profile.id, "overlay", value, group.id)); }}
                 onDuplicate={async () => { await saveProfile(duplicateOverlayGroup(profile, group, resolvedOverlayItems.map(({ item }) => item), uid)); }}
@@ -1505,31 +1526,37 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
                 onHotkey={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null,
                   hotkey: { name: group.name, trigger: "", behavior: stepsToString([{ type: "startoverlay", itemId: group.id, restart: true }]), allow_extra_modifiers: false, state_id: null },
                   gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}>
-                {resolvedOverlayItems.filter(({ item }) => item.group_id === group.id).map(renderOverlayItem)}
-              </OverlayGroupPanel>)}
-              {resolvedOverlayItems.length === 0 && groups.length === 0 && <div className="steps-empty">No overlays yet</div>}
-            </div>
+                <SortableList items={resolvedOverlayItems.filter(({ item }) => item.group_id === group.id)} itemKey={({ item }) => item.id} itemLabel={({ item }) => item.name}
+                  canMove={({ own }) => own}
+                  onReorder={async (from, to, after) => { await saveProfile({ ...profile, overlay_items: moveItem(profile.overlay_items, item => item.id, from, to, after) }); }}>
+                  {renderOverlayItem}
+                </SortableList>
+              </OverlayGroupPanel>}
+            </SortableList>
 
         </ProfileSection>
         <ProfileSection title="Scripts" enabled={!profile.scripts_disabled} onChange={value => setSectionEnabled("scripts", value)} actions={<>
 <IconButton icon="plus" label="Add script" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "script", gameId: folder.id, profileId, index: null, script: blankScript() })} />
         </>}>
-            <div className="steps-list">
-              {profile.scripts.map((script, i) => (
-                <ScriptRow key={script.id} script={script}
+            <SortableList items={profile.scripts} itemKey={script => script.id} itemLabel={script => script.name || "script"}
+              onReorder={async (from, to, after) => { await saveProfile({ ...profile, scripts: moveItem(profile.scripts, script => script.id, from, to, after) }); }}
+              empty={<div className="steps-empty">No scripts yet</div>}>
+              {(script, i) => (
+                <ScriptRow script={script}
                   onEdit={() => onModal({ type: "script", gameId: folder.id, profileId, index: i, script })}
                   onToggle={() => saveScripts(profile.scripts.map((s, idx) => idx === i ? { ...s, enabled: !s.enabled } : s))}
                   onDelete={() => saveScripts(profile.scripts.filter((_, idx) => idx !== i))} />
-              ))}
-              {profile.scripts.length === 0 && <div className="steps-empty">No scripts yet</div>}
-            </div>
+              )}
+            </SortableList>
 
         </ProfileSection>
         <ProfileSection title="States" reveal={showStates} enabled={!folder.states_disabled} onChange={setStatesEnabled} actions={<>
 <IconButton icon="plus" label="Add state" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "profileState", gameId: folder.id, profileId, index: null, state: blankState() })} />
         </>}>
-            <div className="steps-list">
-              {resolvedStates.map(({ state, own }) => {
+            <SortableList items={resolvedStates} itemKey={({ state }) => state.id} itemLabel={({ state }) => state.name}
+              onReorder={async (from, to, after) => { onDb(await api.upsertGame({ ...folder, states: moveItem(folder.states, state => state.id, from, to, after) })); }}
+              empty={<div className="steps-empty">No states yet</div>}>
+              {({ state, own }) => {
                 const ownIndex = folder.states.findIndex(candidate => candidate.id === state.id);
                 return (
                   <StateRow key={state.id} state={state} inherited={!own}
@@ -1540,9 +1567,8 @@ function ProfileEditor({ folder, profile, variables, showStates, onContext, onDb
                     } : undefined}
                     />
                 );
-              })}
-              {resolvedStates.length === 0 && <div className="steps-empty">No states yet</div>}
-            </div>
+              }}
+            </SortableList>
 
         </ProfileSection>
       </div>
@@ -1995,7 +2021,7 @@ export default function App() {
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
-        ? { ...hotkey, name: copyName(hotkey.name, hotkey.trigger || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
+        ? { ...hotkey, name: copyName(hotkey.name, triggerLabel(hotkey.trigger, db!.variables) || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
         : { ...hotkey };
       const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] }));
       handleDb(updated);
@@ -2018,14 +2044,14 @@ export default function App() {
     } catch (e) { reportError(`Error copying state: ${e}`); }
   }
 
-  async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey) {
+  async function handleHotkeySave(gameId: string, profileId: string, index: number | null, hotkey: Hotkey, secureTexts: SecureTextDraft[]) {
     try {
       const game = db!.scopes.find(g => g.id === gameId)!;
       const profile = game.profiles.find(p => p.id === profileId)!;
       const hotkeys = [...profile.hotkeys];
       if (index === null) hotkeys.push(hotkey);
       else hotkeys[index] = hotkey;
-      const updated = await api.upsertProfile(gameId, { ...profile, hotkeys });
+      const updated = await api.upsertProfile(gameId, { ...profile, hotkeys }, [], secureTexts);
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error saving hotkey: ${e}`); }
@@ -2122,13 +2148,13 @@ export default function App() {
       })()}
       {modal?.type === "editHotkey" && (() => {
         const { gameId, profileId: pid, index, hotkey, gameExe, states, overlays } = modal;
-        return <HotkeyModal variables={db.variables} initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
-          onSave={hk => handleHotkeySave(gameId, pid, index, hk)}
+        return <HotkeyModal onDb={handleDb} variables={db.variables} initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
+          onSave={(hk, secureTexts) => handleHotkeySave(gameId, pid, index, hk, secureTexts)}
           onClose={() => setModal(null)} />;
       })()}
       {modal?.type === "editEvent" && (() => {
         const { gameId, profileId: pid, index, event, eventKinds, gameExe, states, overlays } = modal;
-        return <EventModal variables={db.variables} initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
+        return <EventModal onDb={handleDb} variables={db.variables} initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={db.scopes.find(scope => scope.id === gameId)?.profiles.flatMap(profile => profile.scripts) ?? []}
           onSave={next => handleEventSave(gameId, pid, index, next)}
           onClose={() => setModal(null)} />;
       })()}

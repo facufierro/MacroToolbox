@@ -10,6 +10,12 @@ The click type selector defaults to Single click. Double click saves a
 clicks at the same position. Windows classes with `CS_DBLCLKS` receive the native
 down/up/double-click/up sequence; other classes receive two down/up pairs.
 Modifiers and held-button cleanup apply to the entire double click.
+Single and double clicks share the same timing: 30 ms with the button down,
+30 ms between clicks, and 30 ms after the final release before text or password
+input. Single click sends exactly one down/up pair. This keeps each click
+observable by applications that process input in frames.
+Other branches continue during those intervals; focus loss or profile disable
+cancels remaining clicks and releases the button and owned modifiers.
 
 Modified combinations such as `rctrl shift LButton` use the same input recorder as
 other behaviors. Ctrl/Shift clicks carry their modifier flags in both native
@@ -59,6 +65,10 @@ After the user-built app is restarted:
 7. Select Double click, save and reopen the behavior, then verify it performs a
    double click in the target app. Repeat with Ctrl/Shift and with the physical
    button held; switch back to Single click and verify one click is delivered.
+8. Put a Double click immediately before Type text or Secure send. Verify the
+   intended textbox is focused and its double-click selection is established
+   before the following input. Repeat with On release; it must wait for trigger
+   release and then keep that same click-before-text order.
 
 Reference: [AutoHotkey ControlClick documentation](https://www.autohotkey.com/docs/v2/lib/ControlClick.htm).
 Double-click delivery: [Windows mouse message sequence](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-lbuttondblclk).

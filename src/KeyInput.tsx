@@ -199,7 +199,7 @@ export function KeyInput({ value, onChange, placeholder = "Key", allowChord = fa
       {allowChord ? "Hold the key/button combination, then release…" : "Press any key or mouse button…"}
     </div>
   ) : (
-    <div className="input-row" style={{ margin: 0, flex: 1 }}>
+    <div className="input-row key-input">
       <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} />
       <IconButton showLabel icon="keyboard" label="Record key" className="btn btn--ghost btn--sm" onClick={() => setRecording(true)} />
     </div>

@@ -1,4 +1,5 @@
 import { mapBehavior } from "./behaviors.ts";
+import { orderOwnedSlots } from "./listOrder.ts";
 import type { OverlayGroup, OverlayItem, OverlayTarget, Profile, Scope } from "./types";
 
 // Part names are a view of their overlay and order; legacy saved names are not editable.
@@ -33,7 +34,7 @@ export function resolveOverlayGroups(profiles: Profile[], profile: Profile, visi
   const parent = profiles.find(candidate => candidate.id === profile.parent_id);
   const groups = new Map((parent ? resolveOverlayGroups(profiles, parent, visited) : []).map(group => [group.id, group]));
   for (const group of profile.overlay_groups ?? []) groups.set(group.id, group);
-  return [...groups.values()];
+  return orderOwnedSlots([...groups.values()], profile.overlay_groups ?? [], group => group.id);
 }
 
 export function availableOverlayTargets(profiles: Profile[], items: OverlayItem[], localGroups: OverlayGroup[] = []): OverlayTarget[] {

@@ -11,6 +11,8 @@ class BehaviorExecutor {
     }
 
     Start(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {
+        if chord = "" && BehaviorNeedsHotkey(steps)
+            throw ValueError("This behavior requires a hotkey trigger.")
         if chord != "" && this.latches.Has(owner)
             return
         if this.runs.Has(owner) {
@@ -103,8 +105,10 @@ class BehaviorExecutor {
         node := task.node
         kind := node["type"]
         if execution.background && !BehaviorContextActive(execution.target, execution.profile)
-            && InStr("|press|hold|repeat|mousepress|send|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
+            && InStr("|press|hold|repeat|mousepress|send|securesend|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
             throw TargetError("Input behavior requires the target app to be focused.")
+        if !task.started && (kind = "press" || kind = "mousepress") && node.Get("onRelease", false) && execution.triggerHeld
+            return
         first := !task.started
         if first {
             task.started := true
@@ -193,17 +197,16 @@ class BehaviorExecutor {
                 return
             if !task.mouse.clicked {
                 task.mouse.clicked := true
-                DoMousePress(task.mouse.button, execution.target, MousePressFlags(node["key"], execution.modifiers), node.Get("doubleClick", false))
-                if task.held {
-                    ; Window clicks are queued. Keep their modifiers owned while the target
-                    ; consumes the click, without blocking other branches or cancellation.
-                    task.due := A_TickCount + 30
-                    return
-                }
+                flags := MousePressFlags(node["key"], execution.modifiers)
+                task.mouse.click := DoMousePress(task.mouse.button, execution.target, flags, node.Get("doubleClick", false), true)
             }
+            if task.mouse.HasOwnProp("click") && !task.mouse.click.Advance()
+                return
             this.Release(task)
         } else if kind = "send" {
             SendBehaviorText(node["text"])
+        } else if kind = "securesend" {
+            SendSecureText(node["credentialId"], execution.target, execution.profile)
         } else if kind = "state" {
             SendRuntimeAction(execution.profile, "state", node["stateId"], node.Get("action", "toggle"))
         } else if kind = "startoverlay" {
@@ -243,6 +246,11 @@ class BehaviorExecutor {
     Release(task) {
         global heldOutputCounts, syntheticDown, copilotCtrlHeld
         failure := 0
+        if task.HasOwnProp("mouse") && task.mouse.HasOwnProp("click") {
+            try task.mouse.click.Close()
+            catch Error as caught
+                failure := caught
+        }
         if task.held {
             task.held := false
             try HoldChordUp(task.id, this.physicalOwner)
@@ -322,6 +330,17 @@ class BehaviorExecutor {
         this.latches.Clear()
         SetTimer this.callback, 0
     }
+}
+
+BehaviorNeedsHotkey(steps) {
+    for node in steps {
+        kind := node["type"]
+        if kind = "securesend" || ((kind = "press" || kind = "mousepress") && node.Get("onRelease", false))
+            return true
+        if (kind = "sequence" || kind = "parallel") && BehaviorNeedsHotkey(node["steps"])
+            return true
+    }
+    return false
 }
 
 StartBehaviorRun(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {

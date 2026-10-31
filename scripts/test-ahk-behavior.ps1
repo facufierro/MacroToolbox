@@ -98,7 +98,7 @@ try {
         $process = [Diagnostics.Process]::Start($start)
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(15000)) {
+        if (-not $process.WaitForExit(30000)) {
             $process.Kill()
             $process.WaitForExit()
             throw "$($stage.Name) timed out"

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { readVariable } from "../src/variables.ts";
 import { parseSteps, stepsToString, areStepsValid, mapBehavior, describeBehavior } from "../src/behaviors.ts";
 
 test("editor and backend share the same behavior compatibility fixtures", () => {
   const fixtures = JSON.parse(readFileSync(new URL("./fixtures/behaviors.json", import.meta.url), "utf8"));
   for (const fixture of fixtures) {
     assert.deepEqual(parseSteps(fixture.source), fixture.steps);
-    assert.equal(areStepsValid(parseSteps(fixture.source), fixture.variables ?? []), fixture.valid);
+    assert.equal(areStepsValid(parseSteps(fixture.source), (fixture.variables ?? []).map(readVariable), fixture.hasTrigger ?? true), fixture.valid);
   }
 });
 
@@ -43,6 +44,22 @@ test("unknown commands remain visible and cannot silently disappear on save", ()
   const steps = parseSteps("press(x);future(1)");
   assert.deepEqual(steps[1], { type: "unknown", source: "future(1)" });
   assert.equal(areStepsValid(steps), false);
+});
+
+test("Press and Mouse press preserve activation choices and require a hotkey for On release", () => {
+  for (const type of ["press", "mousepress"]) {
+    for (const onRelease of [undefined, false, true]) {
+      const step = { type, key: type === "press" ? "rctrl x" : "rctrl LButton", ...(onRelease === undefined ? {} : { onRelease }) };
+      const source = stepsToString([step]);
+      assert.deepEqual(parseSteps(source), [step]);
+      assert.equal(areStepsValid([step]), true);
+      assert.equal(areStepsValid([step], [], false), onRelease !== true);
+      assert.equal(describeBehavior(source, id => id, id => id).includes("on release"), onRelease === true);
+    }
+    for (const onRelease of ["true", 1, null]) {
+      assert.equal(areStepsValid(parseSteps(JSON.stringify([{ type, key: type === "press" ? "x" : "LButton", onRelease }]))), false);
+    }
+  }
 });
 
 test("invalid nested actions and timing parameters prevent saving", () => {

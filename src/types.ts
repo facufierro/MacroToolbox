@@ -1,6 +1,6 @@
 export interface Hotkey {
   name: string;
-  trigger: string;
+  trigger: string | VariableReference;
   behavior: string;
   allow_extra_modifiers?: boolean | null;
   state_id: string | null;
@@ -147,14 +147,21 @@ export interface Database {
   version: number;
   scopes: Scope[];
   settings: Settings;
-  variables: NumberVariable[];
+  variables: Variable[];
 }
 
-export interface NumberVariable {
-  id: string;
-  name: string;
-  value: number;
-}
+export type VariableType = "number" | "text" | "keys" | "triggers";
+export type ValueType = Exclude<VariableType, "triggers">;
+export type Variable = { id: string; name: string } & (
+  | { type: "number"; value: number }
+  | { type: "text" | "keys"; value: string }
+  | { type: "triggers"; value: string[] }
+);
+export type VariableReference = { variable: string };
+export type BehaviorValue = string | VariableReference | { source: "trigger" };
+
+/** Passwords belong to the hotkey edit until Save; only credential IDs enter profiles. */
+export interface SecureTextDraft { credentialId: string; password: string }
 
 export interface CloudStatus {
   configured: boolean;

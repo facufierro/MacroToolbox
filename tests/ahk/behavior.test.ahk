@@ -511,9 +511,10 @@ TestMousePressButtons() {
         clickEvent := testClicks[testClicks.Length]
         Assert(clickEvent.button = expected && clickEvent.count = 1, "mousepress sent the wrong button or count")
         Assert(clickEvent.position = "X350 Y250" && clickEvent.target = 42, "mousepress lost its position or window")
-        Assert(clickEvent.options = "NA Pos", "mousepress changed focus or split the down/up pair")
+        Assert(testClicks[testClicks.Length - 1].options = "NA Pos D" && clickEvent.options = "NA Pos U", "mousepress did not deliver one down/up pair")
+        Assert(clickEvent.time - testClicks[testClicks.Length - 1].time >= 30, "mousepress released the button before the app could observe it")
     }
-    Assert(testClicks.Length = 7 && testEvents.Length = 14, "mousepress skipped or duplicated sequence steps")
+    Assert(testClicks.Length = 14 && testEvents.Length = 14, "mousepress skipped or duplicated sequence steps")
     Assert(A_ControlDelay = previousDelay, "mousepress changed control delay")
 }
 
@@ -525,7 +526,7 @@ TestMousePressCoordinates() {
     Assert(testClicks[1].position = "X120 Y130", "mousepress mishandled a monitor with negative screen coordinates")
     testCursor := {x: -1920, y: 25}
     ExecuteBehavior("mousepress(RButton)", "", "Game.exe")
-    Assert(testClicks[2].position = "X0 Y0", "mousepress mishandled the client origin")
+    Assert(testClicks[3].position = "X0 Y0", "mousepress mishandled the client origin")
     Assert(testEvents.Length = 0, "mousepress used ordinary injected input")
 }
 
@@ -565,7 +566,8 @@ TestMousePressFailure() {
         failed := true
     }
     Assert(failed && A_ControlDelay = previousDelay, "failed mousepress click swallowed the error or changed delay")
-    Assert(testClicks.Length = 1 && testEvents.Length = 0, "failed mousepress click used fallback input or continued the sequence")
+    AssertClickOptions(["NA Pos D", "NA Pos U"])
+    Assert(testEvents.Length = 0, "failed mousepress click used fallback input or continued the sequence")
 }
 
 TestMousePressHeldInput() {
@@ -575,7 +577,7 @@ TestMousePressHeldInput() {
         key := button = "m1" ? "lbutton" : button = "m2" ? "rbutton" : StrLower(button)
         testHeldKeys := Map(key, true, "RCtrl", true, "LShift", true, "LWin", true)
         ExecuteBehavior("mousepress(" button ")", "", "Game.exe")
-        AssertClickOptions(["NA Pos U", "NA Pos", "NA Pos U"])
+        AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
         Assert(testClicks[2].time - testClicks[1].time >= 30, "held button was not released long enough to re-press")
         Assert(testEvents.Length = 0, "mousepress sent global input")
         for heldKey, held in testHeldKeys
@@ -588,7 +590,7 @@ TestMousePressReleasedDuringTap() {
     testHeldKeys := Map("lbutton", true)
     testOnClick := ReleaseMouseDuringTap
     ExecuteBehavior("mousepress(LButton)", "", "Game.exe")
-    AssertClickOptions(["NA Pos U", "NA Pos", "NA Pos U"])
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
     Assert(!testHeldKeys["lbutton"], "mousepress ignored a physical release")
 }
 
@@ -602,7 +604,7 @@ TestMousePressSharedHold() {
     HoldChordDown("other", "LButton", "F1")
     try {
         ExecuteBehavior("mousepress(LButton)", "", "Game.exe")
-        AssertClickOptions(["NA Pos U", "NA Pos", "NA Pos D"])
+        AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos D"])
         Assert(heldOutputCounts["lbutton"] = 1, "mousepress released another behavior's hold")
     } finally {
         HoldChordUp("other")
@@ -642,7 +644,7 @@ TestMousePressExit() {
 
 TestMousePressLegacyAlias() {
     ExecuteBehavior("pressalt(LButton)", "", "Game.exe")
-    AssertClickOptions(["NA Pos"])
+    AssertClickOptions(["NA Pos D", "NA Pos U"])
     Assert(testClicks[1].button = "Left", "legacy pressalt changed its button")
 }
 
@@ -656,7 +658,7 @@ TestMousePressPickup() {
     Assert(testMoves[1].x = 824 && testMoves[1].y = 542, "pickup moved to the wrong viewport position")
     Assert(testMoves[2].x = 450 && testMoves[2].y = 300, "pickup did not restore the original cursor")
     Assert(testClicks[2].position = "X724 Y492", "pickup clicked the wrong client coordinates")
-    AssertClickOptions(["NA Pos U", "NA Pos", "NA Pos U"])
+    AssertClickOptions(["NA Pos U", "NA Pos D", "NA Pos U", "NA Pos U"])
     Assert(testHeldKeys["lbutton"], "pickup changed the physical button state")
 }
 
@@ -752,7 +754,7 @@ TestWinGetClientPos(&x, &y, &width := unset, &height := unset, target := "") {
 
 TestControlClick(position, target, text := "", button := "", count := 1, options := "") {
     testClicks.Push({position: position, target: target, button: button, count: count, options: options, time: A_TickCount})
-    Assert(A_ControlDelay = -1, "mousepress click did not keep its down/up pair together")
+    Assert(A_ControlDelay = -1, "mousepress added an implicit delay to a button transition")
     if IsObject(testOnClick)
         testOnClick.Call(options)
     if (testClickFailure || testClicks.Length = testClickFailAt)

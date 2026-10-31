@@ -5,6 +5,9 @@ use tauri::{Emitter, Manager, State};
 
 mod ahk;
 mod behavior;
+mod variables;
+mod triggers;
+mod secure_send;
 mod runtime;
 mod protocol;
 mod config;
@@ -296,8 +299,12 @@ fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) ->
     config::normalize_overlays(db);
     for game in &db.games {
         for profile in game.profiles.iter().filter(|profile| profile.armed) {
-            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables)?)?; }
-            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables)?)?; }
+            for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) {
+                let triggers = hotkey.trigger.resolve(&db.variables)?;
+                if triggers.is_empty() { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, None)?, true)?; }
+                for trigger in triggers { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, Some(&trigger))?, true)?; }
+            }
+            for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables, None)?, false)?; }
         }
     }
     config::save_db(&state.db_path, db)?;
@@ -313,7 +320,7 @@ fn debug_overlay_log(message: String) {
     eprintln!("[debug][overlay_frontend] {message}");
 }
 
-fn merge_imported_variables(db: &mut Database, variables: Vec<config::NumberVariable>) -> Result<(), String> {
+fn merge_imported_variables(db: &mut Database, variables: Vec<config::Variable>) -> Result<(), String> {
     for variable in variables {
         if let Some(existing) = db.variables.iter().find(|existing| existing.id == variable.id) {
             if existing != &variable { return Err(format!("Conflicting imported variable: {}", variable.name)); }
@@ -325,19 +332,21 @@ fn merge_imported_variables(db: &mut Database, variables: Vec<config::NumberVari
 }
 
 #[tauri::command]
-fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
+fn upsert_game(app: tauri::AppHandle, state: State<AppState>, game: Game, variables: Option<Vec<config::Variable>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut game = game;
     if game.id == config::GLOBAL_FOLDER_ID {
         game.exe = GLOBAL_GAME_EXE.to_string();
     }
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     match db.games.iter_mut().find(|g| g.id == game.id) {
         Some(existing) => *existing = game,
         None => db.games.push(game),
     }
     save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -350,17 +359,31 @@ fn delete_game(app: tauri::AppHandle, state: State<AppState>, id: String) -> Res
         return Err("The Global folder can't be deleted.".to_string());
     }
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     db.games.retain(|g| g.id != id);
+    save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
+#[tauri::command]
+fn reorder_folders(app: tauri::AppHandle, state: State<AppState>, ids: Vec<String>) -> Result<Database, String> {
+    let _lock = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    db.reorder_folders(&ids)?;
     save_database(&app, &state, &mut db)?;
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
 
 #[tauri::command]
-fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::NumberVariable>>) -> Result<Database, String> {
+fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::Variable>>, secure_texts: Option<Vec<secure_send::PasswordDraft>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let profile_id = profile.id.clone();
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
+    let password_write = secure_send::PasswordWrite::prepare(&secure_texts.unwrap_or_default(), &profile)?;
     merge_imported_variables(&mut db, variables.unwrap_or_default())?;
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
@@ -369,6 +392,8 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
         None => game.profiles.push(profile),
     }
     save_database(&app, &state, &mut db)?;
+    password_write.commit();
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -377,10 +402,12 @@ fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
 fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile_id: String) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
+    let previous_passwords = secure_send::database_ids(&db);
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
     save_database(&app, &state, &mut db)?;
+    secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;
     Ok(db)
 }
@@ -1500,6 +1527,8 @@ fn get_app_version() -> &'static str {
 
 /// Register or unregister the app to launch at login. Re-applied on every launch so the
 /// registration tracks the current executable across updates and moves.
+/// Development builds can disable autostart, but must never become the login target:
+/// their frontend requires Vite, which is not started by Windows logon.
 ///
 /// On Windows the app runs elevated (`requireAdministrator`, see build.rs). Windows refuses to
 /// auto-launch an elevated app from the HKCU `Run` key at logon — it can't show a UAC prompt
@@ -1509,6 +1538,8 @@ fn get_app_version() -> &'static str {
 /// logon without a prompt. (Creating the task itself needs elevation, which we already have.)
 /// Other platforms use the plugin as normal.
 fn sync_autostart(app: &tauri::AppHandle, enabled: bool) {
+    if enabled && tauri::is_dev() { return; }
+
     #[cfg(not(target_os = "windows"))]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -1586,14 +1617,21 @@ fn save_settings(app: tauri::AppHandle, state: State<AppState>, mut settings: Se
 }
 
 #[tauri::command]
-fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::NumberVariable>) -> Result<Database, String> {
+fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<config::Variable>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     let mut db = config::load_db(&state.db_path)?;
     config::validate_variables(&variables)?;
     // Even disarmed profiles must keep their references and valid numeric parameters.
     for profile in db.games.iter().flat_map(|game| &game.profiles) {
-        for source in profile.hotkeys.iter().map(|entry| &entry.behavior).chain(profile.events.iter().map(|entry| &entry.behavior)) {
-            if behavior::parse(source).is_ok() { behavior::resolve(source, &variables)?; }
+        for hotkey in &profile.hotkeys {
+            let triggers = hotkey.trigger.resolve(&variables)?;
+            if behavior::parse(&hotkey.behavior).is_ok() {
+                if triggers.is_empty() { behavior::resolve(&hotkey.behavior, &variables, None)?; }
+                for trigger in triggers { behavior::resolve(&hotkey.behavior, &variables, Some(&trigger))?; }
+            }
+        }
+        for event in &profile.events {
+            if behavior::parse(&event.behavior).is_ok() { behavior::resolve(&event.behavior, &variables, None)?; }
         }
     }
     db.variables = variables;
@@ -1938,6 +1976,7 @@ pub fn run() {
             read_image_as_data_url,
             upsert_game,
             delete_game,
+            reorder_folders,
             upsert_profile,
             delete_profile,
             set_profile_armed,

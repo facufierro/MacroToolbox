@@ -12,8 +12,16 @@ RunRuntimeTest("modified window clicks acquire and release their modifiers", Tes
 RunRuntimeTest("native clicks are processed before their modifiers are released", TestNativeModifiedMouse)
 RunRuntimeTest("native double clicks are processed before their modifiers are released", TestNativeModifiedMouse.Bind(true))
 RunRuntimeTest("double clicks deliver every button with native class semantics", TestNativeDoubleMouse)
+RunRuntimeTest("double clicks focus the text control before a following text step", TestDoubleClickTextFocus)
+RunRuntimeTest("On release double clicks focus the text control before Secure send", TestDoubleClickTextFocus.Bind(true))
+RunRuntimeTest("double clicks finish native delivery before a following behavior step", TestDoubleClickDeliveryOrder)
+RunRuntimeTest("single clicks remain observable across input frames before typing", TestMouseClickFrames.Bind(false))
+RunRuntimeTest("double clicks remain observable across input frames before typing", TestMouseClickFrames.Bind(true))
+RunRuntimeTest("single clicks cancel between transitions and release their owned input", TestMouseClickCancellation.Bind(false))
+RunRuntimeTest("double clicks cancel between transitions and release their owned input", TestMouseClickCancellation.Bind(true))
 RunRuntimeTest("double clicks preserve another behavior's held button", TestDoubleMouseSharedHold)
 RunRuntimeTest("failed double clicks release modifiers and stop their sequence", TestDoubleMouseFailure)
+RunRuntimeTest("failed button-up delivery retries release and stops following input", TestMouseReleaseFailure)
 RunRuntimeTest("mousepress supports sided modifiers and every mouse button", TestMouseModifierCombinations)
 RunRuntimeTest("modified clicks share modifier ownership with parallel behaviors", TestMouseSharedModifiers)
 RunRuntimeTest("modified clicks preserve physical and Copilot-held modifiers", TestMousePhysicalModifiers)
@@ -27,6 +35,12 @@ RunRuntimeTest("cursor actions keep their target independently of overlays", Tes
 RunRuntimeTest("live configuration preserves unrelated running behaviors", TestLiveConfiguration)
 RunRuntimeTest("disabling one section preserves the other sections", TestSectionCancellation)
 RunRuntimeTest("script work retains its calling section and defining owner", TestScriptSectionOwnership)
+RunRuntimeTest("a shared profile toggle disables and reenables every matching profile once per press", TestSharedProfileToggle)
+RunRuntimeTest("shared toggles include equivalent modifier orders and generic Ctrl", TestEquivalentProfileToggles)
+RunRuntimeTest("shared toggles synchronize mixed states and skip inactive or disarmed profiles", TestScopedProfileToggle)
+RunRuntimeTest("a profile toggle takes priority over a behavior using the same shortcut", TestProfileTogglePriority)
+RunRuntimeTest("shared toggles require every configured modifier", TestProfileToggleRequiredModifiers)
+RunRuntimeTest("shared toggles accept Copilot's logical Right Ctrl", TestCopilotProfileToggle)
 RunRuntimeTest("fresh presses resend the trigger while a previous chain waits for a click", TestRetriggerWaitingChain.Bind("press"))
 RunRuntimeTest("fresh presses resend text while a previous chain waits for a click", TestRetriggerWaitingChain.Bind("send"))
 RunRuntimeTest("fresh presses replace pending delays and release the previous run's inputs", TestRetriggerPendingSequence)
@@ -43,8 +57,149 @@ RunRuntimeTest("a quick E release preserves its configured tap duration", TestCo
 RunRuntimeTest("consumed E preserves other behaviors holding the same output", TestConsumedSharedOutput)
 RunRuntimeTest("consumed E preserves independent physical keys and modifiers", TestConsumedIndependentOutput)
 RunRuntimeTest("failed delivery of a consumed key still releases its output", TestConsumedOutputFailure)
-FileAppend("All 43 structured runtime tests passed.`n", "*")
+RunRuntimeTest("On release waits without owning output and taps exactly once", TestReleasePress)
+RunRuntimeTest("On release mouse press waits before acquiring modifiers or clicking", TestReleaseMouse.Bind(false))
+RunRuntimeTest("On release mouse press preserves double clicks", TestReleaseMouse.Bind(true))
+RunRuntimeTest("a release branch waits independently in a parallel group", TestReleaseParallel)
+RunRuntimeTest("release before a delayed action does not rearm its wait", TestReleaseBeforeStep)
+RunRuntimeTest("focus loss cancels pending release actions", TestReleaseCancellation.Bind(false))
+RunRuntimeTest("profile disable cancels pending release actions", TestReleaseCancellation.Bind(true))
+RunRuntimeTest("a released chord member unblocks On release actions", TestReleaseChord)
+RunRuntimeTest("fresh hotkey presses each deliver one release action", TestReleaseRetrigger)
+RunRuntimeTest("release actions preserve physical and Copilot-held modifiers", TestReleaseModifiers)
+RunRuntimeTest("release actions without a trigger fail before executing any prefix", TestReleaseRequiresTrigger)
+RunRuntimeTest("On release can tap its own consumed trigger", TestReleaseSelfPress)
+RunRuntimeTest("expanded shortcuts replay their own keys and a shared E step", TestExpandedMatchedShortcuts.Bind(false))
+RunRuntimeTest("expanded shortcuts retain matched output until their own release", TestExpandedMatchedShortcuts.Bind(true))
+RunRuntimeTest("Secure send reads a local credential once per fresh hotkey press without the clipboard", TestSecureHotkey)
+RunRuntimeTest("Secure send cancels pending output on focus loss", TestSecureCancellation.Bind(false))
+RunRuntimeTest("Secure send cancels pending output on profile disable", TestSecureCancellation.Bind(true))
+RunRuntimeTest("Secure send without a hotkey rejects its entire action tree before a prefix runs", TestSecureRequiresTrigger)
+RunRuntimeTest("a missing secure credential reports a safe error and stops the sequence", TestSecureMissing)
+RunRuntimeTest("secure input failures redact API arguments before reaching the console", TestSecureFailureRedaction)
+RunRuntimeTest("Secure send keeps its position in a nested sequence", TestSecureSequence)
+FileAppend("All 79 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+SecureFixtureId() {
+    guid := Buffer(16, 0), text := Buffer(78, 0)
+    if DllCall("ole32\CoCreateGuid", "Ptr", guid, "Int") != 0
+        throw Error("Could not create the credential fixture ID")
+    DllCall("ole32\StringFromGUID2", "Ptr", guid, "Ptr", text, "Int", 39)
+    return StrLower(Trim(StrGet(text), "{}"))
+}
+
+class SecureCredentialFixture {
+    __New(password) {
+        this.id := SecureFixtureId()
+        this.target := "MacroToolbox/SecureSend/" this.id
+        target := Buffer(StrPut(this.target, "UTF-16") * 2, 0)
+        StrPut(this.target, target, "UTF-16")
+        username := Buffer(StrPut("MacroToolbox", "UTF-16") * 2, 0)
+        StrPut("MacroToolbox", username, "UTF-16")
+        blob := Buffer((StrLen(password) + 1) * 2, 0)
+        StrPut(password, blob, "UTF-16")
+        credential := Buffer(A_PtrSize = 8 ? 80 : 52, 0)
+        NumPut("UInt", 1, credential, 4)
+        NumPut("Ptr", target.Ptr, credential, 8)
+        NumPut("UInt", StrLen(password) * 2, credential, A_PtrSize = 8 ? 32 : 24)
+        NumPut("Ptr", blob.Ptr, credential, A_PtrSize = 8 ? 40 : 28)
+        NumPut("UInt", 2, credential, A_PtrSize = 8 ? 48 : 32)
+        NumPut("Ptr", username.Ptr, credential, A_PtrSize = 8 ? 72 : 48)
+        saved := DllCall("Advapi32\CredWriteW", "Ptr", credential, "UInt", 0)
+        saveError := A_LastError
+        DllCall("msvcrt\memset", "Ptr", blob.Ptr, "Int", 0, "UPtr", blob.Size, "CDecl Ptr")
+        Assert(saved, "Could not save the temporary Windows credential (Windows error " saveError ")")
+    }
+    __Delete() {
+        if this.HasOwnProp("target")
+            DllCall("Advapi32\CredDeleteW", "WStr", this.target, "UInt", 1, "UInt", 0)
+    }
+}
+
+TestSecureHotkey() {
+    global testHeldKeys, testActiveExe
+    secret := "fixture-only +!^{Enter};ø🚀"
+    credential := SecureCredentialFixture(secret)
+    host := SelfTriggerTestHost([Action("securesend", "credentialId", credential.id)])
+    previousExe := testActiveExe
+    testActiveExe := "WhatsApp.exe"
+    beforeClipboard := DllCall("GetClipboardSequenceNumber", "UInt")
+    try {
+        loop 2 {
+            testHeldKeys := Map("SC012", true)
+            DispatchTestHotkey("$SC012")
+            AwaitRuns()
+            Assert(testEvents.Length = A_Index && testEvents[A_Index]["keys"] = "{text}" secret, "Secure send changed literal text or sent the wrong credential")
+            DispatchTestHotkey("$*SC012")
+            Assert(testEvents.Length = A_Index, "holding the trigger repeated the password")
+            testHeldKeys["SC012"] := false
+            DispatchTestHotkey("$*SC012 up")
+        }
+        Assert(beforeClipboard = DllCall("GetClipboardSequenceNumber", "UInt") && !behaviorClipboardPending, "Secure send put a password on the clipboard")
+    } finally testActiveExe := previousExe
+}
+
+TestSecureCancellation(disable) {
+    global testHeldKeys, testFocusActive, enabled
+    credential := SecureCredentialFixture("fixture-only")
+    testHeldKeys := Map("q", true), enabled["profile"] := true
+    StartBehaviorRun("secure-cancel", [Action("sleep", "ms", "40"), Action("securesend", "credentialId", credential.id)], "", "Game.exe", "profile", "q")
+    if disable
+        enabled["profile"] := false
+    else
+        testFocusActive := false
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    Assert(!testEvents.Length && !runtimeActions.Length, "cancelled secure output was delivered")
+}
+
+TestSecureRequiresTrigger() {
+    failed := false
+    try StartBehaviorRun("secure-no-trigger", [Action("press", "key", "Tab"), Action("sequence", "steps", [Action("securesend", "credentialId", SecureFixtureId())])])
+    catch ValueError as failure
+        failed := InStr(failure.Message, "hotkey trigger")
+    Assert(failed && !testEvents.Length && !behaviorRuntime.runs.Count, "Secure send executed a prefix without a hotkey")
+}
+
+TestSecureMissing() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("secure-missing", [Action("securesend", "credentialId", SecureFixtureId()), Action("send", "text", "must not run")], "", "*", "", "q")
+    Assert(!testEvents.Length && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "missing password did not fail safely")
+    Assert(InStr(runtimeActions[1].value, "Secure send failed"), "missing password reported an unrelated error")
+    testHeldKeys["q"] := false
+    AwaitRuns()
+}
+
+TestSecureFailureRedaction() {
+    global testHeldKeys, testOnSend
+    secret := "fixture-sensitive-api-argument"
+    credential := SecureCredentialFixture(secret)
+    testHeldKeys := Map("q", true), testOnSend := FailSecureFixtureSend
+    StartBehaviorRun("secure-failure", [Action("securesend", "credentialId", credential.id), Action("send", "text", "must not run")], "", "*", "", "q")
+    Assert(testEvents.Length = 1 && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "secure failure continued its sequence")
+    Assert(!InStr(runtimeActions[1].value, secret) && InStr(runtimeActions[1].value, "Secure send failed"), "password leaked through an input API error")
+    testHeldKeys["q"] := false
+    AwaitRuns()
+}
+
+FailSecureFixtureSend(keys) {
+    throw Error("input failure containing arguments: " keys)
+}
+
+TestSecureSequence() {
+    global testHeldKeys
+    secret := "fixture-only"
+    credential := SecureCredentialFixture(secret)
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("secure-order", [Action("sequence", "steps", [Action("press", "key", "Tab"), Action("securesend", "credentialId", credential.id), Action("send", "text", "done")])], "", "*", "", "q")
+    AwaitRuns()
+    AssertKeys(["{blind}{tab downr}", "{blind}{tab up}", "{text}" secret, "{text}done"])
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+}
 
 RunRuntimeTest(name, test) {
     global runtimeActions, nativePosts, testOnPost, testHotkeys, testHotCriterion, behaviorRuntime
@@ -72,6 +227,165 @@ AwaitRuns() {
         if A_TickCount > deadline
             throw Error("runtime did not complete")
         Sleep 5
+    }
+}
+
+TestReleasePress() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("release", [Action("press", "key", "x", "onRelease", true)], "", "*", "", "q")
+    Sleep 70
+    Assert(testEvents.Length = 0 && !heldOutputCounts.Count && behaviorRuntime.runs.Count = 1, "release action started before release")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    BindingHost().Release("q")
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}"])
+}
+
+TestReleaseMouse(doubleClick) {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("release-click", [Action("mousepress", "key", "rctrl shift LButton", "onRelease", true, "doubleClick", doubleClick)], "", "Game.exe", "", "q")
+    Sleep 70
+    Assert(!testEvents.Length && !nativePosts.Length && !heldOutputCounts.Count, "release click acquired input before release")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    Assert(nativePosts.Length = (doubleClick ? 4 : 2), "release click lost its click count")
+    AssertKeys(["{blind}{rctrl downr}", "{blind}{shift downr}", "{blind}{shift up}{rctrl up}"])
+}
+
+TestReleaseParallel() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("release-parallel", [Action("parallel", "steps", [Action("press", "key", "x", "onRelease", true),
+        Action("sequence", "steps", [Action("press", "key", "y"), Action("sleep", "ms", "20"), Action("send", "text", "ready")])])], "", "*", "", "q")
+    Sleep 100
+    AssertKeys(["{blind}{y downr}", "{blind}{y up}", "{text}ready"])
+    testHeldKeys["q"] := false
+    AwaitRuns()
+    Assert(testEvents.Length = 5 && testEvents[4]["keys"] = "{blind}{x downr}", "release branch blocked or duplicated its sibling")
+}
+
+TestReleaseBeforeStep() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("early-release", [Action("sleep", "ms", "50"), Action("press", "key", "x", "onRelease", true), Action("send", "text", "done")], "", "*", "", "q")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}", "{text}done"])
+}
+
+TestReleaseCancellation(disable) {
+    global testHeldKeys, enabled, testFocusActive
+    enabled["profile"] := true
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("cancel-release", [Action("parallel", "steps", [Action("press", "key", "x", "onRelease", true),
+        Action("mousepress", "key", "rctrl LButton", "onRelease", true)])], "", "Game.exe", "profile", "q")
+    if disable
+        enabled["profile"] := false
+    else
+        testFocusActive := false
+    AwaitRuns()
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    Assert(!testEvents.Length && !nativePosts.Length && !testClicks.Length, "cancelled release action still delivered input")
+}
+
+TestReleaseChord() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true, "w", true)
+    StartBehaviorRun("release-chord", [Action("press", "key", "x", "onRelease", true)], "", "*", "", "q w")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}"])
+}
+
+TestReleaseRetrigger() {
+    global testHeldKeys
+    steps := [Action("press", "key", "x", "onRelease", true)]
+    loop 2 {
+        testHeldKeys := Map("q", true)
+        execution := StartBehaviorRun("release-repeat", steps, "", "*", "", "q")
+        Assert(IsObject(execution), "fresh press could not arm its release action")
+        Assert(!IsObject(StartBehaviorRun("release-repeat", steps, "", "*", "", "q")), "held trigger restarted a release action")
+        testHeldKeys["q"] := false
+        BindingHost().Release("q")
+        AwaitRuns()
+    }
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}", "{blind}{x downr}", "{blind}{x up}"])
+}
+
+TestReleaseModifiers() {
+    global testHeldKeys, testLogicalKeys, copilotCtrlHeld
+    testHeldKeys := Map("q", true, "RCtrl", true, "RShift", true, "LWin", true)
+    StartBehaviorRun("physical-release", [Action("press", "key", "rctrl rshift lwin x", "onRelease", true)], "", "*", "", "q")
+    testHeldKeys["q"] := false
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}"])
+    copilotCtrlHeld := true
+    testLogicalKeys["RCtrl"] := true
+    try {
+        testHeldKeys := Map("q", true)
+        StartBehaviorRun("copilot-release", [Action("press", "key", "rctrl y", "onRelease", true)], "", "*", "", "q")
+        testHeldKeys["q"] := false
+        AwaitRuns()
+        Assert(testEvents.Length = 4, "release action repeated or released Copilot's Right Ctrl")
+    } finally copilotCtrlHeld := false
+}
+
+TestReleaseRequiresTrigger() {
+    failed := false
+    try StartBehaviorRun("no-trigger", [Action("press", "key", "x"), Action("sequence", "steps", [Action("mousepress", "key", "LButton", "onRelease", true)])])
+    catch ValueError as failure
+        failed := InStr(failure.Message, "hotkey trigger")
+    Assert(failed && !testEvents.Length && !behaviorRuntime.runs.Count, "a triggerless release action ran its prefix or waited forever")
+}
+
+TestReleaseSelfPress() {
+    global testHeldKeys
+    host := BindingHost()
+    behaviorRuntime.physicalOwner := host.PhysicalOwnsOutput.Bind(host)
+    host.consumed["e"] := true
+    testHeldKeys := Map("e", true)
+    StartBehaviorRun("self-release", [Action("press", "key", "e", "onRelease", true)], "", "*", "", "e")
+    Assert(!testEvents.Length, "self release tapped before the trigger was up")
+    testHeldKeys["e"] := false
+    host.Release("e")
+    AwaitRuns()
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}"])
+}
+
+TestExpandedMatchedShortcuts(onRelease) {
+    global testHeldKeys, behaviorRuntime, testEvents
+    bindings := []
+    loop 3 {
+        trigger := "lctrl " A_Index, scan := "SC00" (A_Index + 1)
+        bindings.Push(Map("key", "$<^" scan, "trigger", trigger, "modifiers", "^", "chord", scan,
+            "prerequisites", "", "specificity", 0, "exact", true, "toggle", false, "section", "hotkeys",
+            "steps", [Action("press", "key", trigger, "onRelease", onRelease), Action("press", "key", "e")]))
+    }
+    host := BindingHost()
+    host.Apply([Map("id", "profile", "target", "Game.exe", "armed", true, "revision", "list", "bindings", bindings)])
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    loop 3 {
+        testEvents := []
+        scan := "SC00" (A_Index + 1), number := String(A_Index)
+        testHeldKeys := Map("LCtrl", true, scan, true, number, true)
+        Assert(IsObject(DispatchTestHotkey("$<^" scan)), "list shortcut did not activate")
+        if onRelease {
+            Assert(!testEvents.Length, "matched release sent output before its trigger was released")
+            testHeldKeys[scan] := false, testHeldKeys[number] := false
+            DispatchTestHotkey("$*" scan " up")
+        }
+        AwaitRuns()
+        AssertKeys(["{blind}{" number " downr}", "{blind}{" number " up}", "{blind^}{e downr}", "{blind^}{e up}"])
+        Assert(testHeldKeys["LCtrl"] && !heldOutputCounts.Count && !syntheticDown.Count, "matched shortcut changed the physical modifier or left held output")
+        testHeldKeys[scan] := false, testHeldKeys[number] := false
+        DispatchTestHotkey("$*" scan " up")
     }
 }
 
@@ -273,7 +587,7 @@ TestMouseModifierCombinations() {
             AwaitRuns()
             Assert(testEvents.Length = 2, "mousepress lost modifier transitions for " modifier " " button)
             Assert(!heldOutputCounts.Count && !syntheticDown.Count, "mousepress leaked " modifier)
-            Assert(nativePosts.Length = 2 || testClicks.Length = 1, "mousepress lost " button)
+            Assert(nativePosts.Length = 2 || testClicks.Length = 2, "mousepress lost " button)
             symbols := KeyModifierSymbols(modifier)
             flags := InStr(symbols, "^") ? 8 : (InStr(symbols, "+") ? 4 : 0)
             for message in nativePosts
@@ -420,14 +734,145 @@ TestNativeDoubleMouse() {
     }
 }
 
+TestDoubleClickTextFocus(secure := false) {
+    global testWindowId, testNativeTarget, testCursor, testOnSend, testExpectedFocus, testHeldKeys
+    window := Gui("+ToolWindow -Caption")
+    field := window.AddEdit("x10 y10 w200 h30", "first second")
+    other := window.AddEdit("x10 y60 w200 h30", "other")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd
+        testCursor := {x: 130, y: 70}
+        testExpectedFocus := field.Hwnd
+        DllCall("SetFocus", "Ptr", other.Hwnd)
+        Assert(DllCall("GetFocus", "Ptr") = other.Hwnd, "text fixture did not establish initial focus")
+        testOnSend := CheckDoubleClickTextFocus
+        if secure
+            credential := SecureCredentialFixture("fixture")
+        output := secure ? Action("securesend", "credentialId", credential.id) : Action("send", "text", "fixture")
+        testHeldKeys := Map("q", true)
+        StartBehaviorRun("focus-text", [Action("mousepress", "key", "LButton", "doubleClick", true, "onRelease", secure), output], "", "Test.exe", "", "q")
+        if secure {
+            Assert(DllCall("GetFocus", "Ptr") = other.Hwnd && !testEvents.Length, "release click focused or typed before release")
+            testHeldKeys["q"] := false
+            BindingHost().Release("q")
+        }
+        AwaitRuns()
+        Assert(!runtimeActions.Length, "typing ran before the double click focused its text control" (runtimeActions.Length ? ": " runtimeActions[1].value : ""))
+        Assert(DllCall("GetForegroundWindow", "Ptr") != window.Hwnd, "targeted mouse messages activated the hidden fixture window")
+    } finally {
+        behaviorRuntime.Stop()
+        testOnSend := 0, testNativeTarget := 0
+        window.Destroy()
+    }
+}
+
+CheckDoubleClickTextFocus(keys) {
+    global testExpectedFocus
+    Assert(DllCall("GetFocus", "Ptr") = testExpectedFocus, "double click did not focus the text control before typing")
+    start := Buffer(4, 0), end := Buffer(4, 0)
+    SendMessage 0xB0, start.Ptr, end.Ptr,, testExpectedFocus
+    Assert(NumGet(end, 0, "UInt") > NumGet(start, 0, "UInt"), "double click did not select a word in the text control")
+}
+
+TestDoubleClickDeliveryOrder() {
+    global testWindowId, testNativeTarget, testNativeMessages, testOnSend
+    window := Gui("+ToolWindow -Caption")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd, testNativeMessages := []
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, RecordNativeClick
+        testOnSend := CheckDoubleClickDelivered
+        StartBehaviorRun("double-delivery", [Action("mousepress", "key", "LButton", "doubleClick", true), Action("send", "text", "fixture")], "", "Test.exe")
+        AwaitRuns()
+        Assert(!runtimeActions.Length, "a following step ran before the target processed its double click")
+    } finally {
+        behaviorRuntime.Stop()
+        testOnSend := 0, testNativeTarget := 0
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, RecordNativeClick, 0
+        window.Destroy()
+    }
+}
+
+CheckDoubleClickDelivered(keys) {
+    Assert(testNativeMessages.Length = 4, "double-click messages were still queued when the next step ran")
+}
+
+TestMouseClickFrames(doubleClick) {
+    global testWindowId, testNativeTarget, testOnSend
+    window := Gui("+ToolWindow -Caption")
+    state := {down: false, previous: false, presses: 0, released: false}
+    messageHandler := (buttons, position, message, hwnd) => hwnd = window.Hwnd ? (state.down := message != 0x202) : 0
+    frame := (*) => SampleMouseFrame(state)
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, messageHandler
+        SetTimer frame, 10
+        expected := doubleClick ? 2 : 1
+        testOnSend := (keys) => Assert(state.presses = expected && state.released, "typing preceded observable clicks and their final release")
+        StartBehaviorRun("frame-click", [Action("mousepress", "key", "LButton", "doubleClick", doubleClick), Action("send", "text", "fixture")], "", "Test.exe")
+        AwaitRuns()
+        Assert(!runtimeActions.Length && state.presses = expected && state.released, "clicks collapsed within one input frame")
+    } finally {
+        behaviorRuntime.Stop()
+        SetTimer frame, 0
+        testOnSend := 0, testNativeTarget := 0
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, messageHandler, 0
+        window.Destroy()
+    }
+}
+
+SampleMouseFrame(state) {
+    if state.down && !state.previous
+        state.presses++
+    state.previous := state.down
+    state.released := state.presses > 0 && !state.down
+}
+
+TestMouseClickCancellation(doubleClick) {
+    global nativePosts, testEvents, testFocusActive, enabled, testOnPost
+    for disable in [false, true] {
+        loop doubleClick ? 4 : 2 {
+            nativePosts := [], testEvents := [], testFocusActive := true, enabled["profile"] := true
+            testOnPost := InterruptMouseClick.Bind(disable, A_Index)
+            StartBehaviorRun("cancel-click", [Action("mousepress", "key", "rctrl LButton", "doubleClick", doubleClick), Action("send", "text", "must not run")], "", "Game.exe", "profile")
+            AwaitRuns()
+            Assert(nativePosts.Length = A_Index + Mod(A_Index, 2) && nativePosts[nativePosts.Length].message = 0x202, "cancelling a click left a down or delivered a later click")
+            AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+            Assert(!runtimeActions.Length && !heldOutputCounts.Count && !syntheticDown.Count, "cancelled click leaked input or reported an error")
+        }
+    }
+    testFocusActive := true, enabled["profile"] := true, testOnPost := 0
+}
+
+InterruptMouseClick(disable, afterMessage, message) {
+    global testFocusActive, enabled
+    if nativePosts.Length = afterMessage {
+        if disable
+            enabled["profile"] := false
+        else
+            testFocusActive := false
+    }
+}
+
 TestDoubleMouseSharedHold() {
     global testHeldKeys
     testHeldKeys := Map("q", true)
     StartBehaviorRun("held-button", [Action("hold", "key", "LButton")], "", "*", "", "q")
     try {
         StartBehaviorRun("double-click", [Action("mousepress", "key", "LButton", "doubleClick", true)])
-        Assert(nativePosts.Length = 4, "held button lost its double click")
-        AssertClickOptions(["NA Pos U", "NA Pos D"])
+        deadline := A_TickCount + 2000
+        while behaviorRuntime.runs.Has("double-click") {
+            Assert(A_TickCount < deadline, "double click did not complete alongside another hold")
+            Sleep 5
+        }
+        Assert(nativePosts.Length = 5, "held button lost its double click or initial release")
+        AssertClickOptions(["NA Pos D"])
         Assert(heldOutputCounts["lbutton"] = 1, "double click released the other behavior's button")
     } finally behaviorRuntime.Cancel("held-button")
 }
@@ -445,6 +890,21 @@ TestDoubleMouseFailure() {
 FailSecondMousePress(message) {
     if nativePosts.Length = 3
         throw Error("simulated second mouse press failure")
+}
+
+TestMouseReleaseFailure() {
+    global testOnPost
+    testOnPost := FailMouseRelease
+    StartBehaviorRun("failed-mouse-reply", [Action("mousepress", "key", "rctrl LButton"), Action("press", "key", "x")])
+    AwaitRuns()
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "failed button-up continued its sequence")
+    Assert(nativePosts.Length = 3 && nativePosts[2].message = 0x202 && nativePosts[3].message = 0x202, "failed button-up omitted release recovery")
+    AssertKeys(["{blind}{rctrl downr}", "{blind}{rctrl up}"])
+}
+
+FailMouseRelease(message) {
+    if message = 0x202 && nativePosts.Length = 2
+        throw Error("simulated button-up delivery failure")
 }
 
 TrackMouseModifiers(keys) {
@@ -557,6 +1017,124 @@ TestScriptSectionOwnership() {
     StartBehaviorRun("script-child-2", [Action("hold", "key", "z")], "", "*", "caller", "q", false, "events", "library")
     behaviorRuntime.CancelSection("caller", "events")
     Assert(!behaviorRuntime.runs.Count, "calling-section disable left its script work running")
+}
+
+ToggleTestProfile(id, trigger := "lctrl lshift", key := "$<^<+SC029", target := "*", armed := true) {
+    binding := Map("key", key, "trigger", trigger " " Chr(96), "modifiers", "^+", "chord", "SC029",
+        "prerequisites", "", "specificity", 0, "exact", false, "toggle", true, "section", "", "steps", [])
+    return Map("id", id, "target", target, "armed", armed, "revision", "same", "bindings", [binding])
+}
+
+PressProfileToggle(host, key := "$<^<+SC029") {
+    global testHeldKeys
+    testHeldKeys["SC029"] := true
+    DispatchTestHotkey(key)
+    testHeldKeys["SC029"] := false
+    DispatchTestHotkey("$*SC029 up")
+}
+
+TestSharedProfileToggle() {
+    global enabled, testHeldKeys
+    profiles := [ToggleTestProfile("main"), ToggleTestProfile("buffs"), ToggleTestProfile("spells")]
+    host := BindingHost()
+    host.Apply(profiles)
+    testHeldKeys := Map("LCtrl", true, "LShift", true, "SC029", true, "q", true)
+    StartBehaviorRun("main:hold", [Action("hold", "key", "x")], "", "*", "main", "q")
+    StartBehaviorRun("buffs:hold", [Action("hold", "key", "y")], "", "*", "buffs", "q")
+    DispatchTestHotkey("$<^<+SC029")
+    for id in ["main", "buffs", "spells"]
+        Assert(!enabled[id], "shared toggle left " id " enabled")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count, "shared disable retained running inputs")
+    Assert(runtimeActions.Length = 3, "shared disable did not notify every profile")
+    DispatchTestHotkey("$<^<+SC029")
+    Assert(runtimeActions.Length = 3, "holding the toggle reversed its state")
+    testHeldKeys["LShift"] := false
+    testHeldKeys["SC029"] := false
+    DispatchTestHotkey("$*SC029 up")
+    Assert(!host.consumed.Has("SC029"), "releasing Shift first left the toggle consumed")
+    testHeldKeys["LShift"] := true
+    PressProfileToggle(host)
+    for id in ["main", "buffs", "spells"]
+        Assert(enabled[id], "shared toggle did not reenable " id)
+    Assert(runtimeActions.Length = 6, "reenabling did not notify every profile")
+    host.Apply(profiles)
+    PressProfileToggle(host)
+    for id in ["main", "buffs", "spells"]
+        Assert(!enabled[id], "configuration refresh broke the shared toggle")
+}
+
+TestEquivalentProfileToggles() {
+    global enabled, testHeldKeys
+    main := ToggleTestProfile("main")
+    main["bindings"].Push(ToggleTestProfile("duplicate", "lshift lctrl", "$<+<^SC029")["bindings"][1])
+    host := BindingHost()
+    host.Apply([main, ToggleTestProfile("consumables", "lshift ctrl", "$<+^SC029"),
+        ToggleTestProfile("right-ctrl", "rctrl lshift", "$>^<+SC029"), ToggleTestProfile("ctrl-only", "lctrl", "$<^SC029")])
+    testHeldKeys := Map("LCtrl", true, "LShift", true)
+    loop 2 {
+        PressProfileToggle(host)
+        Assert(enabled["main"] = (A_Index = 2) && enabled["consumables"] = (A_Index = 2), "equivalent shortcuts did not toggle together")
+        Assert(enabled["right-ctrl"] && enabled["ctrl-only"], "shared toggle changed a different modifier combination")
+        Assert(runtimeActions.Length = A_Index * 2, "duplicate toggle fields toggled a profile twice")
+    }
+}
+
+TestScopedProfileToggle() {
+    global enabled, testHeldKeys, testFocusActive
+    host := BindingHost()
+    host.Apply([ToggleTestProfile("one"), ToggleTestProfile("two"),
+        ToggleTestProfile("inactive",,, "Other.exe"), ToggleTestProfile("disarmed",,, "*", false)])
+    enabled["one"] := false
+    testFocusActive := false
+    testHeldKeys := Map("LCtrl", true, "LShift", true)
+    PressProfileToggle(host)
+    Assert(!enabled["one"] && !enabled["two"], "mixed profile states did not close together")
+    Assert(enabled["inactive"] && !enabled["disarmed"], "shared toggle changed an unavailable profile")
+    PressProfileToggle(host)
+    Assert(enabled["one"] && enabled["two"], "closed profile group did not reopen")
+}
+
+TestProfileTogglePriority() {
+    global enabled, testHeldKeys
+    profile := ToggleTestProfile("main")
+    behavior := profile["bindings"][1].Clone()
+    behavior["toggle"] := false
+    behavior["section"] := "hotkeys"
+    behavior["steps"] := [Action("press", "key", "x")]
+    profile["bindings"].InsertAt(1, behavior)
+    host := BindingHost()
+    host.Apply([profile])
+    testHeldKeys := Map("LCtrl", true, "LShift", true)
+    enabled["main"] := false
+    PressProfileToggle(host)
+    Assert(enabled["main"], "toggle could not enable its profile")
+    PressProfileToggle(host)
+    Assert(!enabled["main"], "ordinary behavior prevented its profile from disabling")
+    Assert(testEvents.Length = 0, "toggle shortcut also ran its ordinary behavior")
+}
+
+TestProfileToggleRequiredModifiers() {
+    global enabled, testHeldKeys
+    host := BindingHost()
+    host.Apply([ToggleTestProfile("ctrl", "lctrl", "$<^SC029"), ToggleTestProfile("ctrl-shift"),
+        ToggleTestProfile("altgr", "ralt", "$*>!SC029")])
+    testHeldKeys := Map("LCtrl", true)
+    PressProfileToggle(host, "$<^SC029")
+    Assert(!enabled["ctrl"], "Ctrl shortcut did not disable its profile")
+    Assert(enabled["ctrl-shift"] && enabled["altgr"], "shared toggle matched missing Shift or AltGr")
+}
+
+TestCopilotProfileToggle() {
+    global enabled, testHeldKeys, testLogicalKeys
+    host := BindingHost()
+    host.Apply([ToggleTestProfile("right", "rctrl lshift", "$>^<+SC029"), ToggleTestProfile("generic", "ctrl lshift", "$^<+SC029")])
+    testHeldKeys := Map("LShift", true)
+    testLogicalKeys := Map("RCtrl", true)
+    loop 2 {
+        PressProfileToggle(host, "$>^<+SC029")
+        Assert(enabled["right"] = (A_Index = 2) && enabled["generic"] = (A_Index = 2), "shared toggle ignored remapped logical Right Ctrl")
+    }
+    Assert(!TestGetKeyState("RCtrl", "P") && TestGetKeyState("RCtrl"), "toggle changed Copilot's modifier ownership")
 }
 
 TriggerTestHost(plain := false, chord := "SC013", steps := 0) {

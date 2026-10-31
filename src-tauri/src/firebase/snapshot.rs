@@ -131,6 +131,19 @@ impl Snapshot {
 mod tests {
     use super::*;
     #[test]
+    fn secure_send_backups_contain_only_the_local_credential_reference() {
+        let source = r#"[{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]"#;
+        let mut db = Database::default();
+        config::ensure_global_folder(&mut db);
+        db.games[0].profiles.push(serde_json::from_value(serde_json::json!({"id":"secure","name":"Login",
+            "hotkeys":[{"trigger":"f8","behavior":source}]})).unwrap());
+        let captured = capture(db).unwrap();
+        let backup: serde_json::Value = serde_json::from_slice(&captured.bytes).unwrap();
+        assert_eq!(backup["database"]["scopes"][0]["profiles"][0]["hotkeys"][0]["behavior"], source);
+        assert!(backup["files"].as_object().unwrap().is_empty());
+        assert!(!String::from_utf8(captured.bytes).unwrap().contains("password"));
+    }
+    #[test]
     fn rejects_incompatible_or_incomplete_backups() {
         let mut db = Database::default();
         db.version = config::CURRENT_DB_VERSION;

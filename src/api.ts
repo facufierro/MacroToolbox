@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CloudStatus, Database, Scope, Profile, Settings, NumberVariable } from "./types";
+import type { CloudStatus, Database, Scope, Profile, Settings, Variable, SecureTextDraft } from "./types";
 
 export const api = {
   cloudStatus: () => invoke<CloudStatus>("firebase_status"),
@@ -42,14 +42,22 @@ export const api = {
   toggleFit: (exe: string) =>
     invoke<boolean>("toggle_fit", { exe }),
 
-  upsertGame: (game: Scope, variables: NumberVariable[] = []) =>
+  upsertGame: (game: Scope, variables: Variable[] = []) =>
     invoke<Database>("upsert_game", { game, variables }),
 
   deleteGame: (id: string) =>
     invoke<Database>("delete_game", { id }),
 
-  upsertProfile: (gameId: string, profile: Profile, variables: NumberVariable[] = []) =>
-    invoke<Database>("upsert_profile", { gameId, profile, variables }),
+  reorderFolders: (ids: string[]) =>
+    invoke<Database>("reorder_folders", { ids }),
+
+  upsertProfile: async (gameId: string, profile: Profile, variables: Variable[] = [], secureTexts: SecureTextDraft[] = []) => {
+    try { return await invoke<Database>("upsert_profile", { gameId, profile, variables, secureTexts }); }
+    catch (error) {
+      if (secureTexts.length) throw new Error("Could not save the hotkey's password.");
+      throw error;
+    }
+  },
 
   deleteProfile: (gameId: string, profileId: string) =>
     invoke<Database>("delete_profile", { gameId, profileId }),
@@ -66,7 +74,7 @@ export const api = {
   saveSettings: (settings: Settings) =>
     invoke<Database>("save_settings", { settings }),
 
-  saveVariables: (variables: NumberVariable[]) =>
+  saveVariables: (variables: Variable[]) =>
     invoke<Database>("save_variables", { variables }),
 
   writeTextFile: (path: string, content: string) =>

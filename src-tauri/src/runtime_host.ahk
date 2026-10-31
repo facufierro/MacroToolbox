@@ -121,23 +121,47 @@ class BindingHost {
         }
     }
 
-    Find(key) {
+    Matches(binding) {
         global enabled
+        profile := binding["profile"]
+        return profile["armed"] && (binding["toggle"] || enabled.Get(profile["id"], false))
+            && (profile["target"] = "*" || WinActive("ahk_exe " profile["target"]))
+            && (binding["prerequisites"] = "" || TriggerChordHeld(binding["prerequisites"]))
+            && (!binding["exact"] || TriggerModifiersAllowed(binding["trigger"]))
+    }
+
+    Find(key) {
         if !this.bindings.Has(key)
             return 0
+        first := 0
         for binding in this.bindings[key] {
-            profile := binding["profile"]
-            if !profile["armed"] || (!binding["toggle"] && !enabled.Get(profile["id"], false))
+            if !this.Matches(binding)
                 continue
-            if profile["target"] != "*" && !WinActive("ahk_exe " profile["target"])
-                continue
-            if binding["prerequisites"] != "" && !TriggerChordHeld(binding["prerequisites"])
-                continue
-            if binding["exact"] && !TriggerModifiersAllowed(binding["trigger"])
-                continue
-            return binding
+            ; A profile's own behavior must not swallow the shortcut that disables it.
+            if binding["toggle"]
+                return binding
+            if !IsObject(first)
+                first := binding
         }
-        return 0
+        return first
+    }
+
+    ToggleProfiles(selected) {
+        global enabled
+        profiles := Map(selected["profile"]["id"], true)
+        ; Equivalent shortcuts can have different native names (modifier order or
+        ; generic/sided Ctrl). Match the held shortcut, not just its native key string.
+        for key, bindings in this.bindings
+            for binding in bindings
+                if binding["toggle"] && binding["chord"] = selected["chord"] && this.Matches(binding)
+                    && TriggerModifiersAllowed(binding["trigger"], true)
+                    profiles[binding["profile"]["id"]] := true
+        value := true
+        for id in profiles
+            if enabled.Get(id, false)
+                value := false
+        for id in profiles
+            SetProfileEnabled(id, value)
     }
 
     Allowed(key, *) {
@@ -197,7 +221,7 @@ class BindingHost {
         this.consumed[trigger] := true
         profile := binding["profile"]
         if binding["toggle"] {
-            ToggleEnabled(profile["id"])
+            this.ToggleProfiles(binding)
             return
         }
         StartBehaviorRun(profile["id"] ":" binding["trigger"], binding["steps"], binding["modifiers"],
@@ -281,9 +305,8 @@ class BindingHost {
     }
 }
 
-ToggleEnabled(id) {
+SetProfileEnabled(id, value) {
     global enabled, behaviorRuntime
-    value := !enabled.Get(id, false)
     SendRuntimeAction(id, "enabled", "", value ? "1" : "0")
     enabled[id] := value
     if !value
