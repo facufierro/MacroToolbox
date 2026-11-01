@@ -24,20 +24,12 @@ The reported one-time error page was not reproduced. These checks cover the
 confirmed registration issue that can launch a development executable at login
 without its frontend server; they do not establish that it caused that occurrence.
 
-## Opening a newer build
+## Automatic settings upgrades
 
-1. With the older installed app running and Close to tray enabled, open a newer
-   executable. The older process must exit and the newer executable must run;
-   opening it must not merely restore the older window. Repeat with a newer local
-   build that has the same release version number.
-2. Start the newer build with a copy of v6 settings. It must upgrade to v7 before
+1. Start the newer build with a copy of v6 settings. It must upgrade to v7 before
    activating profiles, preserve the original as `db.json.v6.bak`, and retain all
    profiles, variables, and behavior references. Reopen it and verify that neither
    the migrated settings nor the backup changes just from loading them.
-3. Open the same executable again, then an older executable while the newer app
-   remains running. Both must show the existing newer instance without restarting
-   it, starting another input host, or downgrading settings.
-4. Before the takeover, activate a held-key or held-mouse behavior in the older
-   app. Its input host must release owned input when it closes. Check Copilot's
-   press/hold/release, `RCtrl+Shift+N`, distinct `rctrl o` / `rctrl shift o`
-   shortcuts, and ordinary Win/Shift input after takeover.
+2. Repeat with older saved formats and skipped releases. Upgrades must happen
+   during the normal settings load, without a separate command or resetting the
+   user's configuration. A failed backup must leave the original file untouched.
