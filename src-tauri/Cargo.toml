@@ -1,6 +1,6 @@
 [package]
 name = "macro-toolbox"
-version = "6.2.0"
+version = "6.3.2"
 description = "MacroToolbox"
 authors = ["Facundo Fierro"]
 edition = "2021"
@@ -26,5 +26,5 @@ tokio = { version = "1", features = ["rt", "net", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "psapi", "processthreadsapi", "handleapi", "winnt", "tlhelp32", "jobapi2", "winbase", "synchapi", "winver"] }
+winapi = { version = "0.3", features = ["winuser", "psapi", "processthreadsapi", "handleapi", "winnt", "tlhelp32", "jobapi2"] }
 winreg = "0.55"

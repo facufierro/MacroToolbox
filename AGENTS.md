@@ -24,10 +24,6 @@ These instructions apply to the entire repository.
   already completed migration.
 - Add regression coverage for upgrading older saved settings, skipping versions, preserving
   configured behavior, and reopening the migrated settings.
-- Opening a newer executable while an older copy is running must hand ownership to the
-  newer build before migration. The single-instance handoff must not discard the newer
-  executable and restore the older app instead. Close the old input host cleanly before
-  the new build starts its own.
 
 ## Copilot key remap invariants
 
