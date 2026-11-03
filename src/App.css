@@ -88,12 +88,17 @@ body {
 .folder-group__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .folder-group__count { font-variant-numeric: tabular-nums; opacity: 0.7; }
 .folder-group__profiles { display: flex; flex-direction: column; padding-bottom: 6px; }
+.folder-group__subfolders { display: flex; flex-direction: column; }
+.folder-group__head-row[data-profile-drop] { box-shadow: inset 0 0 0 1px var(--accent-h); border-radius: var(--radius); }
+.profile-subfolder .folder-group__caret { transform: none; }
+.profile-subfolder--open > .folder-group__head-row .folder-group__caret { transform: rotate(90deg); }
 
 /* ── Profile row ───────────────────────────────────────────────────────────── */
 .profile-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center;
   gap: 10px; width: 100%; padding: 7px 12px 7px 26px; background: none; border: none;
   text-align: left; cursor: pointer; position: relative; }
 .profile-row:hover, .profile-row--active { background: var(--bg3); }
+.profile-row[data-item-drop], .overlay-group[data-item-drop] { box-shadow: inset 0 0 0 1px var(--accent-h); background: var(--bg3); }
 .profile-row--active::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0;
   width: 3px; background: var(--accent); border-radius: 0 2px 2px 0; }
 .profile-row__name { font-size: 0.9rem; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -578,6 +583,9 @@ textarea { resize: vertical; }
 .steps-list { display: flex; flex-direction: column; gap: 4px; }
 .sortable-item { display: flex; align-items: flex-start; gap: 4px; position: relative; min-width: 0; }
 .sortable-item__content { flex: 1; min-width: 0; }
+.sortable-item[draggable="true"] > .sortable-item__content > .step-row,
+.sortable-item[draggable="true"] > .sortable-item__content > .profile-row,
+.sortable-item[draggable="true"] > .sortable-item__content > .overlay-group { cursor: grab; }
 .sortable-item--dragging > .sortable-item__content { opacity: 0.45; }
 .sortable-item[data-drop]::after { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent-h); pointer-events: none; z-index: 1; }
 .sortable-item[data-drop="before"]::after { top: -2px; }
@@ -590,6 +598,7 @@ textarea { resize: vertical; }
 .drag-handle:disabled { cursor: wait; opacity: 0.45; }
 .library__list > .sortable-item > .drag-handle { margin-left: 4px; }
 .folder-group__profiles > .sortable-item > .drag-handle { margin-left: 16px; }
+.folder-group__subfolders > .sortable-item > .drag-handle { margin-left: 16px; }
 .folder-group__profiles .profile-row { padding-left: 6px; }
 .steps-empty { color: var(--text2); font-size: 0.85rem; padding: 8px 0; text-align: center; }
 
@@ -615,6 +624,16 @@ textarea { resize: vertical; }
 .step-row__params { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .step-row__params input { min-width: 0; }
 .step-row__params input, .step-row__params select { height: 30px; padding: 4px 6px; }
+.overlay-targets { position: relative; flex: 1; min-width: 0; }
+.overlay-targets > summary { display: flex; align-items: center; gap: 8px; height: 30px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); cursor: pointer; font-size: 0.85rem; list-style: none; }
+.overlay-targets > summary::-webkit-details-marker { display: none; }
+.overlay-targets > summary > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overlay-targets > summary:focus-visible { outline: 1px solid var(--accent); }
+.overlay-targets__menu { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; width: 100%; min-width: 160px; max-height: 240px; overflow-y: auto; padding: 4px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px #0006; }
+.overlay-targets__menu .checkbox-row { display: flex; gap: 8px; margin: 0; padding: 5px 6px; font-size: 0.85rem; cursor: pointer; }
+.overlay-targets__menu .checkbox-row:hover { background: var(--bg3); }
+.overlay-targets__menu input { width: 14px; height: 14px; padding: 0; flex-shrink: 0; }
+.overlay-targets__menu span { overflow-wrap: anywhere; }
 .secure-send-input { flex: 1; }
 .value-input { display: contents; }
 .value-input > select { max-width: 220px; min-width: 0; }

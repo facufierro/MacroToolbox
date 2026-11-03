@@ -3,7 +3,7 @@
   {"source":"pressalt(shift LButton);send(a;b)","valid":true,"steps":[{"type":"mousepress","key":"shift LButton"},{"type":"send","text":"a;b"}]},
   {"source":"[{\"type\":\"mousepress\",\"key\":\"LButton\"}]","valid":true,"steps":[{"type":"mousepress","key":"LButton"}]},
   {"source":"[{\"type\":\"sequence\",\"steps\":[{\"type\":\"mousepress\",\"key\":\"rctrl shift XButton2\",\"doubleClick\":true}]}]","valid":true,"steps":[{"type":"sequence","steps":[{"type":"mousepress","key":"rctrl shift XButton2","doubleClick":true}]}]},
-  {"source":"state(buff);restartoverlay(timer)","valid":true,"steps":[{"type":"state","stateId":"buff","action":"toggle"},{"type":"startoverlay","itemId":"timer","restart":true}]},
+  {"source":"state(buff);restartoverlay(timer)","valid":true,"steps":[{"type":"state","stateId":"buff","action":"toggle"},{"type":"startoverlay","itemIds":["timer"],"restart":true}]},
   {"source":"[{\"type\":\"parallel\",\"steps\":[{\"type\":\"hold\",\"key\":\"RButton\"},{\"type\":\"sequence\",\"steps\":[{\"type\":\"sleep\",\"ms\":\"10\"},{\"type\":\"send\",\"text\":\"ø; 😀\\n\"}]}]}]","valid":true,"steps":[{"type":"parallel","steps":[{"type":"hold","key":"RButton"},{"type":"sequence","steps":[{"type":"sleep","ms":"10"},{"type":"send","text":"ø; 😀\n"}]}]}]},
   {"source":"repeat(a,0)","valid":false,"steps":[{"type":"repeat","key":"a","interval":"0","hold":"6"}]},
   {"source":"sleep(+5)","valid":false,"steps":[{"type":"sleep","ms":"+5"}]},
@@ -34,5 +34,15 @@
   {"source":"[{\"type\":\"toggle\",\"key\":{\"variable\":\"k\"}}]","steps":[{"type":"toggle","key":{"variable":"k"}}],"variables":[{"id":"k","name":"Movement","type":"keys","value":"w LButton"}],"resolved":[{"type":"toggle","key":"w LButton"}],"valid":true},
   {"source":"[{\"type\":\"send\",\"text\":\"prefix\"},{\"type\":\"sequence\",\"steps\":[{\"type\":\"toggle\",\"key\":\"w\"}]}]","steps":[{"type":"send","text":"prefix"},{"type":"sequence","steps":[{"type":"toggle","key":"w"}]}],"hasTrigger":false,"valid":false},
   {"source":"toggle()","steps":[{"type":"toggle","key":""}],"valid":false},
-  {"source":"[{\"type\":\"toggle\",\"key\":{\"variable\":\"n\"}}]","steps":[{"type":"toggle","key":{"variable":"n"}}],"variables":[{"id":"n","name":"Wrong type","type":"number","value":100}],"valid":false}
+  {"source":"[{\"type\":\"toggle\",\"key\":{\"variable\":\"n\"}}]","steps":[{"type":"toggle","key":{"variable":"n"}}],"variables":[{"id":"n","name":"Wrong type","type":"number","value":100}],"valid":false},
+  {"source":"[{\"type\":\"waitfor\"},{\"type\":\"mousepress\",\"key\":\"LButton\",\"onRelease\":true}]","steps":[{"type":"waitfor"},{"type":"mousepress","key":"LButton","onRelease":true}],"valid":true},
+  {"source":"[{\"type\":\"waitfor\"},{\"type\":\"mousepress\",\"key\":\"LButton\",\"onRelease\":true}]","steps":[{"type":"waitfor"},{"type":"mousepress","key":"LButton","onRelease":true}],"hasTrigger":false,"valid":false},
+  {"source":"[{\"type\":\"waitfor\"},{\"type\":\"startoverlay\",\"itemId\":\"timer\",\"restart\":true}]","steps":[{"type":"waitfor"},{"type":"startoverlay","itemIds":["timer"],"restart":true}],"hasTrigger":false,"valid":true},
+  {"source":"[{\"type\":\"waitfor\"}]","steps":[{"type":"waitfor"}],"valid":false},
+  {"source":"waitfor(LButton)","steps":[{"type":"waitfor"},{"type":"mousepress","key":"LButton"}],"valid":true},
+  {"source":"stopoverlay(timer)","steps":[{"type":"stopoverlay","itemIds":["timer"]}],"valid":true},
+  {"source":"[{\"type\":\"startoverlay\",\"itemIds\":[\"first\",\"second\"],\"restart\":true},{\"type\":\"stopoverlay\",\"itemIds\":[\"second\",\"first\"]}]","steps":[{"type":"startoverlay","itemIds":["first","second"],"restart":true},{"type":"stopoverlay","itemIds":["second","first"]}],"hasTrigger":false,"valid":true},
+  {"source":"[{\"type\":\"stopoverlay\",\"itemIds\":[]}]","steps":[{"type":"stopoverlay","itemIds":[]}],"valid":false},
+  {"source":"[{\"type\":\"stopoverlay\",\"itemIds\":[\"first\",\"first\"]}]","steps":[{"type":"stopoverlay","itemIds":["first","first"]}],"valid":false},
+  {"source":"[{\"type\":\"stopoverlay\",\"itemIds\":[\"first\",\"\"]}]","steps":[{"type":"stopoverlay","itemIds":["first",""]}],"valid":false}
 ]

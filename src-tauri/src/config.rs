@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v7 adds typed variables and explicit behavior references.
-pub const CURRENT_DB_VERSION: u32 = 7;
+/// older files. v10 stores Start/Stop overlay selections as target lists.
+pub const CURRENT_DB_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -25,6 +25,91 @@ pub fn validate_variables(variables: &[Variable]) -> Result<(), String> {
 }
 
 impl Database {
+    pub fn move_hotkey(
+        &mut self, source_game_id: &str, source_profile_id: &str, source_index: usize,
+        expected: &Hotkey, target_game_id: &str, dependencies: Profile,
+    ) -> Result<(), String> {
+        if source_game_id == target_game_id && source_profile_id == dependencies.id { return Err("Choose a different profile.".into()); }
+        let source = self.games.iter().find(|game| game.id == source_game_id)
+            .and_then(|game| game.profiles.iter().find(|profile| profile.id == source_profile_id)).ok_or("Source profile not found.")?;
+        if source.hotkeys.get(source_index) != Some(expected) { return Err("The dragged behavior changed. Drag it again.".into()); }
+        let target = self.games.iter().find(|game| game.id == target_game_id)
+            .and_then(|game| game.profiles.iter().find(|profile| profile.id == dependencies.id)).ok_or("Target profile not found.")?;
+        let assigned = !matches!(&expected.trigger, crate::triggers::Trigger::Literal(value) if value.trim().is_empty());
+        if assigned && target.hotkeys.iter().any(|hotkey| hotkey.trigger == expected.trigger) {
+            return Err("The target profile already has this hotkey trigger.".into());
+        }
+        // Both owners are validated before either changes; save_database persists the move once.
+        let source = self.games.iter_mut().find(|game| game.id == source_game_id).unwrap()
+            .profiles.iter_mut().find(|profile| profile.id == source_profile_id).unwrap();
+        let hotkey = source.hotkeys.remove(source_index);
+        let game = self.games.iter_mut().find(|game| game.id == target_game_id).unwrap();
+        game.profiles.iter_mut().find(|profile| profile.id == dependencies.id).unwrap().hotkeys.push(hotkey);
+        game.merge_profile_dependencies(dependencies);
+        Ok(())
+    }
+
+    pub fn move_overlay(
+        &mut self, source_game_id: &str, source_profile_id: &str, selection: &OverlaySelection,
+        target_game_id: &str, dependencies: Profile, target_group_id: Option<&str>,
+    ) -> Result<(), String> {
+        let origin = self.games.iter().find(|game| game.id == source_game_id).ok_or("Source folder not found.")?;
+        let source = origin.profiles.iter().find(|profile| profile.id == source_profile_id).ok_or("Source profile not found.")?;
+        let same_profile = source_game_id == target_game_id && source_profile_id == dependencies.id;
+        let (mut group, mut items) = match selection {
+            OverlaySelection::Overlay { group, items } => {
+                if same_profile || target_group_id.is_some() { return Err("Choose a different profile.".into()); }
+                let current: Vec<_> = resolve_profile_overlay_items(&origin.profiles, source).into_iter()
+                    .filter(|item| item.group_id() == Some(group.id.as_str())).cloned().collect();
+                if source.overlay_groups.iter().find(|candidate| candidate.id == group.id) != Some(group) || &current != items {
+                    return Err("The dragged overlay changed. Drag it again.".into());
+                }
+                (Some(group.clone()), current)
+            }
+            OverlaySelection::OverlayPart { item } => {
+                if source.overlay_items.iter().find(|candidate| overlay_item_id(candidate) == overlay_item_id(item)) != Some(item) {
+                    return Err("The dragged overlay part changed. Drag it again.".into());
+                }
+                if same_profile && (target_group_id.is_none() || item.group_id() == target_group_id) {
+                    return Err("Choose a different overlay destination.".into());
+                }
+                let group = resolve_profile_overlay_groups(&origin.profiles, source).into_iter()
+                    .find(|group| Some(group.id.as_str()) == item.group_id()).cloned().ok_or("Overlay not found.")?;
+                (Some(group), vec![item.clone()])
+            }
+        };
+        let destination = self.games.iter().find(|game| game.id == target_game_id).ok_or("Target folder not found.")?;
+        let target = destination.profiles.iter().find(|profile| profile.id == dependencies.id).ok_or("Target profile not found.")?;
+        let target_groups = resolve_profile_overlay_groups(&destination.profiles, target);
+        if let Some(id) = target_group_id {
+            if !target_groups.iter().any(|group| group.id == id) { return Err("Target overlay not found.".into()); }
+            for item in &mut items { item.set_group_id(id); }
+            group = None;
+        } else if matches!(selection, OverlaySelection::Overlay { .. }) {
+            if target.overlay_groups.iter().any(|existing| group.as_ref().is_some_and(|group| group.id == existing.id)) {
+                return Err("The target profile already has this overlay.".into());
+            }
+        } else if target_groups.iter().any(|existing| group.as_ref().is_some_and(|group| group.id == existing.id)) {
+            group = None;
+        }
+        if !same_profile && target.overlay_items.iter()
+            .any(|existing| items.iter().any(|item| overlay_item_id(item) == overlay_item_id(existing))) {
+            return Err("The target profile already has an overlay part with this ID.".into());
+        }
+        let ids: HashSet<_> = items.iter().map(overlay_item_id).collect();
+        // Validate the complete selection and destination before changing either owner.
+        let source = self.games.iter_mut().find(|game| game.id == source_game_id).unwrap()
+            .profiles.iter_mut().find(|profile| profile.id == source_profile_id).unwrap();
+        if let OverlaySelection::Overlay { group, .. } = selection { source.overlay_groups.retain(|candidate| candidate.id != group.id); }
+        source.overlay_items.retain(|item| !ids.contains(&overlay_item_id(item)));
+        let destination = self.games.iter_mut().find(|game| game.id == target_game_id).unwrap();
+        let target = destination.profiles.iter_mut().find(|profile| profile.id == dependencies.id).unwrap();
+        if let Some(group) = group { target.overlay_groups.push(group); }
+        target.overlay_items.extend(items);
+        destination.merge_profile_dependencies(dependencies);
+        Ok(())
+    }
+
     pub fn reorder_folders(&mut self, ids: &[String]) -> Result<(), String> {
         let order: HashMap<_, _> = ids.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect();
         if ids.len() != self.games.len() || order.len() != ids.len()
@@ -33,6 +118,12 @@ impl Database {
         }
         self.games.sort_by_key(|game| order[game.id.as_str()]);
         Ok(())
+    }
+}
+
+fn append_missing<T>(target: &mut Vec<T>, incoming: Vec<T>, key: fn(&T) -> String) {
+    for value in incoming {
+        if !target.iter().any(|existing| key(existing) == key(&value)) { target.push(value); }
     }
 }
 
@@ -51,6 +142,55 @@ pub struct Game {
     pub states: Vec<ProfileState>,
     #[serde(default)]
     pub states_disabled: bool,
+    #[serde(default)]
+    pub subfolders: Vec<Subfolder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subfolder {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_subfolder_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub toggle_key: Option<String>,
+}
+
+fn default_subfolder_enabled() -> bool { true }
+
+impl Game {
+    fn merge_profile_dependencies(&mut self, mut dependencies: Profile) {
+        append_missing(&mut self.states, dependencies.states, |state| state.id.clone());
+        // Definitions already available in the destination folder keep their current owner.
+        dependencies.scripts.retain(|script| !self.profiles.iter().any(|profile| profile.scripts.iter().any(|existing| existing.id == script.id)));
+        dependencies.overlay_items.retain(|item| !self.profiles.iter().any(|profile| profile.overlay_items.iter().any(|existing| overlay_item_id(existing) == overlay_item_id(item))));
+        dependencies.overlay_groups.retain(|group| !self.profiles.iter().any(|profile| profile.overlay_groups.iter().any(|existing| existing.id == group.id)));
+        let target = self.profiles.iter_mut().find(|profile| profile.id == dependencies.id).unwrap();
+        append_missing(&mut target.scripts, dependencies.scripts, |script| script.id.clone());
+        append_missing(&mut target.overlay_items, dependencies.overlay_items, overlay_item_id);
+        append_missing(&mut target.overlay_groups, dependencies.overlay_groups, |group| group.id.clone());
+    }
+
+    /// Subfolder activation gates a profile without changing its own armed state.
+    pub fn profile_enabled(&self, profile: &Profile) -> bool {
+        profile.subfolder_id.as_ref().map(|id| self.subfolders.iter().any(|folder| &folder.id == id && folder.enabled)).unwrap_or(true)
+    }
+
+    pub fn validate_subfolders(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        if self.subfolders.iter().any(|folder| folder.id.trim().is_empty() || folder.name.trim().is_empty() || !ids.insert(folder.id.as_str())) {
+            return Err("Invalid or duplicate subfolder.".into());
+        }
+        if self.profiles.iter().any(|profile| profile.subfolder_id.as_deref().is_some_and(|id| !ids.contains(id))) {
+            return Err("Profile subfolder not found.".into());
+        }
+        Ok(())
+    }
+
+    pub fn set_subfolder_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> {
+        self.subfolders.iter_mut().find(|folder| folder.id == id).ok_or("Subfolder not found.")?.enabled = enabled;
+        Ok(())
+    }
 }
 
 /// A user script owned by a profile. It runs either when its hotkey is pressed (while the
@@ -106,6 +246,8 @@ pub struct Profile {
     pub armed: bool,
     #[serde(default)]
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subfolder_id: Option<String>,
     #[serde(default)]
     pub hotkeys: Vec<Hotkey>,
     #[serde(default)]
@@ -134,7 +276,7 @@ pub struct Profile {
     pub toggle_overlay_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OverlayGroup {
     pub id: String,
     pub name: String,
@@ -216,7 +358,7 @@ fn default_timer_background() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayItem {
     Timer {
@@ -330,6 +472,29 @@ pub enum OverlayItem {
     },
 }
 
+impl OverlayItem {
+    fn group_id(&self) -> Option<&str> {
+        match self {
+            Self::Timer { group_id, .. } | Self::Icon { group_id, .. }
+            | Self::Bar { group_id, .. } | Self::Text { group_id, .. } => group_id.as_deref(),
+        }
+    }
+
+    fn set_group_id(&mut self, id: &str) {
+        match self {
+            Self::Timer { group_id, .. } | Self::Icon { group_id, .. }
+            | Self::Bar { group_id, .. } | Self::Text { group_id, .. } => *group_id = Some(id.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OverlaySelection {
+    Overlay { group: OverlayGroup, items: Vec<OverlayItem> },
+    OverlayPart { item: OverlayItem },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayTrigger {
     pub id: String,
@@ -342,7 +507,7 @@ pub struct OverlayTrigger {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Hotkey {
     #[serde(default)]
     pub name: String,
@@ -395,7 +560,7 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
 
     if indices.is_empty() {
         db.games.push(Game {
-            states: Vec::new(), states_disabled: false,
+            states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
             id: GLOBAL_FOLDER_ID.to_string(),
             name: "Global".to_string(),
             exe: "*".to_string(),
@@ -416,8 +581,10 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
     let keep = indices[0];
     let merged: Vec<Profile> = indices.iter().flat_map(|&i| db.games[i].profiles.clone()).collect();
     let merged_states = indices.iter().flat_map(|&i| db.games[i].states.clone()).collect();
+    let merged_subfolders = indices.iter().flat_map(|&i| db.games[i].subfolders.clone()).collect();
     db.games[keep].profiles = merged;
     db.games[keep].states = merged_states;
+    db.games[keep].subfolders = merged_subfolders;
     db.games[keep].exe = "*".to_string();
     for &i in indices.iter().skip(1).rev() {
         db.games.remove(i);
@@ -443,7 +610,7 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         }
         // These versions share the folder-owned profile shape. Defaults, typed
         // variable deserialization, and normalization below upgrade their fields.
-        3..=6 => {
+        3..=9 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             db.version = CURRENT_DB_VERSION;
             (db, true)
@@ -458,7 +625,8 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         }
     };
 
-    if migrated {
+    let upgraded_behaviors = normalize_behaviors(&mut db)?;
+    if migrated || upgraded_behaviors {
         let mut backup = path.as_os_str().to_owned();
         backup.push(format!(".v{}.bak", version.max(1)));
         std::fs::copy(path, std::path::Path::new(&backup))
@@ -469,10 +637,29 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
     let added_global = ensure_global_folder(&mut db);
     let moved_states = normalize_states(&mut db);
     let grouped_overlays = normalize_overlays(&mut db);
-    if migrated || added_global || moved_states || grouped_overlays {
+    for game in &db.games { game.validate_subfolders()?; }
+    if migrated || upgraded_behaviors || added_global || moved_states || grouped_overlays {
         save_db(path, &db)?;
     }
     Ok(db)
+}
+
+pub fn normalize_behaviors(db: &mut Database) -> Result<bool, String> {
+    fn upgrade(source: &mut String) -> Result<bool, String> {
+        if let Some(upgraded) = crate::behavior::upgrade_legacy_actions(source)? { *source = upgraded; return Ok(true); }
+        Ok(false)
+    }
+    let mut changed = false;
+    for game in &mut db.games {
+        for profile in &mut game.profiles {
+            for hotkey in &mut profile.hotkeys { changed |= upgrade(&mut hotkey.behavior)?; }
+            for event in &mut profile.events { changed |= upgrade(&mut event.behavior)?; }
+        }
+    }
+    for variable in &mut db.variables {
+        if let crate::variables::VariableValue::Behavior(source) = &mut variable.value { changed |= upgrade(source)?; }
+    }
+    Ok(changed)
 }
 
 /// Reads v2's profile-owned executable shape and groups profiles under folder-owned targets.
@@ -592,7 +779,7 @@ mod legacy_v2 {
                     .map(|index| groups.remove(index).1)
                     .unwrap_or_default();
                 games.push(NewGame {
-                    states: Vec::new(), states_disabled: false,
+                    states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id.clone(),
                     name: game.name.clone(),
                     exe: "*".to_string(),
@@ -601,7 +788,7 @@ mod legacy_v2 {
                 });
                 for (index, (exe, profiles)) in groups.into_iter().enumerate() {
                     games.push(NewGame {
-                        states: Vec::new(), states_disabled: false,
+                        states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                         id: split_id(&game.id, index + 2, &reserved, &mut allocated),
                         name: format!("{} ({})", game.name, target_label(&exe)),
                         exe,
@@ -615,7 +802,7 @@ mod legacy_v2 {
             if groups.is_empty() {
                 allocated.insert(game.id.clone());
                 games.push(NewGame {
-                    states: Vec::new(), states_disabled: false,
+                    states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id,
                     name: game.name,
                     exe: String::new(),
@@ -639,7 +826,7 @@ mod legacy_v2 {
                     game.name.clone()
                 };
                 games.push(NewGame {
-                    states: Vec::new(), states_disabled: false,
+                    states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id,
                     name,
                     exe,
@@ -726,7 +913,7 @@ mod legacy_v1 {
                         p
                     })
                     .collect();
-                super::Game { states: Vec::new(), states_disabled: false, id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
+                super::Game { states: Vec::new(), states_disabled: false, subfolders: Vec::new(), id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
             })
             .collect();
         NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
@@ -807,8 +994,10 @@ pub fn save_db(path: &Path, db: &Database) -> Result<(), String> {
     // Stamp the current version on every write so a fresh default or any caller's db is
     // correctly versioned and never re-migrates on the next load.
     let mut db = db.clone();
+    normalize_behaviors(&mut db)?;
     normalize_states(&mut db);
     normalize_overlays(&mut db);
+    for game in &db.games { game.validate_subfolders()?; }
     db.version = CURRENT_DB_VERSION;
     let content = serde_json::to_string_pretty(&db).map_err(|e| e.to_string())?;
     // Write to a temp file then rename, so an interrupted write can't corrupt db.json.
@@ -832,7 +1021,7 @@ fn resolve_profile_entries<'a, T, F, K>(
     profiles: &'a [Profile],
     profile: &'a Profile,
     select: F,
-    key_of: fn(&T) -> K,
+    key_of: fn(&T) -> Option<K>,
     visited: &mut HashSet<&'a str>,
 ) -> Vec<&'a T>
 where
@@ -854,7 +1043,7 @@ where
 
     for value in select(profile) {
         let key = key_of(value);
-        if let Some(slot) = resolved.iter_mut().find(|entry| key_of(*entry) == key) {
+        if let Some(slot) = resolved.iter_mut().find(|entry| key.is_some() && key_of(*entry) == key) {
             *slot = value;
         } else {
             resolved.push(value);
@@ -863,12 +1052,12 @@ where
 
     // Owned entries fill their existing slots in saved order; inherited entries keep theirs.
     let owned = select(profile);
-    let own_keys: Vec<_> = owned.iter().map(key_of).collect();
-    let mut ordered: Vec<_> = resolved.iter().copied().filter(|entry| own_keys.contains(&key_of(entry))).collect();
-    ordered.sort_by_key(|entry| own_keys.iter().rposition(|key| *key == key_of(entry)));
+    let own_index = |entry: &T| owned.iter().position(|value| std::ptr::eq(value, entry));
+    let mut ordered: Vec<_> = resolved.iter().copied().filter(|entry| own_index(entry).is_some()).collect();
+    ordered.sort_by_key(|entry| own_index(entry));
     let mut ordered = ordered.into_iter();
     for slot in &mut resolved {
-        if own_keys.contains(&key_of(slot)) { *slot = ordered.next().unwrap(); }
+        if own_index(slot).is_some() { *slot = ordered.next().unwrap(); }
     }
     resolved
 }
@@ -879,7 +1068,11 @@ pub fn resolve_profile_hotkeys<'a>(profiles: &'a [Profile], profile: &'a Profile
         profiles,
         profile,
         |current| current.hotkeys.as_slice(),
-        |hotkey| hotkey.trigger.clone(),
+        // Unassigned copies do not override one another or inherited drafts.
+        |hotkey| match &hotkey.trigger {
+            crate::triggers::Trigger::Literal(trigger) if trigger.trim().is_empty() => None,
+            trigger => Some(trigger.clone()),
+        },
         &mut visited,
     )
 }
@@ -890,7 +1083,7 @@ pub fn resolve_profile_events<'a>(profiles: &'a [Profile], profile: &'a Profile)
         profiles,
         profile,
         |current| current.events.as_slice(),
-        |event| event.event.clone(),
+        |event| Some(event.event.clone()),
         &mut visited,
     )
 }
@@ -901,7 +1094,7 @@ pub fn resolve_profile_states<'a>(profiles: &'a [Profile], profile: &'a Profile)
         profiles,
         profile,
         |current| current.states.as_slice(),
-        |state| state.id.clone(),
+        |state| Some(state.id.clone()),
         &mut visited,
     )
 }
@@ -912,13 +1105,13 @@ pub fn resolve_profile_overlay_items<'a>(profiles: &'a [Profile], profile: &'a P
         profiles,
         profile,
         |current| current.overlay_items.as_slice(),
-        overlay_item_id,
+        |item| Some(overlay_item_id(item)),
         &mut visited,
     )
 }
 
 pub fn resolve_profile_overlay_groups<'a>(profiles: &'a [Profile], profile: &'a Profile) -> Vec<&'a OverlayGroup> {
-    resolve_profile_entries(profiles, profile, |current| current.overlay_groups.as_slice(), |group| group.id.clone(), &mut HashSet::new())
+    resolve_profile_entries(profiles, profile, |current| current.overlay_groups.as_slice(), |group| Some(group.id.clone()), &mut HashSet::new())
 }
 
 pub fn profile_has_overlay(profiles: &[Profile], profile: &Profile) -> bool {
@@ -928,6 +1121,342 @@ pub fn profile_has_overlay(profiles: &[Profile], profile: &Profile) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn overlay_selections_upgrade_across_versions_and_reopen_without_rewriting() {
+        for version in [3, 8, 9] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-overlay-targets-{version}-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let behavior = serde_json::json!([{"type":"sequence","steps":[{"type":"waitfor","key":"LButton"},
+                {"type":"startoverlay","itemId":"first","restart":true},{"type":"stopoverlay","itemIds":["first","second"]}]}]).to_string();
+            let source = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe"},
+                "variables":[{"id":"shared","name":"Shared","type":"behavior","value":"stopoverlay(second);restartoverlay(first)"}],
+                "scopes":[{"id":"global","name":"Global","exe":"*"},{"id":"game","name":"Game","exe":"game.exe",
+                    "subfolders":[{"id":"group","name":"Group","enabled":false}],
+                    "profiles":[{"id":"p","name":"P","armed":true,"subfolder_id":"group","hotkeys":[{"trigger":"q","behavior":behavior}],
+                        "events":[{"event":"focus_gained","behavior":"startoverlay(first)"}],
+                        "overlay_groups":[{"id":"first","name":"First"},{"id":"second","name":"Second"}]}]}]}).to_string();
+            std::fs::write(&path,&source).unwrap();
+            let db = load_db(&path).unwrap();
+            let profile = &db.games[1].profiles[0];
+            let upgraded: serde_json::Value = serde_json::from_str(&profile.hotkeys[0].behavior).unwrap();
+            assert_eq!(upgraded[0]["steps"],serde_json::json!([
+                {"type":"waitfor"},{"type":"mousepress","key":"LButton"},
+                {"type":"startoverlay","itemIds":["first"],"restart":true},{"type":"stopoverlay","itemIds":["first","second"]}]));
+            let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
+            assert_eq!(event[0]["itemIds"],serde_json::json!(["first"]));
+            let crate::variables::VariableValue::Behavior(shared) = &db.variables[0].value else { panic!("wrong variable type"); };
+            let shared: serde_json::Value = serde_json::from_str(shared).unwrap();
+            assert_eq!(shared[0]["itemIds"],serde_json::json!(["second"]));
+            assert_eq!(shared[1]["itemIds"],serde_json::json!(["first"]));
+            assert_eq!(profile.subfolder_id.as_deref(),Some("group"));
+            assert!(profile.armed); assert!(!db.games[1].subfolders[0].enabled);
+            assert_eq!(profile.overlay_groups.len(),2);
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            load_db(&path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(),saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            std::fs::remove_file(path).unwrap(); std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_overlay_migration_leaves_original_settings_intact() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-overlay-targets-failure-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":9,"settings":{"ahk_exe":""},"scopes":[{"id":"game","name":"Game","profiles":[{
+            "id":"p","name":"P","hotkeys":[{"trigger":"q","behavior":"[{\"type\":\"startoverlay\",\"itemIds\":[\"a\"],\"itemId\":\"b\"}]"}]}]}]}).to_string();
+        std::fs::write(&path,&source).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_waits_upgrade_with_backup_across_skipped_versions_and_reopen_unchanged() {
+        for version in [3,5,7,8] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-waits-{version}-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let hotkey = serde_json::json!([
+                {"type":"sequence","steps":[{"type":"waitfor","key":{"variable":"keys"}},
+                    {"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]}
+            ]).to_string();
+            let source = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe"},
+                "variables":[{"id":"keys","name":"Keys","type":"keys","value":"rctrl LButton"},
+                    {"id":"shared","name":"Shared","type":"behavior","value":"waitfor(LButton);send(done)"}],
+                "scopes":[{"id":"global","name":"Global","exe":"*"},{"id":"game","name":"Game","exe":"game.exe",
+                    "subfolders":[{"id":"group","name":"Group","enabled":false,"toggle_key":"rctrl n"}],
+                    "profiles":[{"id":"profile","name":"Profile","armed":true,"subfolder_id":"group",
+                        "hotkeys":[{"trigger":"q","behavior":hotkey}],"events":[{"event":"focus_gained","behavior":"waitfor(rctrl x);send(event)"}]}]}]
+            }).to_string();
+            std::fs::write(&path,&source).unwrap();
+            let upgraded = load_db(&path).unwrap();
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            assert_eq!(upgraded.version,super::CURRENT_DB_VERSION);
+            let profile = &upgraded.games[1].profiles[0];
+            let steps: serde_json::Value = serde_json::from_str(&profile.hotkeys[0].behavior).unwrap();
+            assert_eq!(steps[0]["steps"][0],serde_json::json!({"type":"waitfor"}));
+            assert_eq!(steps[0]["steps"][1],serde_json::json!({"type":"press","key":{"variable":"keys"}}));
+            assert_eq!(steps[0]["steps"][2]["credentialId"],"b8483943-e86c-41aa-a593-7388833369cd");
+            assert_eq!(profile.subfolder_id.as_deref(),Some("group"));
+            assert!(profile.armed); assert!(!upgraded.games[1].subfolders[0].enabled);
+            let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
+            assert_eq!(event[1],serde_json::json!({"type":"press","key":"rctrl x"}));
+            let shared = match &upgraded.variables[1].value { crate::variables::VariableValue::Behavior(value) => value, _ => panic!("wrong variable type") };
+            assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap()[1],serde_json::json!({"type":"mousepress","key":"LButton"}));
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            load_db(&path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(),saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            std::fs::remove_file(path).unwrap(); std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_wait_upgrade_leaves_original_settings_untouched() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-waits-failure-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":8,"settings":{"ahk_exe":""},"scopes":[{"id":"game","name":"Game","profiles":[{
+            "id":"p","name":"P","hotkeys":[{"trigger":"q","behavior":"[{\"type\":\"waitfor\",\"key\":4}]"}]}]}]}).to_string();
+        std::fs::write(&path,&source).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn overlay_move_fixture() -> super::Database {
+        let mut db = hotkey_move_fixture();
+        db.games[0].states = serde_json::from_value(serde_json::json!([{"id":"buff","name":"Buff","duration_ms":5000}])).unwrap();
+        db.games[0].profiles[0].overlay_groups = serde_json::from_value(serde_json::json!([
+            {"id":"magic","name":"Magic","x":15,"y":25,"layout":"row","gap":6,"disabled":true},
+            {"id":"empty","name":"Empty"}
+        ])).unwrap();
+        db.games[0].profiles[0].overlay_items = serde_json::from_value(serde_json::json!([
+            {"id":"timer","name":"Saved timer","type":"timer","group_id":"magic","x":3,"y":4,"duration_ms":5000,"color":"#ffffff","font_size":22,"timer_state_id":"buff","start_with_overlay":true,"show_only_running":true},
+            {"id":"icon","name":"Saved icon","type":"icon","group_id":"magic","x":1,"y":2,"w":48,"h":64,"src":"data:image/png;base64,image","visible_while_timer_id":"timer"},
+            {"id":"bar","name":"Saved bar","type":"bar","group_id":"magic","x":0,"y":0,"w":200,"h":20,"color":"#aabbcc","max_value":100},
+            {"id":"text","name":"Saved text","type":"text","group_id":"magic","x":5,"y":6,"content":"Literal overlay text","font_size":18,"color":"#ffffff"}
+        ])).unwrap();
+        db.games[0].profiles.push(serde_json::from_value(serde_json::json!({"id":"same","name":"Same","armed":false})).unwrap());
+        db
+    }
+
+    fn overlay_selection(db: &super::Database) -> super::OverlaySelection {
+        super::OverlaySelection::Overlay {
+            group: db.games[0].profiles[0].overlay_groups[0].clone(),
+            items: db.games[0].profiles[0].overlay_items.clone(),
+        }
+    }
+
+    #[test]
+    fn overlay_moves_transfer_all_parts_and_keep_settings_references_and_activation() {
+        for (target_game, target_id) in [("source-app","same"),("target-app","target")] {
+            let mut db = overlay_move_fixture();
+            let selection = overlay_selection(&db);
+            let source_before = serde_json::to_value(&db.games[0].profiles[0]).unwrap();
+            let target_game_index = usize::from(target_game == "target-app");
+            let target_index = db.games[target_game_index].profiles.iter().position(|profile| profile.id == target_id).unwrap();
+            let target_before = serde_json::to_value(&db.games[target_game_index].profiles[target_index]).unwrap();
+            let mut dependencies = db.games[target_game_index].profiles[target_index].clone();
+            dependencies.states = db.games[0].states.clone();
+            db.move_overlay("source-app","source",&selection,target_game,dependencies,None).unwrap();
+            let source = &db.games[0].profiles[0];
+            assert_eq!(source.overlay_groups.iter().map(|group| group.id.as_str()).collect::<Vec<_>>(),["empty"]);
+            assert!(source.overlay_items.is_empty());
+            assert_eq!(serde_json::to_value(&source.hotkeys).unwrap(),source_before["hotkeys"]);
+            let target = &db.games[target_game_index].profiles[target_index];
+            assert_eq!(target.overlay_items,match &selection { super::OverlaySelection::Overlay { items, .. } => items.clone(), _ => unreachable!() });
+            assert_eq!(target.overlay_groups[0],match &selection { super::OverlaySelection::Overlay { group, .. } => group.clone(), _ => unreachable!() });
+            assert!(!target.armed);
+            assert_eq!(serde_json::to_value(&target.hotkeys).unwrap(),target_before["hotkeys"]);
+            assert_eq!(serde_json::to_value(&target.subfolder_id).unwrap(),target_before.get("subfolder_id").cloned().unwrap_or(serde_json::Value::Null));
+            assert!(db.games[target_game_index].states.iter().any(|state| state.id == "buff"));
+            let path = std::env::temp_dir().join(format!("macrotoolbox-overlay-move-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            super::save_db(&path,&db).unwrap();
+            assert_eq!(serde_json::to_value(load_db(&path).unwrap()).unwrap(),serde_json::to_value(&db).unwrap());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn overlay_parts_move_independently_between_groups_and_profiles() {
+        let mut db = overlay_move_fixture();
+        let icon = db.games[0].profiles[0].overlay_items[1].clone();
+        let part = super::OverlaySelection::OverlayPart { item: icon.clone() };
+        let dependencies = db.games[0].profiles[0].clone();
+        db.move_overlay("source-app","source",&part,"source-app",dependencies,Some("empty")).unwrap();
+        assert_eq!(db.games[0].profiles[0].overlay_groups.len(),2);
+        assert_eq!(db.games[0].profiles[0].overlay_items.len(),4);
+        let mut moved = db.games[0].profiles[0].overlay_items.iter().find(|item| super::overlay_item_id(item) == "icon").unwrap().clone();
+        assert_eq!(moved.group_id(),Some("empty"));
+        moved.set_group_id("magic");
+        assert_eq!(moved,icon);
+        let current = db.games[0].profiles[0].overlay_items.iter().find(|item| super::overlay_item_id(item) == "icon").unwrap().clone();
+        let dependencies = db.games[1].profiles[0].clone();
+        db.move_overlay("source-app","source",&super::OverlaySelection::OverlayPart { item: current },"target-app",dependencies,None).unwrap();
+        assert_eq!(db.games[0].profiles[0].overlay_items.len(),3);
+        assert_eq!(db.games[1].profiles[0].overlay_items.len(),1);
+        assert_eq!(db.games[1].profiles[0].overlay_groups[0].id,"empty");
+        assert_eq!(db.games[1].profiles[0].overlay_items[0].group_id(),Some("empty"));
+    }
+
+    #[test]
+    fn overlays_can_move_into_descendants_and_empty_overlays_move_without_parts() {
+        let mut db = overlay_move_fixture();
+        let selection = overlay_selection(&db);
+        db.games[0].profiles[1].parent_id = Some("source".into());
+        let dependencies = db.games[0].profiles[1].clone();
+        db.move_overlay("source-app","source",&selection,"source-app",dependencies,None).unwrap();
+        assert_eq!(db.games[0].profiles[1].overlay_groups[0].id,"magic");
+        assert_eq!(db.games[0].profiles[1].overlay_items.len(),4);
+        assert!(db.games[0].profiles[0].overlay_items.is_empty());
+        let empty = super::OverlaySelection::Overlay { group: db.games[0].profiles[0].overlay_groups[0].clone(), items: vec![] };
+        let dependencies = db.games[1].profiles[0].clone();
+        db.move_overlay("source-app","source",&empty,"target-app",dependencies,None).unwrap();
+        assert_eq!(db.games[1].profiles[0].overlay_groups[0].id,"empty");
+        assert!(db.games[1].profiles[0].overlay_items.is_empty());
+    }
+
+    #[test]
+    fn invalid_overlay_selections_and_destinations_leave_both_owners_unchanged() {
+        let mut db = overlay_move_fixture();
+        let selection = overlay_selection(&db);
+        let target = db.games[1].profiles[0].clone();
+        let before = serde_json::to_value(&db).unwrap();
+        for (source_game,source_id,target_game,target_id,group_id) in [
+            ("source-app","source","source-app","source",None),
+            ("missing","source","target-app","target",None),
+            ("source-app","missing","target-app","target",None),
+            ("source-app","source","missing","target",None),
+            ("source-app","source","target-app","missing",None),
+            ("source-app","source","target-app","target",Some("missing")),
+        ] {
+            let mut dependencies = target.clone(); dependencies.id = target_id.into();
+            assert!(db.move_overlay(source_game,source_id,&selection,target_game,dependencies,group_id).is_err());
+            assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        }
+        let mut stale = selection.clone();
+        if let super::OverlaySelection::Overlay { items, .. } = &mut stale { items.pop(); }
+        assert!(db.move_overlay("source-app","source",&stale,"target-app",target.clone(),None).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        if let super::OverlaySelection::Overlay { group, .. } = &selection { db.games[1].profiles[0].overlay_groups.push(group.clone()); }
+        let group_collision = serde_json::to_value(&db).unwrap();
+        assert!(db.move_overlay("source-app","source",&selection,"target-app",target.clone(),None).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),group_collision);
+        db.games[1].profiles[0].overlay_groups.clear();
+        let icon = db.games[0].profiles[0].overlay_items[1].clone();
+        let part = super::OverlaySelection::OverlayPart { item: icon.clone() };
+        let mut stale_part = part.clone();
+        if let super::OverlaySelection::OverlayPart { item } = &mut stale_part { item.set_group_id("empty"); }
+        assert!(db.move_overlay("source-app","source",&stale_part,"target-app",target.clone(),None).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        assert!(db.move_overlay("source-app","source",&part,"source-app",db.games[0].profiles[0].clone(),Some("magic")).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        db.games[1].profiles[0].overlay_items.push(icon);
+        let collision = serde_json::to_value(&db).unwrap();
+        assert!(db.move_overlay("source-app","source",&selection,"target-app",target,None).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),collision);
+    }
+
+    fn hotkey_move_fixture() -> super::Database {
+        serde_json::from_value(serde_json::json!({
+            "version":super::CURRENT_DB_VERSION,"settings":{"ahk_exe":""},"scopes":[
+                {"id":"source-app","name":"Source","exe":"source.exe","profiles":[
+                    {"id":"source","name":"Source","armed":true,"hotkeys":[
+                        {"name":"Move me","trigger":"f1","behavior":"press(x)","allow_extra_modifiers":false,"state_id":"state"},
+                        {"name":"Leave me","trigger":"f2","behavior":"press(y)"}]}]},
+                {"id":"target-app","name":"Target","exe":"target.exe","subfolders":[{"id":"off","name":"Off","enabled":false}],
+                 "states":[{"id":"existing-state","name":"Existing"}],"profiles":[
+                    {"id":"target","name":"Keep name","armed":false,"subfolder_id":"off","hotkeys_disabled":true,
+                     "hotkeys":[{"name":"Existing","trigger":"f3","behavior":"press(z)"}],
+                     "scripts":[{"id":"existing-script","name":"Keep script","trigger":"hotkey","source":"code","code":"keep"}]},
+                    {"id":"sibling","name":"Sibling","scripts":[{"id":"shared-script","trigger":"hotkey","source":"code","code":"shared"}]}]},
+                {"id":"global","name":"Global","exe":"*"}
+            ]
+        })).unwrap()
+    }
+
+    #[test]
+    fn hotkey_move_preserves_owners_and_destination_settings_and_persists_once() {
+        let mut db = hotkey_move_fixture();
+        let expected = db.games[0].profiles[0].hotkeys[0].clone();
+        let source_before = serde_json::to_value(&db.games[0]).unwrap();
+        let mut dependencies: Profile = serde_json::from_value(serde_json::json!({
+            "id":"target","name":"Stale name","armed":true,"states":[
+                {"id":"state","name":"State"},{"id":"existing-state","name":"Stale state"}],
+            "hotkeys":[{"trigger":"f4","behavior":"send(stale)"}],"scripts":[
+                {"id":"existing-script","name":"Stale script","trigger":"launch","source":"code"},
+                {"id":"shared-script","trigger":"launch","source":"code"},
+                {"id":"new-script","trigger":"hotkey","source":"code","code":"print('hello')"}],
+            "overlay_groups":[{"id":"overlay","name":"Overlay"}],
+            "overlay_items":[{"type":"timer","id":"timer","name":"Timer","group_id":"overlay","duration_ms":5000,"color":"#fff","font_size":22,"x":0,"y":0}]
+        })).unwrap();
+        db.move_hotkey("source-app","source",0,&expected,"target-app",dependencies.clone()).unwrap();
+        let target = &db.games[1].profiles[0];
+        assert_eq!(target.name,"Keep name");
+        assert!(!target.armed);
+        assert!(target.hotkeys_disabled);
+        assert_eq!(target.subfolder_id.as_deref(),Some("off"));
+        assert_eq!(target.hotkeys.len(),2);
+        assert_eq!(target.hotkeys[1],expected);
+        assert_eq!(target.hotkeys[0].name,"Existing");
+        assert_eq!(target.scripts.iter().map(|script| script.id.as_str()).collect::<Vec<_>>(),["existing-script","new-script"]);
+        assert_eq!(target.scripts[0].code,"keep");
+        assert_eq!(target.overlay_groups[0].id,"overlay");
+        assert_eq!(super::overlay_item_id(&target.overlay_items[0]),"timer");
+        assert!(target.states.is_empty());
+        assert_eq!(db.games[1].states.iter().map(|state| state.name.as_str()).collect::<Vec<_>>(),["Existing","State"]);
+        let mut expected_source = source_before;
+        expected_source["profiles"][0]["hotkeys"].as_array_mut().unwrap().remove(0);
+        assert_eq!(serde_json::to_value(&db.games[0]).unwrap(),expected_source);
+
+        let path = std::env::temp_dir().join(format!("macrotoolbox-move-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        super::save_db(&path,&db).unwrap();
+        assert_eq!(serde_json::to_value(load_db(&path).unwrap()).unwrap(),serde_json::to_value(&db).unwrap());
+        std::fs::remove_file(path).unwrap();
+
+        dependencies.id = "sibling".into();
+        db.move_hotkey("target-app","target",1,&expected,"target-app",dependencies).unwrap();
+        assert_eq!(db.games[1].profiles[0].hotkeys.len(),1);
+        assert_eq!(db.games[1].profiles[1].hotkeys,[expected]);
+        assert_eq!(db.games[1].profiles[1].scripts.len(),1);
+    }
+
+    #[test]
+    fn invalid_or_stale_hotkey_moves_are_atomic_and_unassigned_copies_stay_distinct() {
+        let mut db = hotkey_move_fixture();
+        let expected = db.games[0].profiles[0].hotkeys[0].clone();
+        let before = serde_json::to_value(&db).unwrap();
+        let target = db.games[1].profiles[0].clone();
+        for (game,profile,index,target_game,target_id) in [
+            ("source-app","source",0,"source-app","source"),
+            ("missing","source",0,"target-app","target"),
+            ("source-app","missing",0,"target-app","target"),
+            ("source-app","source",1,"target-app","target"),
+            ("source-app","source",9,"target-app","target"),
+            ("source-app","source",0,"missing","target"),
+            ("source-app","source",0,"target-app","missing"),
+        ] {
+            let mut dependencies = target.clone(); dependencies.id = target_id.into();
+            assert!(db.move_hotkey(game,profile,index,&expected,target_game,dependencies).is_err());
+            assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        }
+        let mut stale = expected.clone(); stale.behavior = "send(changed)".into();
+        assert!(db.move_hotkey("source-app","source",0,&stale,"target-app",target.clone()).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        db.games[1].profiles[0].hotkeys.push(expected.clone());
+        let before_conflict = serde_json::to_value(&db).unwrap();
+        assert!(db.move_hotkey("source-app","source",0,&expected,"target-app",target.clone()).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before_conflict);
+        db.games[0].profiles[0].hotkeys[0].trigger = "".into();
+        db.games[1].profiles[0].hotkeys[1].trigger = "".into();
+        let blank = db.games[0].profiles[0].hotkeys[0].clone();
+        db.move_hotkey("source-app","source",0,&blank,"target-app",target).unwrap();
+        assert_eq!(db.games[1].profiles[0].hotkeys.iter().filter(|hotkey| hotkey.trigger == blank.trigger).count(),2);
+    }
 
     #[test]
     fn folder_reordering_is_atomic_and_persists_without_changing_folder_contents() {
@@ -963,6 +1492,82 @@ mod tests {
         assert_eq!(resolved.iter().map(|entry| entry.trigger.resolve(&[]).unwrap().join(",")).collect::<Vec<_>>(), ["a", "d", "c", "b"]);
         assert_eq!(resolved[3].behavior, "send(override)");
         assert_eq!(profiles[0].hotkeys.iter().map(|entry| entry.trigger.resolve(&[]).unwrap().join(",")).collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn unassigned_copies_remain_distinct_across_inheritance_and_reopening_settings() {
+        let db: super::Database = serde_json::from_value(serde_json::json!({
+            "version": super::CURRENT_DB_VERSION, "settings": {"ahk_exe":""}, "scopes":[{
+                "id":"game", "name":"Game", "exe":"game.exe", "profiles":[
+                    {"id":"parent", "name":"Parent", "hotkeys":[
+                        {"name":"Original", "trigger":"f1", "behavior":"press(x)"},
+                        {"name":"Parent copy", "trigger":"", "behavior":"press(x)"},
+                        {"name":"Parent copy", "trigger":"", "behavior":"press(x)"}]},
+                    {"id":"child", "name":"Child", "parent_id":"parent", "hotkeys":[
+                        {"name":"Copy", "trigger":"", "behavior":"press(x)"},
+                        {"name":"Copy of copy", "trigger":" ", "behavior":"press(x)"},
+                        {"name":"Override", "trigger":"f1", "behavior":"press(y)"}]}
+                ]
+            }]
+        })).unwrap();
+        let path = std::env::temp_dir().join(format!("macrotoolbox-copies-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        super::save_db(&path, &db).unwrap();
+        let mut loaded = load_db(&path).unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&db).unwrap());
+        let profiles = &loaded.games[0].profiles;
+        let resolved = super::resolve_profile_hotkeys(profiles, &profiles[1]);
+        assert_eq!(resolved.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            ["Copy", "Parent copy", "Parent copy", "Copy of copy", "Override"]);
+        assert!(std::ptr::eq(resolved[0], &profiles[1].hotkeys[0]));
+        assert!(std::ptr::eq(resolved[2], &profiles[0].hotkeys[2]));
+        assert_eq!(resolved[4].behavior, "press(y)");
+        loaded.games[0].profiles[1].hotkeys.swap(0, 1);
+        let profiles = &loaded.games[0].profiles;
+        assert_eq!(super::resolve_profile_hotkeys(profiles, &profiles[1]).iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            ["Copy of copy", "Parent copy", "Parent copy", "Copy", "Override"]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v7_settings_upgrade_without_reassigning_profiles_and_subfolder_switches_persist() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-subfolders-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":7,"settings":{"ahk_exe":"ahk.exe"},
+            "variables":[{"id":"delay","name":"Delay","type":"number","value":150}],
+            "scopes":[{"id":"game","name":"Game","exe":"game.exe","states":[{"id":"buff","name":"Buff"}],
+                "profiles":[{"id":"keys","name":"Keys","armed":true,"toggle_hotkeys_key":"rctrl f1",
+                    "hotkeys":[{"trigger":"rctrl o","behavior":"sleep($delay);send(hello)"}]},
+                    {"id":"off","name":"Off","armed":false}]}]}).to_string();
+        std::fs::write(&path, &source).unwrap();
+        let mut db = load_db(&path).unwrap();
+        let backup = path.with_extension("json.v7.bak");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+        assert!(db.games[0].subfolders.is_empty());
+        assert!(db.games[0].profiles[0].subfolder_id.is_none());
+        assert!(db.games[0].profile_enabled(&db.games[0].profiles[0]));
+        assert_eq!(db.games[0].profiles[0].hotkeys[0].behavior, "sleep($delay);send(hello)");
+        assert_eq!(db.variables[0].id, "delay");
+        db.games[0].subfolders.push(super::Subfolder { id:"combat".into(),name:"Combat".into(),enabled:true,toggle_key:Some("rctrl f2".into()) });
+        db.games[0].profiles[0].subfolder_id = Some("combat".into());
+        let armed = db.games[0].profiles.iter().map(|profile| profile.armed).collect::<Vec<_>>();
+        db.games[0].set_subfolder_enabled("combat", false).unwrap();
+        assert!(!db.games[0].profile_enabled(&db.games[0].profiles[0]));
+        assert!(db.games[0].set_subfolder_enabled("missing", true).is_err());
+        super::save_db(&path, &db).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let mut reopened = load_db(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+        assert!(!reopened.games[0].subfolders[0].enabled);
+        assert_eq!(reopened.games[0].subfolders[0].toggle_key.as_deref(), Some("rctrl f2"));
+        reopened.games[0].set_subfolder_enabled("combat", true).unwrap();
+        assert!(reopened.games[0].profile_enabled(&reopened.games[0].profiles[0]));
+        assert_eq!(reopened.games[0].profiles.iter().map(|profile| profile.armed).collect::<Vec<_>>(), armed);
+        reopened.games[0].profiles[0].subfolder_id = Some("missing".into());
+        assert!(reopened.games[0].validate_subfolders().is_err());
+        assert!(super::save_db(&path, &reopened).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(backup).unwrap();
     }
 
     #[test]

@@ -32,15 +32,16 @@ pub enum Action {
     Hold { key: Parameter },
     Toggle { key: Parameter },
     Mousepress { key: Parameter, #[serde(default, rename = "doubleClick", skip_serializing_if = "is_false")] double_click: bool, #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
-    Waitfor { key: Parameter },
+    // The key is accepted only at the legacy read boundary; parse moves it to the next action.
+    Waitfor { #[serde(default, skip_serializing_if = "Option::is_none")] key: Option<Parameter> },
     Repeat { key: Parameter, interval: Parameter, hold: Parameter },
     Sequence { steps: Vec<Action> },
     Parallel { steps: Vec<Action> },
     Goto { x: Parameter, y: Parameter },
     Resolution { width: Parameter, height: Parameter },
     State { #[serde(rename = "stateId")] state_id: String, #[serde(default)] action: StateAction },
-    Startoverlay { #[serde(rename = "itemId")] item_id: String, #[serde(default)] restart: bool },
-    Stopoverlay { #[serde(rename = "itemId")] item_id: String },
+    Startoverlay { #[serde(rename = "itemIds")] item_ids: Vec<String>, #[serde(default)] restart: bool },
+    Stopoverlay { #[serde(rename = "itemIds")] item_ids: Vec<String> },
     Bar { #[serde(rename = "itemId")] item_id: String, value: Parameter },
     Script { #[serde(rename = "scriptId")] script_id: String },
     Sleep { ms: Parameter },
@@ -71,11 +72,19 @@ pub fn valid_credential_id(id: &str) -> bool {
 }
 
 pub fn parse(source: &str) -> Result<Vec<Action>, String> {
-    if source.trim().is_empty() { return Ok(Vec::new()); }
+    let (mut actions, _) = read_actions(source)?;
+    normalize_input_waits(&mut actions);
+    Ok(actions)
+}
+
+fn read_actions(source: &str) -> Result<(Vec<Action>, bool), String> {
+    if source.trim().is_empty() { return Ok((Vec::new(), false)); }
     if source.trim_start().starts_with('[') {
-        let mut actions: Vec<Action> = serde_json::from_str(source).map_err(|error| format!("Invalid behavior: {error}"))?;
+        let mut value = serde_json::from_str(source).map_err(|error| format!("Invalid behavior: {error}"))?;
+        let upgraded = normalize_overlay_targets(&mut value);
+        let mut actions: Vec<Action> = serde_json::from_value(value).map_err(|error| format!("Invalid behavior: {error}"))?;
         normalize_legacy_references(&mut actions)?;
-        return Ok(actions);
+        return Ok((actions, upgraded));
     }
     let mut depth = 0i32;
     let mut start = 0;
@@ -90,8 +99,62 @@ pub fn parse(source: &str) -> Result<Vec<Action>, String> {
     }
     tokens.push(&source[start..]);
     let mut actions = tokens.into_iter().map(str::trim).filter(|token| !token.is_empty()).map(parse_legacy).collect::<Vec<_>>();
+    let upgraded = actions.iter().any(|action| matches!(action, Action::Startoverlay { .. } | Action::Stopoverlay { .. }));
     normalize_legacy_references(&mut actions)?;
-    Ok(actions)
+    Ok((actions, upgraded))
+}
+
+fn normalize_overlay_targets(value: &mut serde_json::Value) -> bool {
+    let Some(actions) = value.as_array_mut() else { return false; };
+    let mut changed = false;
+    for action in actions {
+        let Some(action) = action.as_object_mut() else { continue; };
+        match action.get("type").and_then(|kind| kind.as_str()) {
+            Some("sequence" | "parallel") => {
+                if let Some(steps) = action.get_mut("steps") { changed |= normalize_overlay_targets(steps); }
+            }
+            Some("startoverlay" | "stopoverlay") if !action.contains_key("itemIds") => {
+                if action.get("itemId").is_some_and(serde_json::Value::is_string) {
+                    let id = action.remove("itemId").unwrap();
+                    action.insert("itemIds".into(), serde_json::Value::Array(vec![id]));
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+/// Old waits keep their input condition as the next action; Wait for itself has no value.
+fn normalize_input_waits(actions: &mut Vec<Action>) -> bool {
+    let mut changed = false;
+    let mut normalized = Vec::new();
+    for mut action in std::mem::take(actions) {
+        if let Action::Sequence { steps } | Action::Parallel { steps } = &mut action {
+            changed |= normalize_input_waits(steps);
+        }
+        if let Action::Waitfor { key: Some(Parameter::Matched(_)) } = &action {
+            normalized.push(action);
+        } else if let Action::Waitfor { key: Some(key) } = action {
+            normalized.push(Action::Waitfor { key: None });
+            normalized.push(if matches!(&key, Parameter::Literal(value) if valid_mouse_input(value)) {
+                Action::Mousepress { key, double_click: false, on_release: false }
+            } else { Action::Press { key, on_release: false } });
+            changed = true;
+        } else { normalized.push(action); }
+    }
+    *actions = normalized;
+    changed
+}
+
+pub fn upgrade_legacy_actions(source: &str) -> Result<Option<String>, String> {
+    let lower = source.to_ascii_lowercase();
+    if !["waitfor", "startoverlay", "stopoverlay", "restartoverlay"].iter().any(|kind| lower.contains(*kind)) { return Ok(None); }
+    let (mut actions, upgraded_overlays) = read_actions(source)?;
+    let upgraded_waits = normalize_input_waits(&mut actions);
+    if !upgraded_overlays && !upgraded_waits { return Ok(None); }
+    serde_json::to_string(&actions).map(Some).map_err(|error| error.to_string())
 }
 
 fn parse_legacy(source: &str) -> Action {
@@ -110,7 +173,7 @@ fn parse_legacy(source: &str) -> Action {
         "hold" => Action::Hold { key: argument.into() },
         "toggle" => Action::Toggle { key: argument.into() },
         "mousepress" | "pressalt" => Action::Mousepress { key: argument.into(), double_click: false, on_release: false },
-        "waitfor" => Action::Waitfor { key: argument.into() },
+        "waitfor" => Action::Waitfor { key: Some(argument.into()) },
         "repeat" if parts.len() == 2 || parts.len() == 3 => Action::Repeat {
             key: parts[0].into(), interval: parts[1].into(), hold: parts.get(2).unwrap_or(&"6").to_string().into(),
         },
@@ -119,7 +182,8 @@ fn parse_legacy(source: &str) -> Action {
         "sleep" => Action::Sleep { ms: argument.into() },
         "send" => Action::Send { text: argument.into() },
         "state" => Action::State { state_id: argument.into(), action: StateAction::Toggle },
-        "startoverlay" | "restartoverlay" => Action::Startoverlay { item_id: argument.into(), restart: name == "restartoverlay" },
+        "startoverlay" | "restartoverlay" => Action::Startoverlay { item_ids: vec![argument.into()], restart: name == "restartoverlay" },
+        "stopoverlay" => Action::Stopoverlay { item_ids: vec![argument.into()] },
         _ => Action::Unknown { source: source.into() },
     }
 }
@@ -132,14 +196,15 @@ fn valid_mouse_input(key: &str) -> bool {
 
 pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
     fn number(value: &str, minimum: u32) -> bool { !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u32>().map(|n| n >= minimum).unwrap_or(false) }
-    for action in actions {
+    for (index, action) in actions.iter().enumerate() {
         if !has_trigger && matches!(action, Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. }) {
             return Err("On release requires a hotkey trigger.".into());
         }
         let valid = match action {
             Action::Sequence { steps } | Action::Parallel { steps } => { validate(steps, has_trigger)?; !steps.is_empty() }
             Action::Press { key: Parameter::Matched(_), .. } => has_trigger,
-            Action::Press { key, .. } | Action::Hold { key } | Action::Waitfor { key } => !key.literal()?.trim().is_empty(),
+            Action::Waitfor { key: None } => index + 1 < actions.len(),
+            Action::Waitfor { key: Some(key) } | Action::Press { key, .. } | Action::Hold { key } => !key.literal()?.trim().is_empty(),
             Action::Toggle { key } => has_trigger && !key.literal()?.trim().is_empty(),
             Action::Mousepress { key, .. } => valid_mouse_input(key.literal()?),
             Action::Repeat { key, interval, hold } => !key.literal()?.trim().is_empty() && number(interval.literal()?, 1) && number(hold.literal()?, 0),
@@ -147,7 +212,8 @@ pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
             Action::Goto { x, y } => [x.literal()?, y.literal()?].iter().all(|value| value.parse::<f64>().map(f64::is_finite).unwrap_or(false)),
             Action::Resolution { width, height } => number(width.literal()?, 1) && number(height.literal()?, 1),
             Action::State { state_id, .. } => !state_id.is_empty(),
-            Action::Startoverlay { item_id, .. } | Action::Stopoverlay { item_id } => !item_id.is_empty(),
+            Action::Startoverlay { item_ids, .. } | Action::Stopoverlay { item_ids } => !item_ids.is_empty()
+                && item_ids.iter().all(|id| !id.trim().is_empty()) && item_ids.iter().collect::<std::collections::HashSet<_>>().len() == item_ids.len(),
             Action::Bar { item_id, value } => !item_id.is_empty() && value.literal()?.parse::<f64>().map(f64::is_finite).unwrap_or(false),
             Action::Send { text } => { text.literal()?; true }
             Action::Securesend { credential_id } => has_trigger && valid_credential_id(credential_id),
@@ -169,7 +235,7 @@ fn visit_values(actions: &mut [Action], visit: &mut impl FnMut(&mut Parameter, V
         match action {
             Action::Sequence { steps } | Action::Parallel { steps } => visit_values(steps, visit)?,
             Action::Press { key, .. } => visit(key, ValueKind::Press)?,
-            Action::Hold { key } | Action::Toggle { key } | Action::Waitfor { key } => visit(key, ValueKind::Keys)?,
+            Action::Hold { key } | Action::Toggle { key } | Action::Waitfor { key: Some(key) } => visit(key, ValueKind::Keys)?,
             Action::Mousepress { key, .. } => visit(key, ValueKind::Mouse)?,
             Action::Send { text } => visit(text, ValueKind::Text)?,
             Action::Sleep { ms } => visit(ms, ValueKind::Number(Some(0)))?,
@@ -203,6 +269,14 @@ pub fn resolve(source: &str, variables: &[crate::variables::Variable], matched_t
     if matched_trigger.is_none() && requires_trigger(&actions) {
         return Err("This behavior requires a hotkey trigger.".into());
     }
+    Ok(actions)
+}
+
+/// Resolve dependencies for validation before a hotkey has a shortcut. Matched input
+/// stays symbolic; these actions must not be sent to the runtime.
+pub fn resolve_template(source: &str, variables: &[crate::variables::Variable]) -> Result<Vec<Action>, String> {
+    let mut actions = expand(parse(source)?, variables, &mut Vec::new())?;
+    resolve_values(&mut actions, variables, None, true)?;
     Ok(actions)
 }
 
@@ -294,6 +368,47 @@ fn modifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_target_lists_upgrade_legacy_actions_and_reject_ambiguous_sources() {
+        let source = r#"[{"type":"sequence","steps":[{"type":"startoverlay","itemId":"first","restart":true},{"type":"stopoverlay","itemId":"second"}]}]"#;
+        let upgraded = upgrade_legacy_actions(source).unwrap().unwrap();
+        let actions = parse(&upgraded).unwrap();
+        assert_eq!(serde_json::to_value(&actions).unwrap(), serde_json::json!([{"type":"sequence","steps":[
+            {"type":"startoverlay","itemIds":["first"],"restart":true},{"type":"stopoverlay","itemIds":["second"]}]}]));
+        assert!(upgrade_legacy_actions(&upgraded).unwrap().is_none());
+        assert!(validate(&actions,false).is_ok());
+        for source in [r#"[{"type":"startoverlay","itemIds":["a"],"itemId":"b"}]"#,
+            r#"[{"type":"stopoverlay","itemIds":["a",4]}]"#,
+            r#"[{"type":"stopoverlay","itemIds":["a"],"future":true}]"#] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn next_action_waits_preserve_the_following_action_and_reject_missing_siblings() {
+        for source in [
+            r#"[{"type":"waitfor"},{"type":"mousepress","key":"rctrl LButton","onRelease":true,"doubleClick":true}]"#,
+            r#"[{"type":"waitfor"},{"type":"startoverlay","itemIds":["timer"],"restart":true}]"#,
+            r#"[{"type":"waitfor"},{"type":"parallel","steps":[{"type":"sleep","ms":"25"},{"type":"press","key":"x"}]}]"#,
+        ] {
+            let actions = resolve(source, &[], Some("q")).unwrap();
+            assert!(validate(&actions, true).is_ok());
+            assert_eq!(serde_json::to_value(actions).unwrap(),serde_json::from_str::<serde_json::Value>(source).unwrap());
+        }
+        for source in [
+            r#"[{"type":"waitfor"}]"#,
+            r#"[{"type":"send","text":"prefix"},{"type":"waitfor"}]"#,
+            r#"[{"type":"sequence","steps":[{"type":"waitfor"}]},{"type":"press","key":"x"}]"#,
+            r#"[{"type":"parallel","steps":[{"type":"press","key":"x"},{"type":"waitfor"}]}]"#,
+        ] { assert!(validate(&resolve(source,&[],Some("q")).unwrap(),true).is_err()); }
+        let release = r#"[{"type":"waitfor"},{"type":"mousepress","key":"LButton","onRelease":true}]"#;
+        assert!(resolve(release,&[],None).is_err());
+        assert!(validate(&resolve_template(release,&[]).unwrap(),true).is_ok());
+        let legacy = parse("waitfor(LButton)").unwrap();
+        assert_eq!(serde_json::to_value(&legacy).unwrap(),serde_json::json!([{"type":"waitfor"},{"type":"mousepress","key":"LButton"}]));
+        assert!(validate(&legacy,false).is_ok());
+    }
 
     fn shared(id: &str, steps: serde_json::Value) -> crate::variables::Variable {
         serde_json::from_value(serde_json::json!({"id":id,"name":id,"type":"behavior","value":steps.to_string()})).unwrap()
@@ -394,6 +509,56 @@ mod tests {
             assert!(resolve(&serde_json::json!([action]).to_string(), &[], Some("lctrl 1")).is_err());
         }
     }
+
+    #[test]
+    fn unassigned_hotkey_templates_preserve_trigger_dependent_actions_and_resolve_dependencies() {
+        let variables = vec![
+            shared("cast", serde_json::json!([
+                {"type":"press","key":{"source":"trigger"},"onRelease":true},
+                {"type":"mousepress","key":"LButton","onRelease":true},
+                {"type":"toggle","key":"rctrl w"},
+                {"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"},
+                {"type":"sleep","ms":{"variable":"delay"}}
+            ])),
+            serde_json::from_value(serde_json::json!({"id":"delay","name":"Delay","type":"number","value":150})).unwrap(),
+        ];
+        let source = r#"[{"type":"parallel","steps":[{"type":"behavior","variableId":"cast"}]}]"#;
+        let actions = resolve_template(source, &variables).unwrap();
+        validate(&actions, true).unwrap();
+        let data = serde_json::to_value(&actions).unwrap();
+        assert_eq!(data[0]["steps"][0]["steps"][0]["key"], serde_json::json!({"source":"trigger"}));
+        assert_eq!(data[0]["steps"][0]["steps"][4]["ms"], "150");
+        assert!(validate(&actions, false).is_err());
+        assert!(resolve(source, &variables, None).is_err());
+        assert!(resolve_template(source, &[]).is_err());
+
+        for source in [
+            r#"[{"type":"press","key":"x","onRelease":true}]"#,
+            r#"[{"type":"mousepress","key":"LButton","onRelease":true}]"#,
+            "toggle(rctrl w)",
+            r#"[{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]"#,
+        ] {
+            validate(&resolve_template(source, &[]).unwrap(), true).unwrap();
+            assert!(resolve(source, &[], None).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn unassigned_hotkey_templates_still_reject_invalid_actions_and_dependencies() {
+        for source in [
+            "repeat(x,0)", "hold()", "future(x)", "sleep($missing)",
+            r#"[{"type":"hold","key":{"source":"trigger"}}]"#,
+            r#"[{"type":"send","text":{"source":"trigger"}}]"#,
+            r#"[{"type":"securesend","credentialId":"invalid"}]"#,
+        ] {
+            assert!(resolve_template(source, &[]).and_then(|actions| validate(&actions, true)).is_err(), "{source}");
+        }
+        let cycle = shared("cycle", serde_json::json!([{"type":"behavior","variableId":"cycle"}]));
+        assert!(resolve_template(r#"[{"type":"behavior","variableId":"cycle"}]"#, &[cycle]).is_err());
+        let invalid = serde_json::from_value(serde_json::json!({"id":"delay","name":"Delay","type":"number","value":-1})).unwrap();
+        assert!(resolve_template("sleep($delay)", &[invalid]).is_err());
+    }
+
     #[test]
     fn editor_and_backend_use_the_same_compatibility_fixtures() {
         let fixtures: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/behaviors.json")).unwrap();

@@ -43,8 +43,26 @@ class BehaviorExecutor {
 
     Task(node) {
         this.nextId++
-        return {node: node, id: "node:" this.nextId, started: false, done: false,
+        task := {node: node, id: "node:" this.nextId, started: false, done: false,
             children: [], index: 1, due: 0, input: 0, callback: 0, held: false, keys: []}
+        if node["type"] = "sequence" || node["type"] = "parallel" {
+            index := 1
+            while index <= node["steps"].Length
+                task.children.Push(this.NextTask(node["steps"], &index))
+        }
+        return task
+    }
+
+    NextTask(steps, &index) {
+        task := this.Task(steps[index])
+        index++
+        if task.node["type"] = "waitfor" && !task.node.Has("key") {
+            if index > steps.Length
+                throw ValueError("Wait for requires a following action.")
+            ; Pair before execution: the next action belongs to this wait.
+            task.children.Push(this.NextTask(steps, &index))
+        }
+        return task
     }
 
     ReleaseTrigger(key) {
@@ -142,17 +160,13 @@ class BehaviorExecutor {
         node := task.node
         kind := node["type"]
         if execution.background && !BehaviorContextActive(execution.target, execution.profile)
-            && InStr("|press|hold|toggle|repeat|mousepress|send|securesend|waitfor|goto|restorecursor|lock|script|", "|" kind "|")
+            && (InStr("|press|hold|toggle|repeat|mousepress|send|securesend|goto|restorecursor|lock|script|", "|" kind "|") || (kind = "waitfor" && node.Has("key")))
             throw TargetError("Input behavior requires the target app to be focused.")
         if !task.started && (kind = "press" || kind = "mousepress") && node.Get("onRelease", false) && execution.triggerHeld
             return
         first := !task.started
-        if first {
+        if first
             task.started := true
-            if kind = "sequence" || kind = "parallel"
-                for child in node["steps"]
-                    task.children.Push(this.Task(child))
-        }
         if kind = "sequence" {
             while task.index <= task.children.Length {
                 child := task.children[task.index]
@@ -213,16 +227,27 @@ class BehaviorExecutor {
                 return
             }
         } else if kind = "waitfor" {
-            if first {
-                task.input := BehaviorInputWait(node["key"], execution.target, execution.profile)
-                task.callback := task.input.OnInput.Bind(task.input)
-                StartBehaviorInput(task.callback)
+            condition := !node.Has("key") ? task.children[1].node : node
+            inputCondition := node.Has("key") || condition["type"] = "press" || condition["type"] = "mousepress"
+            if !inputCondition {
+                this.Advance(task.children[1], execution, now)
+                if !task.children[1].done
+                    return
+            } else {
+                if execution.background && !BehaviorContextActive(execution.target, execution.profile)
+                    throw TargetError("Input behavior requires the target app to be focused.")
+                if first {
+                    task.input := BehaviorInputWait(condition["key"], execution.target, execution.profile,
+                        condition.Get("onRelease", false), condition.Get("doubleClick", false))
+                    task.callback := task.input.OnInput.Bind(task.input)
+                    StartBehaviorInput(task.callback)
+                }
+                if IsObject(task.input.error)
+                    throw task.input.error
+                if !task.input.completed
+                    return
+                this.Release(task)
             }
-            if IsObject(task.input.error)
-                throw task.input.error
-            if !task.input.completed
-                return
-            this.Release(task)
         } else if kind = "mousepress" {
             if first {
                 task.mouse := MousePressInput(node["key"])
@@ -252,9 +277,17 @@ class BehaviorExecutor {
         } else if kind = "state" {
             SendRuntimeAction(execution.profile, "state", node["stateId"], node.Get("action", "toggle"))
         } else if kind = "startoverlay" {
-            SendRuntimeAction(execution.profile, "overlay", node["itemId"], node.Get("restart", false) ? "restart" : "start")
+            for id in node["itemIds"] {
+                SendRuntimeAction(execution.profile, "overlay", id, node.Get("restart", false) ? "restart" : "start")
+                if execution.cancelled
+                    return
+            }
         } else if kind = "stopoverlay" {
-            SendRuntimeAction(execution.profile, "overlay", node["itemId"], "stop")
+            for id in node["itemIds"] {
+                SendRuntimeAction(execution.profile, "overlay", id, "stop")
+                if execution.cancelled
+                    return
+            }
         } else if kind = "bar" {
             SendRuntimeAction(execution.profile, "bar", node["itemId"], node["value"])
         } else if kind = "script" {

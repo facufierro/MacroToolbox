@@ -5,6 +5,7 @@ import test from "node:test";
 import ts from "typescript";
 import { moveItem, orderOwnedSlots } from "../src/listOrder.ts";
 import { resolveOverlayGroups } from "../src/overlayItems.ts";
+import { triggerIdentity } from "../src/triggers.ts";
 
 const key = item => item.id;
 const items = ["a", "b", "c", "d"].map(id => ({ id, value: id }));
@@ -51,9 +52,11 @@ test("owned entries follow saved order while inherited slots and resolved overri
 
 // Exercise the app's resolver with the same ownership invariant used by the backend.
 const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const resolver = app.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "resolveProfileEntries");
-const code = ts.transpileModule(resolver.getText(app), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
-const resolveEntries = runInNewContext(`${code};resolveProfileEntries`, { orderOwnedSlots });
+const resolvers = ["resolveProfileEntries", "hotkeyEntryKey", "resolveHotkeys"].map(name =>
+  app.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name).getText(app));
+const code = ts.transpileModule(resolvers.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+const { resolveProfileEntries: resolveEntries, resolveHotkeys, hotkeyEntryKey } = runInNewContext(
+  `${code};({resolveProfileEntries,resolveHotkeys,hotkeyEntryKey})`, { orderOwnedSlots, triggerIdentity });
 
 test("profile overrides can be reordered without modifying the parent or inherited entries", () => {
   const parent = { id: "parent", parent_id: null, entries: items.slice(0, 3), overlay_groups: items.slice(0, 3) };
@@ -66,6 +69,25 @@ test("profile overrides can be reordered without modifying the parent or inherit
   assert.deepEqual(Array.from(resolved, entry => entry.own), [false, true, false, true]);
   assert.equal(resolveOverlayGroups(profiles, child).map(key).join(""), "adcb");
   assert.equal(parent.entries.map(key).join(""), "abc");
+});
+
+test("unassigned copies retain separate identities, saved order, and inherited drafts", () => {
+  const hotkey = (name, trigger = "") => ({ name, trigger, behavior: "press(x)", state_id: null });
+  const parent = { id: "parent", parent_id: null, hotkeys: [hotkey("Original", "f1"), hotkey("Parent copy"), hotkey("Parent copy")] };
+  const child = { id: "child", parent_id: "parent", hotkeys: [hotkey("Copy"), hotkey("Copy of copy", " "), hotkey("Override", "f1")] };
+  const profiles = [parent, child];
+  const resolved = resolveHotkeys(profiles, child);
+  assert.equal(resolved.map(entry => entry.hotkey.name).join(","), "Copy,Parent copy,Parent copy,Copy of copy,Override");
+  assert.equal(new Set(resolved.map(entry => entry.key)).size, 5);
+  assert.deepEqual(Array.from(resolved, entry => entry.own), [true, false, false, true, true]);
+  assert.ok(resolved.every(entry => [...parent.hotkeys, ...child.hotkeys].includes(entry.hotkey)));
+
+  const keyOf = (hotkey, index) => hotkeyEntryKey(hotkey, child, index);
+  const reordered = { ...child, hotkeys: moveItem(child.hotkeys, keyOf, keyOf(child.hotkeys[1], 1), keyOf(child.hotkeys[0], 0), false) };
+  assert.equal(reordered.hotkeys.map(hotkey => hotkey.name).join(","), "Copy of copy,Copy,Override");
+  assert.equal(resolveHotkeys([parent, reordered], reordered).map(entry => entry.hotkey.name).join(","), "Copy of copy,Parent copy,Parent copy,Copy,Override");
+  assert.equal(parent.hotkeys.length, 3);
+  assert.equal(child.hotkeys[0].name, "Copy");
 });
 
 test("the Windows main window enables frontend HTML drag and drop", () => {

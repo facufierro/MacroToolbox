@@ -72,8 +72,34 @@ async function scenario() {
     check("failed persistence retains the edit and does not create an unsaved library row", get('[aria-label="Variable name"]').value === "failed save" && window.snapshot.db.variables.length === 3 && window.errors.length === 1);
     window.failSave = false;
     await button("Cancel");
+    const variables = () => window.snapshot.db.variables;
+    const variableRow = name => [...document.querySelectorAll('.variable-row')].find(row => row.querySelector('.variable-row__name').textContent === name);
+    const duplicate = async name => { variableRow(name).querySelector('[aria-label="Duplicate variable"]').click(); await wait(); };
+    window.failSave = true;
+    await duplicate('buff timer renamed');
+    check("failed duplication preserves all saved variables and reports its error", variables().length === 3 && window.errors.length === 2 && !get('[aria-label="Duplicate variable"]').disabled);
+    window.failSave = false;
+    window.holdSave = true;
+    await duplicate('buff timer renamed');
+    check("pending duplication prevents overlapping variable changes", variables().length === 3 && [...document.querySelectorAll('.variable-row button')].every(control => control.disabled) && get('[aria-label="Add variable"]').disabled);
+    window.holdSave = false;
+    window.resumeSave(); await wait();
+    const copyId = variables().at(-1).id;
+    check("a referenced variable can be duplicated with its value and a fresh identity", variables().length === 4 && copyId !== id && variables().at(-1).name === 'buff timer renamed (copy)' && variables().at(-1).value === 6000 && !variableRow('buff timer renamed (copy)').querySelector('[aria-label="Delete variable"]').disabled);
+    await duplicate('buff timer renamed');
+    await duplicate('buff timer renamed (copy)');
+    check("repeated duplicates and copies of copies retain every row with a unique name and ID", variables().length === 6 && document.querySelectorAll('.variable-row').length === 6 && new Set(variables().map(variable => variable.id)).size === 6 && variables()[4].name === 'buff timer renamed (copy) (2)' && variables()[5].name === 'buff timer renamed (copy) (copy)');
+    variableRow('buff timer renamed (copy)').querySelector('[aria-label="Edit variable"]').click(); await wait();
+    await set('[aria-label="Variable value"]', '7000');
+    await button('Save');
+    check("editing a duplicate preserves the source and its existing callers", variables().find(variable => variable.id === copyId).value === 7000 && variables()[0].value === 6000 && window.snapshot.steps[0].ms.variable === id);
+    variableRow('buff timer renamed (copy) (copy)').querySelector('[aria-label="Delete variable"]').click(); await wait();
+    check("deleting a duplicate leaves the source and other copies intact", variables().length === 5 && variables().some(variable => variable.id === copyId) && variables()[0].id === id);
+    const listBounds = get('.variables-list').getBoundingClientRect();
+    check("duplicate controls fit the existing variable row width", [...document.querySelectorAll('.variable-row button')].every(control => { const bounds = control.getBoundingClientRect(); return bounds.left >= listBounds.left && bounds.right <= listBounds.right; }));
     await click("#behavior");
     check("renaming updates the selector while retaining its identity", get('[aria-label="Sleep (ms) variable"]').selectedOptions[0].textContent === "buff timer renamed" && get('[aria-label="Sleep (ms) value"]').textContent === "6000" && window.snapshot.steps[0].ms.variable === id);
+    check("reopening the variable selector includes the saved duplicate independently", [...get('[aria-label="Sleep (ms) variable"]').options].some(option => option.value === copyId && option.textContent === 'buff timer renamed (copy)'));
     const sleepChoices = [...get('[aria-label="Sleep (ms) variable"]').options].map(option => option.textContent);
     check("Sleep only offers Number variables", !sleepChoices.includes("chat message") && !sleepChoices.includes("cast keys"));
     await add("Type text");
@@ -129,7 +155,7 @@ test("variable creation, selection, editing and persistence work through actual 
   const bundle = browserModules(["BehaviorEditor.tsx", "VariablesView.tsx"]);
   const harness = `const modules={${bundle.declarations}},cache={};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async saveVariables(variables){window.saveCalls.push(structuredClone(variables));if(window.failSave)throw Error('simulated save failure');return {...window.snapshot.db,variables};}}};return module.exports;}
+if(id==='./api'){module.exports={api:{async saveVariables(variables){window.saveCalls.push(structuredClone(variables));if(window.failSave)throw Error('simulated save failure');if(window.holdSave)await new Promise(resolve=>window.resumeSave=resolve);return {...window.snapshot.db,variables};}}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 window.saveCalls=[];window.errors=[];

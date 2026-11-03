@@ -3,7 +3,7 @@ import { IconButton, type IconName } from "./Icon";
 import type { Step } from "./behaviors";
 
 const GROUPS: { name: string; actions: [Step["type"], string, IconName][] }[] = [
-  { name: "Input", actions: [["press", "Press keys", "keyboard"], ["hold", "Hold keys", "hand"], ["toggle", "Toggle keys", "toggle-on"], ["mousepress", "Mouse press", "computer-mouse"], ["repeat", "Repeat keys", "repeat"], ["send", "Type text", "font"], ["securesend", "Secure send", "lock"], ["waitfor", "Wait for input", "hourglass-half"]] },
+  { name: "Input", actions: [["press", "Press keys", "keyboard"], ["hold", "Hold keys", "hand"], ["toggle", "Toggle keys", "toggle-on"], ["mousepress", "Mouse press", "computer-mouse"], ["repeat", "Repeat keys", "repeat"], ["send", "Type text", "font"], ["securesend", "Secure send", "lock"], ["waitfor", "Wait for", "hourglass-half"]] },
   { name: "Flow", actions: [["sleep", "Sleep", "clock"], ["sequence", "Sequence", "list-ol"], ["parallel", "Simultaneous", "code-fork"]] },
   { name: "Overlays", actions: [["startoverlay", "Start overlay", "layer-group"], ["stopoverlay", "Stop overlay", "ban"], ["bar", "Set bar", "gauge"], ["state", "State", "toggle-on"]] },
   { name: "Window", actions: [["borderless", "Borderless", "expand"], ["fit", "Fit window", "compress"], ["stretch", "Stretch window", "arrows-up-down-left-right"], ["resolution", "Resolution", "display"], ["goto", "Move cursor", "crosshairs"], ["lock", "Lock cursor", "lock"], ["savecursor", "Save cursor", "floppy-disk"], ["restorecursor", "Restore cursor", "rotate-left"], ["killprocess", "End process", "stop"]] },

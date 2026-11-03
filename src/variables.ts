@@ -3,6 +3,15 @@ import type { Variable, Profile } from "./types";
 import { isReference } from "./behaviorValues.ts";
 import { readTriggerList } from "./triggers.ts";
 
+export function duplicateVariable(variable: Variable, variables: Variable[]): Variable {
+  const base = `${variable.name.trim()} (copy)`;
+  const names = new Set(variables.map(current => current.name.trim().toLowerCase()));
+  let name = base;
+  for (let suffix = 2; names.has(name.toLowerCase()); suffix++) name = `${base} (${suffix})`;
+  const copy = { ...variable, id: crypto.randomUUID(), name };
+  return copy.type === "triggers" ? { ...copy, value: [...copy.value] } : copy;
+}
+
 export function mapVariableReferences(behavior: string, mapId: (id: string) => string): string {
   return mapBehavior(behavior, step => step.type === "behavior" ? { ...step, variableId: mapId(step.variableId) }
     : mapStepValues(step, value => isReference(value) ? { variable: mapId(value.variable) } : value));

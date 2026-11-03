@@ -7,6 +7,7 @@ import { api } from "./api";
 import { ValueInput } from "./ValueInput";
 import { VariableModal } from "./VariableModal";
 import { SecureSendInput } from "./SecureSendInput";
+import { OverlayTargetsInput } from "./OverlayTargetsInput";
 import { SortableList } from "./SortableList";
 import { moveItem } from "./listOrder";
 import { areStepsValid, type Step } from "./behaviors";
@@ -14,13 +15,14 @@ import type { Database, Variable, OverlayTarget, ProfileState, Script, SecureTex
 
 function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTarget[], scripts: Script[]): Step {
   switch (type) {
-    case "press": case "hold": case "toggle": case "waitfor": return { type, key: "" };
+    case "press": case "hold": case "toggle": return { type, key: "" };
+    case "waitfor": return { type };
     case "mousepress": return { type, key: "LButton" };
     case "repeat": return { type, key: "", interval: "100", hold: "6" };
     case "sequence": case "parallel": return { type, steps: [{ type: "press", key: "" }] };
     case "state": return { type, stateId: states[0]?.id ?? "", action: "toggle" };
-    case "startoverlay": return { type, itemId: overlays[0]?.id ?? "", restart: true };
-    case "stopoverlay": return { type, itemId: overlays[0]?.id ?? "" };
+    case "startoverlay": return { type, itemIds: overlays.length ? [overlays[0].id] : [], restart: true };
+    case "stopoverlay": return { type, itemIds: overlays.length ? [overlays[0].id] : [] };
     case "bar": return { type, itemId: overlays.find(item => item.type === "bar")?.id ?? "", value: "0" };
     case "script": return { type, scriptId: scripts[0]?.id ?? "" };
     case "send": return { type, text: "" };
@@ -90,7 +92,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           {behaviorChoices.some(variable => variable.id === step.variableId) && <IconButton icon="pen" label="Edit variable" className="icon-btn" onClick={() => setEditingBehavior(behaviorChoices.find(variable => variable.id === step.variableId)!)} />}
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => setEditingBehavior("new")}>New variable</button>
         </>}
-        {(step.type === "press" || step.type === "hold" || step.type === "toggle" || step.type === "waitfor") && (
+        {(step.type === "press" || step.type === "hold" || step.type === "toggle") && (
           <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys" allowMatchedTrigger={step.type === "press" && hasTrigger}
             onChange={key => onChange({ ...step, key })} />
         )}
@@ -162,23 +164,18 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
               <option value="start">Start</option>
               <option value="restart">Restart</option>
             </select>
-            <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })}>
-              <option value="">Select overlay</option>
-              {step.itemId && !overlays.some(item => item.id === step.itemId) && <option value={step.itemId}>Missing overlay</option>}
-              {overlays.map(item => (
-                <option key={item.id} value={item.id}>{item.name || (item.type === "group" ? "Overlay" : item.type)}</option>
-              ))}
-            </select>
           </>
         )}
-        {(step.type === "stopoverlay" || step.type === "bar") && (
+        {(step.type === "startoverlay" || step.type === "stopoverlay") && <OverlayTargetsInput overlays={overlays} value={step.itemIds}
+          onChange={itemIds => onChange({ ...step, itemIds })} />}
+        {step.type === "bar" && (
           <>
             <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })} aria-label="Overlay item">
               <option value="">Select overlay</option>
-              {step.itemId && !overlays.some(item => item.id === step.itemId && (step.type !== "bar" || item.type === "bar")) && <option value={step.itemId}>Missing overlay</option>}
-              {overlays.filter(item => step.type !== "bar" || item.type === "bar").map(item => <option key={item.id} value={item.id}>{item.name || (item.type === "group" ? "Overlay" : item.type)}</option>)}
+              {step.itemId && !overlays.some(item => item.id === step.itemId && item.type === "bar") && <option value={step.itemId}>Missing overlay</option>}
+              {overlays.filter(item => item.type === "bar").map(item => <option key={item.id} value={item.id}>{item.name || item.type}</option>)}
             </select>
-            {step.type === "bar" && <ValueInput value={step.value} variables={variables} onDb={onDb} onChange={value => onChange({ ...step, value })} label="Bar value" />}
+            <ValueInput value={step.value} variables={variables} onDb={onDb} onChange={value => onChange({ ...step, value })} label="Bar value" />
           </>
         )}
         {step.type === "script" && <select value={step.scriptId} onChange={e => onChange({ ...step, scriptId: e.target.value })} aria-label="Script">

@@ -68,17 +68,49 @@ Both hard-fail if `changelog/v<version>.md` is missing: the packaging script thr
 Whenever you make a user-facing code change, record it in the changelog for the next
 unreleased version as part of the same change.
 
+### One active development release
+
+- A release groups the user's ongoing work. Individual features, fixes, follow-up requests,
+  conversation turns, test runs, local builds, and rebuilds do not each get a new version.
+- Look for the existing unreleased changelog before calculating a version. Append all work for
+  that release to it. Never create a second next-version changelog for another feature in the
+  same batch.
+- A release target explicitly established by the user persists across follow-ups. Keep using
+  it until the user requests another release or the current release is finalized. Do not
+  silently reinterpret local build artifacts as the end of that batch.
+- Apply semantic versioning to the entire pending release, using the last released version as
+  the baseline. If the combined work requires a larger bump, rename the one unreleased
+  changelog and preserve all its entries; do not split the batch between versions or increment
+  the active version once per feature.
+- Installer filenames, directory timestamps, `Cargo.toml`, `tauri.conf.json`, and database
+  schema versions do not independently establish a new application release. Packaging owns
+  application-version updates; feature work must not bump them independently.
+- Before handing off user-facing work, verify that there is exactly one active unreleased
+  changelog, all changes for the batch are recorded there, and no competing next-version
+  changelog was introduced.
+
+Example: after released `v1.0.6`, an ongoing feature batch targets `v1.1.0`. Additional
+features and fixes after building `v1.1.0` still belong to `changelog/v1.1.0.md`. A local
+`releases/v1.1.0/` directory does not justify creating `changelog/v1.2.0.md`.
+
 ### Never modify a released version's changelog
 
-A version is released if it has a `vX.Y.Z` Git tag or a `releases/vX.Y.Z/` directory. Its
-changelog describes exactly what shipped in that binary. Never add, edit, or remove entries in
-a released version's changelog; put the change in the next version instead.
+A version is released if it has a `vX.Y.Z` Git tag or a `releases/vX.Y.Z/` directory committed
+in Git. Local, uncommitted build output does not make a version released. Keep features and
+fixes for the same development release in its existing changelog, including after local rebuilds.
+A released changelog describes what shipped. Never add, edit, or remove its entries; put later
+changes in the next version instead.
 
-### Determine the target version every time
+### Determine or reuse the target version
 
 1. Find the highest released version: the greatest `vX.Y.Z` represented by a Git tag
-   (`git tag --sort=-v:refname`) or a `releases/vX.Y.Z/` directory.
-2. Classify the change according to semantic versioning:
+   (`git tag --sort=-v:refname`) or a committed `releases/vX.Y.Z/` directory
+   (`git ls-tree --name-only HEAD:releases`). Ignore uncommitted local build directories.
+2. Find the active unreleased `changelog/v*.md` and any release target established by the user.
+   Reuse that release for the ongoing batch. Calculate a new target only when no active
+   release exists, the user requests another release, or the combined batch requires a larger
+   semantic-version bump.
+3. Classify the entire pending batch according to semantic versioning:
    - **Major** (`v<MAJOR+1>.0.0`): a backward-incompatible change. Existing saved configuration
      (`db.json`), scopes, profiles, hotkeys, or persisted behavior commands stop working or
      require users to migrate their setup manually.
@@ -89,14 +121,16 @@ a released version's changelog; put the change in the next version instead.
    UI refinements are patch changes; new capabilities are minor changes, unless they break
    existing saved setups as defined above. Compatible automatic migrations are not major changes.
    If a batch mixes change types, use the highest-ranked one: major, then minor, then patch.
-3. Increment the selected part of the highest released version and reset every lower part to
-   zero. For example, from `v1.0.6`, a fix targets `v1.0.7`, a feature targets `v1.1.0`, and a
+4. When a new target is needed, increment the selected part of the highest released version
+   and reset every lower part to zero. Never increment from the active unreleased version.
+   For example, from `v1.0.6`, a fix targets `v1.0.7`, a feature targets `v1.1.0`, and a
    breaking change targets `v2.0.0`. The file is `changelog/v<target>.md`.
-4. Confirm that the target has neither a tag nor a `releases/` directory. If it does, it is
-   already released; repeat these rules using that release as the baseline.
+5. Confirm that the target has neither a tag nor a committed `releases/` directory. If it does,
+   it is already released; repeat these rules using that release as the baseline. Otherwise,
+   continue using that target for the current development release.
 
 `src-tauri/tauri.conf.json` is not a reliable released-version signal. The packaging script
-updates it during a build, before the tag exists. Trust tags and `releases/` directories.
+updates it during a build, before the tag exists. Trust tags and committed `releases/` directories.
 
 ### Write the changelog entry
 

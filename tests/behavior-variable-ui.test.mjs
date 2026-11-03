@@ -90,6 +90,11 @@ async function scenario() {
     await add('Secure send');
     await set([...document.querySelectorAll('form.modal [aria-label="Password"]')].at(-1), 'fixture-only-secret');
     await add('State'); await add('Run script'); await add('Start overlay');
+    const overlays = [...document.querySelectorAll('form.modal .overlay-targets')].at(-1);
+    overlays.querySelector('summary').click(); await wait();
+    const extraOverlay = [...overlays.querySelectorAll('input')].find(input => !input.checked);
+    extraOverlay.click(); await wait();
+    overlays.querySelector('summary').click(); await wait();
     check('the shared editor offers state, script, overlay and masked password controls', get('form.modal [aria-label="Password"]').type === 'password' && document.querySelectorAll('form.modal .step-row').length === 8);
     await click('form.modal button[type="submit"]');
     check('shared Secure send persists only credential IDs and writes its draft separately', !JSON.stringify(window.snapshot.db).includes('fixture-only-secret') && window.credentials.size === 2 && window.passwordWrites === 2);
@@ -100,12 +105,14 @@ async function scenario() {
     window.importData = portable;
     const imported = await window.importOne();
     const importedSteps = flat(JSON.parse(window.expanded(imported.profile.hotkeys[0].behavior, imported.variables)));
-    check('profile import remaps targets inside shared definitions with the imported entities', importedSteps.find(step=>step.type==='state').stateId === imported.profile.states[0].id && importedSteps.find(step=>step.type==='script').scriptId === imported.profile.scripts[0].id && importedSteps.find(step=>step.type==='startoverlay').itemId === imported.profile.overlay_groups[0].id && imported.profile.states[0].id !== 'state-old');
+    check('profile import remaps targets inside shared definitions with the imported entities', importedSteps.find(step=>step.type==='state').stateId === imported.profile.states[0].id && importedSteps.find(step=>step.type==='script').scriptId === imported.profile.scripts[0].id && importedSteps.find(step=>step.type==='startoverlay').itemIds[0] === imported.profile.overlay_groups[0].id && imported.profile.states[0].id !== 'state-old');
+    check('profile import remaps every selected overlay target', importedSteps.find(step=>step.type==='startoverlay').itemIds.length === 2 && importedSteps.find(step=>step.type==='startoverlay').itemIds[1] === imported.profile.overlay_items[0].id);
     window.importData = {type:'scope',data:window.snapshot.db.scopes[0],variables:window.snapshot.db.variables};
     const folderImport = await window.importFolder();
     const importedScope = folderImport.scopes[0], importedOwner = importedScope.profiles.find(profile=>profile.name==='Caller');
     const folderSteps = flat(JSON.parse(window.expanded(importedOwner.hotkeys[0].behavior, folderImport.variables)));
-    check('folder import remaps nested shared targets without losing caller references', folderSteps.find(step=>step.type==='state').stateId === importedScope.states[0].id && folderSteps.find(step=>step.type==='script').scriptId === importedScope.profiles.flatMap(profile=>profile.scripts)[0].id && folderSteps.find(step=>step.type==='startoverlay').itemId === importedScope.profiles.flatMap(profile=>profile.overlay_groups)[0].id);
+    check('folder import remaps nested shared targets without losing caller references', folderSteps.find(step=>step.type==='state').stateId === importedScope.states[0].id && folderSteps.find(step=>step.type==='script').scriptId === importedScope.profiles.flatMap(profile=>profile.scripts)[0].id && folderSteps.find(step=>step.type==='startoverlay').itemIds[0] === importedScope.profiles.flatMap(profile=>profile.overlay_groups)[0].id);
+    check('folder import remaps every selected overlay target', folderSteps.find(step=>step.type==='startoverlay').itemIds.length === 2 && folderSteps.find(step=>step.type==='startoverlay').itemIds[1] === importedScope.profiles.flatMap(profile=>profile.overlay_items)[0].id);
     await click('#manage');
     row('Cast').querySelector('[aria-label="Edit variable"]').click(); await wait();
     const frame = get('form.modal').getBoundingClientRect();
