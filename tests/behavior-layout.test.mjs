@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { root, browser, browserModules } from "./browserHarness.mjs";
+import { parseSteps } from "../src/behaviors.ts";
 
 const steps = [
   { type: "press", key: "lctrl 1" },
@@ -35,7 +36,16 @@ async function scenario() {
     for (const row of rows) {
       const controls = [...row.querySelectorAll('.step-row__params input,.step-row__params select,.step-row__params button,.step-row__params output')];
       const centers = controls.map(element => { const rect = bounds(element); return rect.top + rect.height / 2; });
-      check(`${row.querySelector('.step-row__type').textContent} controls share one line`, Math.max(...centers) - Math.min(...centers) < 2 && bounds(row).height < 64);
+      const type = row.querySelector('.step-row__type').textContent;
+      if (innerWidth < 900 && type === 'mousepress') {
+        const frame = bounds(row);
+        check('mousepress controls wrap within the row at narrower widths', frame.height < 100 && controls.every(element => {
+          const rect = bounds(element);
+          return rect.top >= frame.top && rect.bottom <= frame.bottom && rect.left >= frame.left && rect.right <= frame.right;
+        }));
+      } else {
+        check(`${type} controls share one line`, Math.max(...centers) - Math.min(...centers) < 2 && bounds(row).height < 64);
+      }
     }
     check('the editor uses available width without overflowing the window', bounds(document.querySelector('.modal--wide')).width >= Math.min(900, innerWidth - 32) - 1 && fits());
     const source = document.querySelector('[aria-label="Sleep (ms) source"]');
@@ -50,7 +60,7 @@ async function scenario() {
     check('the complete grouped action picker fits inside nested editors', fits() && inner.querySelectorAll('.action-picker__group').length === 5);
     inner.querySelector('[aria-label="Find action"]').dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true})); await wait();
     window.showNested(false); await wait();
-    check('recording controls and activation choices remain available', document.querySelectorAll('button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 2);
+    check('recording controls and activation choices remain available on input actions', document.querySelectorAll('button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 4);
     check('the action toolbar only shows Add action and Save as variable', document.querySelectorAll('.step-add-btns > button').length === 2 && !document.querySelector('.action-picker'));
     document.querySelector('button[aria-label="Add action"]').click(); await wait();
     check('all existing actions remain available within the editor width', document.querySelectorAll('.action-picker button').length === 26 && fits());
@@ -80,7 +90,7 @@ async function scenario() {
 test('behavior controls use a single row when space is available and stay usable at narrower widths', { skip: !browser && 'Chrome or Edge is required' }, async t => {
   const mocks = ['./api', './AppConsole', './App.css', './CloudSettings', '@tauri-apps/api/event', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-opener', '@tauri-apps/plugin-notification'];
   const bundle = browserModules(['App.tsx'], { mocks, expose: { [join(root, 'src/App.tsx')]: ['HotkeyModal'] } });
-  const harness = `const modules={${bundle.declarations}},cache={};window.originalSteps=${JSON.stringify(steps)};
+  const harness = `const modules={${bundle.declarations}},cache={};window.originalSteps=${JSON.stringify(parseSteps(JSON.stringify(steps)))};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>{throw error;}};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CloudStatus, Database, Scope, Profile, Settings, Variable, SecureTextDraft } from "./types";
+import type { OverlaySelection } from "./overlayTransfer";
 
 export const api = {
   cloudStatus: () => invoke<CloudStatus>("firebase_status"),
@@ -60,11 +61,20 @@ export const api = {
     }
   },
 
+  moveHotkey: (sourceGameId: string, sourceProfileId: string, sourceIndex: number, hotkey: import("./types").Hotkey, targetGameId: string, dependencies: Profile) =>
+    invoke<Database>("move_hotkey", { sourceGameId, sourceProfileId, sourceIndex, hotkey, targetGameId, dependencies }),
+
+  moveOverlay: (sourceGameId: string, sourceProfileId: string, selection: OverlaySelection, targetGameId: string, dependencies: Profile, targetGroupId: string | null) =>
+    invoke<Database>("move_overlay", { sourceGameId, sourceProfileId, selection, targetGameId, dependencies, targetGroupId }),
+
   deleteProfile: (gameId: string, profileId: string) =>
     invoke<Database>("delete_profile", { gameId, profileId }),
 
   setProfileArmed: (profileId: string, armed: boolean) =>
     invoke<Database>("set_profile_armed", { profileId, armed }),
+
+  setSubfolderEnabled: (gameId: string, subfolderId: string, enabled: boolean) =>
+    invoke<Database>("set_subfolder_enabled", { gameId, subfolderId, enabled }),
 
   setProfilePartEnabled: (profileId: string, part: "hotkeys" | "events" | "scripts" | "overlay" | "states", enabled: boolean, groupId: string | null = null) =>
     invoke<Database>("set_profile_part_enabled", { profileId, part, groupId, enabled }),

@@ -47,8 +47,8 @@ impl ExecutionScope {
 
     pub fn is_active(&self, db: &Database) -> bool {
         db.games.iter().any(|game| {
-            game.profiles.iter().any(|profile| profile.id == self.profile && profile.armed && profile.section_enabled(self.section()))
-                && (self.script_owner.is_empty() || game.profiles.iter().any(|profile| profile.id == self.script_owner && profile.armed && !profile.scripts_disabled))
+            game.profiles.iter().any(|profile| profile.id == self.profile && profile.armed && game.profile_enabled(profile) && profile.section_enabled(self.section()))
+                && (self.script_owner.is_empty() || game.profiles.iter().any(|profile| profile.id == self.script_owner && profile.armed && game.profile_enabled(profile) && !profile.scripts_disabled))
         })
     }
 }
@@ -111,7 +111,7 @@ impl Runtime {
             let mut groups = HashSet::new();
             let mut enabled_groups = HashSet::new();
             let mut disabled_items = HashSet::new();
-            for profile in game.profiles.iter().filter(|profile| profile.armed && !self.disabled.contains(&profile.id)) {
+            for profile in game.profiles.iter().filter(|profile| profile.armed && game.profile_enabled(profile) && !self.disabled.contains(&profile.id)) {
                 folder.profiles.insert(profile.id.clone());
                 let profile_groups = config::resolve_profile_overlay_groups(&game.profiles, profile);
                 for group in profile_groups.iter().copied() {
@@ -310,6 +310,36 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subfolder_switches_cancel_owned_resources_and_preserve_independent_profile_choices() {
+        let mut db = database();
+        db.games[0].subfolders.push(config::Subfolder { id:"combat".into(),name:"Combat".into(),enabled:true,toggle_key:None });
+        db.games[0].profiles[1].subfolder_id = Some("combat".into());
+        let mut runtime = Runtime::default();
+        runtime.reconcile(&db, 0);
+        runtime.action("overlay", "overlay", "timer", "start", 10).unwrap();
+        let scope = ExecutionScope { profile:"overlay".into(),section:"hotkeys".into(),script_owner:String::new() };
+        let script = ExecutionScope { profile:"keys".into(),section:"hotkeys".into(),script_owner:"overlay".into() };
+        assert!(scope.is_active(&db) && script.is_active(&db));
+        db.games[0].set_subfolder_enabled("combat", false).unwrap();
+        runtime.reconcile(&db, 20);
+        assert!(!scope.is_active(&db) && !script.is_active(&db));
+        assert!(runtime.enqueue(&db, &scope, "press(x)").is_err());
+        assert!(runtime.profile_snapshot("overlay").is_none());
+        assert!(runtime.profile_snapshot("keys").is_some());
+        assert!(runtime.folders["game"].snapshot.runtime.item_timers.is_empty());
+        assert!(db.games[0].profiles.iter().all(|profile| profile.armed));
+        runtime.set_enabled(&db, "overlay", false, 30).unwrap();
+        db.games[0].set_subfolder_enabled("combat", true).unwrap();
+        runtime.reconcile(&db, 40);
+        assert!(runtime.profile_snapshot("overlay").is_none());
+        assert_eq!(runtime.disabled_profiles(), ["overlay"]);
+        runtime.set_enabled(&db, "overlay", true, 50).unwrap();
+        assert!(runtime.profile_snapshot("overlay").is_some());
+        assert!(runtime.folders["game"].snapshot.runtime.item_timers.is_empty());
+    }
+
     fn database() -> Database {
         serde_json::from_value(serde_json::json!({"scopes":[{"id":"game","name":"Game","exe":"game.exe","states":[{"id":"buff","name":"Buff","duration_ms":1000}],"profiles":[
             {"id":"keys","name":"Keys","armed":true},

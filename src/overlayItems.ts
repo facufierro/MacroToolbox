@@ -143,7 +143,11 @@ export function carryReferencedOverlayParts(profile: Profile, source: Profile[],
 
 export function mapOverlayActions(behavior: string, mapId: (id: string) => string | null) {
   return mapBehavior(behavior, step => {
-    if (step.type !== "startoverlay" && step.type !== "stopoverlay" && step.type !== "bar") return step;
+    if (step.type === "startoverlay" || step.type === "stopoverlay") {
+      const itemIds = [...new Set(step.itemIds.map(mapId).filter((id): id is string => id !== null))];
+      return itemIds.length ? { ...step, itemIds } : null;
+    }
+    if (step.type !== "bar") return step;
     const itemId = mapId(step.itemId);
     return itemId === null ? null : { ...step, itemId };
   });

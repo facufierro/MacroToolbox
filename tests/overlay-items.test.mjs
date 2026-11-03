@@ -201,7 +201,7 @@ test("import remaps group actions, membership, and timer visibility together", (
   assert.equal(result.overlay_groups[0].visible_while_timer_id, "new-timer");
   assert.equal(result.overlay_items[1].group_id, "new-group");
   assert.equal(result.overlay_items[1].visible_while_timer_id, "new-timer");
-  assert.equal(parseSteps(result.hotkeys[0].behavior)[0].itemId, "new-group");
+  assert.deepEqual(parseSteps(result.hotkeys[0].behavior)[0].itemIds, ["new-group"]);
 });
 
 test("folder import remaps overlay start targets while preserving other actions", () => {

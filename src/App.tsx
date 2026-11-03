@@ -1,5 +1,5 @@
 import { Icon, IconButton } from "./Icon";
-import { useState, useEffect, useCallback, useRef, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog, confirm as confirmDialog, ask } from "@tauri-apps/plugin-dialog";
@@ -12,6 +12,7 @@ import { VariablesView } from "./VariablesView";
 import { TriggerInput } from "./TriggerInput";
 import { triggerIdentity, triggerLabel, isTriggerValid } from "./triggers";
 import { SortableList } from "./SortableList";
+import { useProfileItemDrag, profileDropKey, type ProfileItemDrag } from "./useProfileItemDrag";
 import { moveItem, orderOwnedSlots } from "./listOrder";
 import { exportVariables, importVariables, mapVariableBehaviors, readVariable } from "./variables";
 import { KeyInput } from "./KeyInput";
@@ -41,12 +42,14 @@ import type {
   ProfileKind,
   Variable,
   SecureTextDraft,
+  Subfolder,
 } from "./types";
 import "./App.css";
 
 type Modal =
   | { type: "addGame" }
   | { type: "editGame"; game: Scope }
+  | { type: "subfolder"; gameId: string; folder: Subfolder }
   | { type: "profileSettings"; gameId: string; profile: Profile; isNew: boolean }
   | { type: "editHotkey"; gameId: string; profileId: string; index: number | null; hotkey: Hotkey; gameExe: string; states: ProfileState[]; overlays: OverlayTarget[] }
   | { type: "editEvent"; gameId: string; profileId: string; index: number | null; event: BehaviorEvent; eventKinds: BehaviorEventKind[]; gameExe: string; states: ProfileState[]; overlays: OverlayTarget[] }
@@ -105,7 +108,7 @@ function remapBehaviorIds(behavior: string, states: Map<string, string>, items: 
   return mapOverlayActions(mapScriptActions(mapStateActions(behavior, id => states.get(id) ?? id), id => scripts.get(id) ?? id), id => items.get(id) ?? groups.get(id) ?? id);
 }
 
-function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, string>, stateIds?: Map<string, string>, itemIds?: Map<string, string>, scriptIds?: Map<string, string>, groupIds?: Map<string, string>): Profile {
+function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, string>, stateIds?: Map<string, string>, itemIds?: Map<string, string>, scriptIds?: Map<string, string>, groupIds?: Map<string, string>, subfolderIds?: Map<string, string>): Profile {
   const { exe: _legacyExe, ...profileData } = profile;
   const stateMap = stateIds ?? new Map(profile.states.map(s => [s.id, uid()]));
   const stateId = (id: string) => stateMap.get(id) ?? id;
@@ -118,6 +121,7 @@ function remapProfileIds(profile: LegacyProfileExport, profileIds?: Map<string, 
     id: profileIds?.get(profile.id) ?? uid(),
     armed: false,
     parent_id: profile.parent_id ? (profileIds?.get(profile.parent_id) ?? profile.parent_id) : null,
+    subfolder_id: profile.subfolder_id ? subfolderIds?.get(profile.subfolder_id) ?? null : null,
     events: (profile.events ?? []).map(event => ({ ...event, behavior: remapBehavior(event.behavior) })),
     scripts: (profile.scripts ?? []).map(s => ({ ...s, id: scriptMap.get(s.id)! })),
     states: profile.states.map(s => ({ ...s, id: stateMap.get(s.id)! })),
@@ -207,9 +211,10 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
   const incoming = mapVariableBehaviors((raw.variables ?? []).map(readVariable), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
   const imported = importVariables(source.profiles, incoming, existing);
   const scope = { ...source, profiles: imported.profiles };
+  const subfolderIds = new Map((scope.subfolders ?? []).map(folder => [folder.id, uid()]));
   let entries = scope.profiles.map(profile => ({
     target: typeof scope.exe === "string" ? scope.exe.trim() : (profile.exe ?? "").trim(),
-    profile: remapProfileIds(profile, profileIds, stateIds, itemIds, scriptIds, groupIds),
+    profile: remapProfileIds(profile, profileIds, stateIds, itemIds, scriptIds, groupIds, subfolderIds),
   }));
 
   const allProfiles = entries.map(entry => entry.profile);
@@ -250,6 +255,7 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
       : `${scope.name} (${isGlobalExe(group.exe) ? "Any app" : group.exe || "No app"})`,
     exe: group.exe,
     profiles: group.profiles,
+    subfolders: (scope.subfolders ?? []).map(folder => ({ ...folder, id: subfolderIds.get(folder.id)! })),
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));
   return { scopes, variables: imported.variables };
@@ -270,13 +276,13 @@ function stateNameById(states: ProfileState[], stateId: string | null | undefine
   return states.find(state => state.id === stateId)?.name ?? null;
 }
 
-type ResolvedProfileEntry<T> = { value: T; own: boolean };
+type ResolvedProfileEntry<T> = { value: T; own: boolean; key: string };
 
 function resolveProfileEntries<T>(
   profiles: Profile[],
   profile: Profile,
   select: (profile: Profile) => T[],
-  keyOf: (value: T) => string,
+  keyOf: (value: T, profile: Profile, index: number) => string,
   visited = new Set<string>(),
 ): Array<ResolvedProfileEntry<T>> {
   if (visited.has(profile.id)) return [];
@@ -293,20 +299,26 @@ function resolveProfileEntries<T>(
       })()
     : [];
 
-  for (const value of select(profile)) {
-    const key = keyOf(value);
-    const index = resolved.findIndex(entry => keyOf(entry.value) === key);
-    const entry = { value, own: true };
+  const owned = select(profile).map((value, index) => ({ value, own: true, key: keyOf(value, profile, index) }));
+  for (const entry of owned) {
+    const index = resolved.findIndex(candidate => candidate.key === entry.key);
     if (index >= 0) resolved[index] = entry;
     else resolved.push(entry);
   }
 
-  return orderOwnedSlots(resolved, select(profile).map(value => ({ value, own: true })), entry => keyOf(entry.value));
+  return orderOwnedSlots(resolved, owned, entry => entry.key);
 }
 
-function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean }> {
-  return resolveProfileEntries(profiles, profile, current => current.hotkeys, hotkey => triggerIdentity(hotkey.trigger))
-    .map(({ value, own }) => ({ hotkey: value, own }));
+function hotkeyEntryKey(hotkey: Hotkey, profile: Profile, index: number): string {
+  // Unassigned copies have no shortcut to override and remain separate list entries.
+  return typeof hotkey.trigger === "string" && !hotkey.trigger.trim()
+    ? JSON.stringify([profile.id, index])
+    : triggerIdentity(hotkey.trigger);
+}
+
+function resolveHotkeys(profiles: Profile[], profile: Profile): Array<{ hotkey: Hotkey; own: boolean; key: string }> {
+  return resolveProfileEntries(profiles, profile, current => current.hotkeys, hotkeyEntryKey)
+    .map(({ value, own, key }) => ({ hotkey: value, own, key }));
 }
 
 function resolveEvents(profiles: Profile[], profile: Profile): Array<{ event: BehaviorEvent; own: boolean }> {
@@ -319,10 +331,10 @@ function resolveStates(profiles: Profile[], profile: Profile): Array<{ state: Pr
     .map(({ value, own }) => ({ state: value, own }));
 }
 
-function resolveOverlayItems(profiles: Profile[], profile: Profile): Array<{ item: OverlayItem; own: boolean }> {
+function resolveOverlayItems(profiles: Profile[], profile: Profile): Array<{ item: OverlayItem; source: OverlayItem; own: boolean }> {
   const entries = resolveProfileEntries(profiles, profile, current => current.overlay_items, item => item.id);
   const items = nameOverlayParts(entries.map(({ value }) => value), resolveOverlayGroups(profiles, profile));
-  return entries.map(({ own }, index) => ({ item: items[index], own }));
+  return entries.map(({ own, value }, index) => ({ item: items[index], source: value, own }));
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -346,6 +358,10 @@ type Selection =
 /** Whether an armed profile's folder app is present (so its hotkeys can fire). "*" is always present. */
 function profileAppActive(exe: string, openExes: Set<string>): boolean {
   return isGlobalExe(exe) || openExes.has(exe.trim().toLowerCase());
+}
+
+function profileFolderEnabled(folder: Scope, profile: Profile): boolean {
+  return !profile.subfolder_id || (folder.subfolders ?? []).some(subfolder => subfolder.id === profile.subfolder_id && subfolder.enabled);
 }
 
 /** Green when armed and its app is active, yellow when armed but the app is not, hollow when off. */
@@ -448,13 +464,25 @@ function useLibraryWidth(savedWidth?: number | null) {
   return { w, onPointerDown };
 }
 
-function ProfileRow({ profile, enabled, folderExe, openExes, selected, onSelect, onToggleArmed, onContext }: {
+function ProfileRow({ profile, enabled, folderId, folderExe, openExes, selected, itemDrag, onSelect, onToggleArmed, onContext }: {
   profile: Profile; enabled: boolean; folderExe: string; openExes: Set<string>; selected: boolean;
+  folderId: string; itemDrag?: ProfileItemDrag;
   onSelect: () => void; onToggleArmed: (a: boolean) => void; onContext: (e: ReactMouseEvent) => void;
 }) {
   return (
     <button
       className={`profile-row ${selected ? "profile-row--active" : ""} ${enabled ? "profile-row--armed" : ""}`}
+      data-item-drop={itemDrag?.target === profileDropKey(folderId, profile.id) || undefined}
+      onDragOver={event => {
+        if (!itemDrag?.canDrop(folderId, profile.id)) return;
+        event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move";
+        itemDrag.over(folderId, profile.id);
+      }}
+      onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) itemDrag?.leave(folderId, profile.id); }}
+      onDrop={event => {
+        if (!itemDrag?.canDrop(folderId, profile.id)) return;
+        event.preventDefault(); event.stopPropagation(); void itemDrag.drop(folderId, profile.id);
+      }}
       onClick={onSelect} onContextMenu={onContext} title={profile.name}>
       <StatusDot armed={enabled} active={profileAppActive(folderExe, openExes)} />
       <span className="profile-row__name">{profile.name || "Untitled"}</span>
@@ -463,46 +491,98 @@ function ProfileRow({ profile, enabled, folderExe, openExes, selected, onSelect,
   );
 }
 
-function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfileId, visibleProfiles, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
+function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfileId, visibleProfiles, itemDrag, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   folder: Scope; openExes: Set<string>; open: boolean; selectedProfileId?: string;
   disabledProfiles: ReadonlySet<string>;
   visibleProfiles: Profile[];
+  itemDrag?: ProfileItemDrag;
   onToggle: () => void; onSelectProfile: (id: string) => void; onToggleArmed: (pid: string, a: boolean) => void;
   onProfileContext: (e: ReactMouseEvent, folderId: string, profile: Profile) => void;
   onFolderContext: (e: ReactMouseEvent, folder: Scope) => void;
   onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
 }) {
-  const newProfile = (kind: ProfileKind) => onModal({ type: "profileSettings", gameId: folder.id, profile: blankProfile(kind), isNew: true });
+  const reportError = useErrorReporter();
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const draggingProfile = useRef<string | null>(null);
+  const [profileDrop, setProfileDrop] = useState<string | null | undefined>(undefined);
+  const [movingProfile, setMovingProfile] = useState(false);
+  function clearProfileDrag() { draggingProfile.current = null; setProfileDrop(undefined); }
+  function profileDropHandlers(subfolderId: string | null) {
+    const accepts = () => !movingProfile && !itemDrag?.moving && draggingProfile.current !== null
+      && folder.profiles.some(profile => profile.id === draggingProfile.current && (profile.subfolder_id ?? null) !== subfolderId);
+    return {
+      onDragOver(event: ReactDragEvent<HTMLDivElement>) {
+        if (!accepts()) return;
+        event.preventDefault(); event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        setProfileDrop(subfolderId);
+      },
+      onDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setProfileDrop(undefined);
+      },
+      async onDrop(event: ReactDragEvent<HTMLDivElement>) {
+        if (!accepts()) return;
+        event.preventDefault(); event.stopPropagation();
+        const profileId = draggingProfile.current;
+        clearProfileDrag();
+        setMovingProfile(true);
+        try {
+          onDb(await api.upsertGame({ ...folder, profiles: folder.profiles.map(profile => profile.id === profileId ? { ...profile, subfolder_id: subfolderId } : profile) }));
+        } catch (error) { reportError(error); }
+        finally { setMovingProfile(false); }
+      },
+    };
+  }
+  const newProfile = (kind: ProfileKind, subfolderId?: string) => onModal({ type: "profileSettings", gameId: folder.id, profile: { ...blankProfile(kind), subfolder_id: subfolderId ?? null }, isNew: true });
+  const newSubfolder = () => onModal({ type: "subfolder", gameId: folder.id, folder: { id: uid(), name: "", enabled: true, toggle_key: null } });
+  function renderProfiles(profiles: Profile[]) {
+    if (!profiles.length) return null;
+    return <SortableList className="folder-group__profiles" items={profiles} itemKey={profile => profile.id} itemLabel={profile => profile.name || "profile"}
+      dragFromContent canMove={() => !movingProfile && !itemDrag?.moving} onItemDragStart={profile => { draggingProfile.current = profile.id; }} onItemDragEnd={clearProfileDrag}
+      onReorder={async (from, to, after) => { onDb(await api.upsertGame({ ...folder, profiles: moveItem(folder.profiles, profile => profile.id, from, to, after) })); }}>
+      {p => <ProfileRow profile={p} enabled={p.armed && profileFolderEnabled(folder, p) && !disabledProfiles.has(p.id)} folderId={folder.id} folderExe={folder.exe} itemDrag={itemDrag} openExes={openExes} selected={p.id === selectedProfileId}
+        onSelect={() => onSelectProfile(p.id)} onToggleArmed={a => onToggleArmed(p.id, a)} onContext={e => onProfileContext(e, folder.id, p)} />}
+    </SortableList>;
+  }
   return (
     <div className={`folder-group ${open ? "folder-group--open" : ""}`}>
-      <div className="folder-group__head-row" onContextMenu={e => onFolderContext(e, folder)}>
+      <div className="folder-group__head-row" data-profile-drop={profileDrop === null || undefined} {...profileDropHandlers(null)} onContextMenu={e => onFolderContext(e, folder)}>
         <button className="folder-group__head" onClick={onToggle}>
           <span className="folder-group__caret"><Icon name="chevron-right" /></span>
           <span className="folder-group__name">{folder.name || "Unnamed"}</span>
         </button>
         <IconButton icon="plus" label="New profile" className="icon-btn" onClick={() => newProfile("hotkeys")} />
+        <IconButton icon="folder-plus" label="New subfolder" className="icon-btn" onClick={newSubfolder} />
+        <IconButton icon="gear" label="Folder settings" className="icon-btn" onClick={() => onModal({ type: "editGame", game: folder })} />
       </div>
-      {open && visibleProfiles.length > 0 && (
-        <SortableList className="folder-group__profiles" items={visibleProfiles} itemKey={profile => profile.id} itemLabel={profile => profile.name || "profile"}
-          onReorder={async (from, to, after) => {
-            onDb(await api.upsertGame({ ...folder, profiles: moveItem(folder.profiles, profile => profile.id, from, to, after) }));
-          }}>
-          {p => (
-            <ProfileRow profile={p} enabled={p.armed && !disabledProfiles.has(p.id)} folderExe={folder.exe} openExes={openExes} selected={p.id === selectedProfileId}
-              onSelect={() => onSelectProfile(p.id)} onToggleArmed={a => onToggleArmed(p.id, a)}
-              onContext={e => onProfileContext(e, folder.id, p)} />
-          )}
+      {open && <>
+        <SortableList className="folder-group__subfolders" items={folder.subfolders ?? []} itemKey={subfolder => subfolder.id} itemLabel={subfolder => subfolder.name}
+          canMove={() => !movingProfile && !itemDrag?.moving}
+          onReorder={async (from, to, after) => { onDb(await api.upsertGame({ ...folder, subfolders: moveItem(folder.subfolders ?? [], subfolder => subfolder.id, from, to, after) })); }}>
+        {subfolder => <div className={`profile-subfolder${collapsed.has(subfolder.id) ? "" : " profile-subfolder--open"}`}>
+          <div className="folder-group__head-row" data-profile-drop={profileDrop === subfolder.id || undefined} {...profileDropHandlers(subfolder.id)}>
+            <button className="folder-group__head" onClick={() => setCollapsed(current => { const next = new Set(current); if (next.has(subfolder.id)) next.delete(subfolder.id); else next.add(subfolder.id); return next; })}>
+              <span className="folder-group__caret"><Icon name="chevron-right" /></span><span className="folder-group__name">{subfolder.name}</span>
+            </button>
+            <EnableSwitch enabled={subfolder.enabled} label="Subfolder enabled" onChange={value => { void api.setSubfolderEnabled(folder.id, subfolder.id, value).then(onDb).catch(reportError); }} />
+            <IconButton icon="plus" label="New profile" className="icon-btn" onClick={() => newProfile("hotkeys", subfolder.id)} />
+            <IconButton icon="gear" label="Subfolder settings" className="icon-btn" onClick={() => onModal({ type: "subfolder", gameId: folder.id, folder: subfolder })} />
+          </div>
+          {!collapsed.has(subfolder.id) && renderProfiles(visibleProfiles.filter(profile => profile.subfolder_id === subfolder.id))}
+        </div>}
         </SortableList>
-      )}
+        {renderProfiles(visibleProfiles.filter(profile => !profile.subfolder_id))}
+      </>}
     </div>
   );
 }
 
-function Library({ db, disabledProfiles, openExes, selection, query, collapsed, width, onQuery, onToggleCollapse, onSelect, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
+function Library({ db, disabledProfiles, openExes, selection, query, collapsed, width, itemDrag, onQuery, onToggleCollapse, onSelect, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   db: Database; openExes: Set<string>; selection: Selection;
   disabledProfiles: ReadonlySet<string>;
   query: string; collapsed: Set<string>; width: number;
+  itemDrag?: ProfileItemDrag;
   onQuery: (s: string) => void; onToggleCollapse: (id: string) => void;
   onSelect: (s: Selection) => void; onToggleArmed: (pid: string, armed: boolean) => void;
   onProfileContext: (e: ReactMouseEvent, folderId: string, profile: Profile) => void;
@@ -513,7 +593,8 @@ function Library({ db, disabledProfiles, openExes, selection, query, collapsed, 
   const q = query.trim().toLowerCase();
   const filtering = q !== "";
   const match = (p: Profile, folder: Scope) =>
-    q === "" || p.name.toLowerCase().includes(q) || folder.exe.toLowerCase().includes(q) || folder.name.toLowerCase().includes(q);
+    q === "" || p.name.toLowerCase().includes(q) || folder.exe.toLowerCase().includes(q) || folder.name.toLowerCase().includes(q)
+      || (folder.subfolders ?? []).some(subfolder => subfolder.id === p.subfolder_id && subfolder.name.toLowerCase().includes(q));
   const selectedProfileId = selection.kind === "profile" ? selection.profileId : undefined;
 
   const groups = db.scopes
@@ -530,7 +611,7 @@ function Library({ db, disabledProfiles, openExes, selection, query, collapsed, 
           onDb(await api.reorderFolders(moveItem(db.scopes, folder => folder.id, from, to, after).map(folder => folder.id)));
         }} empty={<div className="library__empty">{db.scopes.length === 0 ? "No folders yet" : "No matches"}</div>}>
         {({ f, visible }) => (
-          <FolderGroup folder={f} disabledProfiles={disabledProfiles} openExes={openExes}
+          <FolderGroup folder={f} disabledProfiles={disabledProfiles} openExes={openExes} itemDrag={itemDrag}
             open={!collapsed.has(f.id) || filtering} selectedProfileId={selectedProfileId} visibleProfiles={visible}
             onToggle={() => onToggleCollapse(f.id)}
             onSelectProfile={pid => onSelect({ kind: "profile", folderId: f.id, profileId: pid })}
@@ -629,13 +710,15 @@ function FolderModal({ initial, onSave, onClose }: {
 }
 
 /** Edit profile-owned options. The application target is owned by the containing folder. */
-function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
+function ProfileSettingsModal({ initial, isNew, subfolders = [], onSave, onClose }: {
   initial: Profile;
   isNew: boolean;
+  subfolders?: Subfolder[];
   onSave: (p: Profile) => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState(initial.name);
+  const [subfolderId, setSubfolderId] = useState(initial.subfolder_id ?? "");
   const [overlayOn, setOverlayOn] = useState(!initial.overlay_disabled);
   const [toggleHotkeysKey, setToggleHotkeysKey] = useState(initial.toggle_hotkeys_key ?? "");
   const [toggleOverlayKey, setToggleOverlayKey] = useState(initial.toggle_overlay_key ?? "");
@@ -644,6 +727,7 @@ function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
     return {
       ...initial,
       name: name.trim(),
+      subfolder_id: subfolderId || null,
       overlay_disabled: !overlayOn,
       toggle_hotkeys_key: toggleHotkeysKey || null,
       toggle_overlay_key: toggleOverlayKey || null,
@@ -656,6 +740,9 @@ function ProfileSettingsModal({ initial, isNew, onSave, onClose }: {
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h2>{isNew ? "New Profile" : "Profile"}</h2>
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Profile name" autoFocus />
+        {subfolders.length > 0 && <select aria-label="Subfolder" value={subfolderId} onChange={e => setSubfolderId(e.target.value)}>
+          <option value="">App folder</option>{subfolders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+        </select>}
         <label className="checkbox-row">
           <input type="checkbox" checked={overlayOn} onChange={e => setOverlayOn(e.target.checked)} />
           <span>Show overlay</span>
@@ -683,6 +770,29 @@ const BEHAVIOR_EVENTS: Array<{ value: BehaviorEventKind; label: string }> = [
 
 function behaviorEventLabel(event: BehaviorEventKind): string {
   return BEHAVIOR_EVENTS.find(candidate => candidate.value === event)?.label ?? event;
+}
+
+function SubfolderModal({ initial, onSave, onDelete, onClose }: {
+  initial: Subfolder; onSave: (folder: Subfolder) => Promise<void>; onDelete?: () => Promise<void>; onClose: () => void;
+}) {
+  const reportError = useErrorReporter();
+  const [name, setName] = useState(initial.name);
+  const [key, setKey] = useState(initial.toggle_key ?? "");
+  const [saving, setSaving] = useState(false);
+  async function run(action: () => Promise<void>) {
+    setSaving(true);
+    try { await action(); onClose(); } catch (error) { reportError(error); } finally { setSaving(false); }
+  }
+  return <div className="modal-overlay"><fieldset className="modal" disabled={saving}>
+    <h2>{initial.name ? "Subfolder" : "New subfolder"}</h2>
+    <input className="modal-name" placeholder="Subfolder name" value={name} onChange={e => setName(e.target.value)} autoFocus />
+    <KeyInput value={key} onChange={setKey} placeholder="Toggle-subfolder key" allowChord />
+    <div className="modal__actions">
+      {onDelete && <IconButton icon="trash-can" label="Delete subfolder" className="icon-btn icon-btn--danger" onClick={() => void run(onDelete)} />}
+      <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
+      <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!name.trim()} onClick={() => void run(() => onSave({ ...initial, name: name.trim(), toggle_key: key.trim() || null }))} />
+    </div>
+  </fieldset></div>;
 }
 
 // ── Step sub-components ───────────────────────────────────────────────────────
@@ -1358,12 +1468,13 @@ function ScriptModal({ initial, onSave, onClose }: {
 
 // ── Game detail view ──────────────────────────────────────────────────────────
 
-function ProfileEditor({ folder, profile, enabled = profile.armed, variables, showStates, onContext, onDb, onModal }: {
+function ProfileEditor({ folder, profile, enabled = profile.armed && profileFolderEnabled(folder, profile), variables, showStates, itemDrag, onContext, onDb, onModal }: {
   folder: Scope;
   profile: Profile;
   enabled?: boolean;
   variables: Variable[];
   showStates: boolean;
+  itemDrag?: ProfileItemDrag;
   onContext: (e: ReactMouseEvent) => void;
   onDb: (db: Database) => void;
   onModal: (m: Modal) => void;
@@ -1435,9 +1546,27 @@ function ProfileEditor({ folder, profile, enabled = profile.armed, variables, sh
       {selected && renderPartEditor()}</div>;
   }
 
+  function overlayDropHandlers(groupId: string) {
+    return {
+      dropActive: itemDrag?.target === profileDropKey(folder.id, profile.id, groupId),
+      onDragOver(event: ReactDragEvent<HTMLFieldSetElement>) {
+        if (!itemDrag?.canDrop(folder.id, profile.id, groupId)) return;
+        event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move";
+        itemDrag.over(folder.id, profile.id, groupId);
+      },
+      onDragLeave(event: ReactDragEvent<HTMLFieldSetElement>) {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) itemDrag?.leave(folder.id, profile.id, groupId);
+      },
+      onDrop(event: ReactDragEvent<HTMLFieldSetElement>) {
+        if (!itemDrag?.canDrop(folder.id, profile.id, groupId)) return;
+        event.preventDefault(); event.stopPropagation(); void itemDrag.drop(folder.id, profile.id, groupId);
+      },
+    };
+  }
+
 
   return (
-    <fieldset className="editor" disabled={savingPart}>
+    <fieldset className="editor" disabled={savingPart || itemDrag?.moving}>
       <div className="editor__header" onContextMenu={onContext}>
         <div className="editor__title-row">
           <div className="editor__title-wrap">
@@ -1454,12 +1583,14 @@ function ProfileEditor({ folder, profile, enabled = profile.armed, variables, sh
         <ProfileSection title="Hotkeys" defaultExpanded={profile.kind === "hotkeys" || resolvedHotkeys.length > 0} enabled={!profile.hotkeys_disabled} onChange={value => setSectionEnabled("hotkeys", value)} actions={<>
 <IconButton icon="plus" label="Add hotkey" className="btn btn--primary btn--sm" onClick={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null, hotkey: { name: "", trigger: "", behavior: "", allow_extra_modifiers: false, state_id: null }, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })} />
         </>}>
-            <SortableList items={resolvedHotkeys} itemKey={({ hotkey }) => triggerIdentity(hotkey.trigger)} itemLabel={({ hotkey }) => hotkey.name || triggerLabel(hotkey.trigger, variables)}
-              canMove={({ own }) => own}
-              onReorder={async (from, to, after) => { await saveProfile({ ...profile, hotkeys: moveItem(profile.hotkeys, hotkey => triggerIdentity(hotkey.trigger), from, to, after) }); }}
+            <SortableList items={resolvedHotkeys} itemKey={({ key }) => key} itemLabel={({ hotkey }) => hotkey.name || triggerLabel(hotkey.trigger, variables)}
+              dragFromContent canMove={({ own }) => own && !itemDrag?.moving}
+              onItemDragStart={itemDrag ? ({ hotkey }) => itemDrag.begin({ kind: "hotkey", gameId: folder.id, profileId: profile.id, index: profile.hotkeys.indexOf(hotkey), hotkey }) : undefined}
+              onItemDragEnd={itemDrag?.end}
+              onReorder={async (from, to, after) => { await saveProfile({ ...profile, hotkeys: moveItem(profile.hotkeys, (hotkey, index) => hotkeyEntryKey(hotkey, profile, index), from, to, after) }); }}
               empty={<div className="steps-empty">No hotkeys yet</div>}>
               {({ hotkey: hk, own }) => {
-                const ownIndex = own ? profile.hotkeys.findIndex(h => triggerIdentity(h.trigger) === triggerIdentity(hk.trigger)) : -1;
+                const ownIndex = own ? profile.hotkeys.indexOf(hk) : -1;
                 return (
                   <HotkeyRow variables={variables} hotkey={hk} states={stateOptions} overlays={overlayOptions} inherited={!own}
                     onEdit={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: ownIndex, hotkey: hk, gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}
@@ -1503,10 +1634,13 @@ function ProfileEditor({ folder, profile, enabled = profile.armed, variables, sh
           <IconButton icon="plus" label="Add overlay" className="btn btn--ghost btn--sm" onClick={() => saveProfile({ ...profile, overlay_groups: [...profile.overlay_groups, { id: uid(), name: "", x: 0, y: 0, layout: "row", gap: 8 }] }).catch(reportError)} />
         }>
             <SortableList className="steps-list overlay-groups" items={groups} itemKey={group => group.id} itemLabel={group => group.name || "overlay"}
-              canMove={group => !editingPart && profile.overlay_groups.some(candidate => candidate.id === group.id)}
+              dragFromContent canMove={group => !editingPart && !itemDrag?.moving && profile.overlay_groups.some(candidate => candidate.id === group.id)}
+              onItemDragStart={itemDrag ? group => itemDrag.begin({ kind: "overlay", gameId: folder.id, profileId: profile.id, group,
+                items: resolvedOverlayItems.filter(({ item }) => item.group_id === group.id).map(({ source }) => source) }) : undefined}
+              onItemDragEnd={itemDrag?.end}
               onReorder={async (from, to, after) => { await saveProfile({ ...profile, overlay_groups: moveItem(profile.overlay_groups, group => group.id, from, to, after) }); }}
               empty={<div className="steps-empty">No overlays yet</div>}>
-              {group => <OverlayGroupPanel group={group} items={resolvedOverlayItems.filter(({ own }) => own).map(({ item }) => item)} timers={timers} gameExe={profileExe} partsEditable={!editingPart}
+              {group => <OverlayGroupPanel group={group} items={resolvedOverlayItems.filter(({ own }) => own).map(({ item }) => item)} timers={timers} gameExe={profileExe} partsEditable={!editingPart} {...overlayDropHandlers(group.id)}
                 onSave={async (next, members) => { await saveProfile(saveOverlayGroup(profile, next, members)); }}
                 onEnabledChange={async value => { onDb(await api.setProfilePartEnabled(profile.id, "overlay", value, group.id)); }}
                 onDuplicate={async () => { await saveProfile(duplicateOverlayGroup(profile, group, resolvedOverlayItems.map(({ item }) => item), uid)); }}
@@ -1516,10 +1650,12 @@ function ProfileEditor({ folder, profile, enabled = profile.armed, variables, sh
                 } : undefined}
                 onAdd={type => addOverlay(type, group.id)}
                 onHotkey={() => onModal({ type: "editHotkey", gameId: folder.id, profileId, index: null,
-                  hotkey: { name: group.name, trigger: "", behavior: stepsToString([{ type: "startoverlay", itemId: group.id, restart: true }]), allow_extra_modifiers: false, state_id: null },
+                  hotkey: { name: group.name, trigger: "", behavior: stepsToString([{ type: "startoverlay", itemIds: [group.id], restart: true }]), allow_extra_modifiers: false, state_id: null },
                   gameExe: profileExe, states: stateOptions, overlays: overlayOptions })}>
                 <SortableList items={resolvedOverlayItems.filter(({ item }) => item.group_id === group.id)} itemKey={({ item }) => item.id} itemLabel={({ item }) => item.name}
-                  canMove={({ own }) => own && !editingPart}
+                  dragFromContent canMove={({ own }) => own && !editingPart && !itemDrag?.moving}
+                  onItemDragStart={itemDrag ? ({ source }) => itemDrag.begin({ kind: "overlayPart", gameId: folder.id, profileId: profile.id, item: source }) : undefined}
+                  onItemDragEnd={itemDrag?.end}
                   onReorder={async (from, to, after) => { await saveProfile({ ...profile, overlay_items: moveItem(profile.overlay_items, item => item.id, from, to, after) }); }}>
                   {renderOverlayItem}
                 </SortableList>
@@ -1748,6 +1884,11 @@ export default function App() {
     return () => { void subscription.then(unlisten => unlisten()); };
   }, [loadDb, reportError]);
 
+  useEffect(() => {
+    const subscription = listen<Database>("database-changed", event => setDb(event.payload));
+    return () => { void subscription.then(unlisten => unlisten()); };
+  }, []);
+
   // Check for updates against the latest GitHub release. Returns the new version (and shows
   // the banner) if one is available, null when up to date; throws on network failure. A
   // manual check (the Settings button) ignores a previous dismissal.
@@ -1836,6 +1977,8 @@ export default function App() {
     setDb(updated);
   }
 
+  const itemDrag = useProfileItemDrag(db, handleDb);
+
   async function runUpdate() {
     if (!updateInfo?.downloadUrl) return;
     const ok = await ask(
@@ -1923,6 +2066,7 @@ export default function App() {
     const hasProcessTarget = targetExe !== "" && !isGlobalExe(targetExe);
     return [
       { label: "New profile", onClick: () => newProfile("hotkeys") },
+      { label: "New subfolder", onClick: () => setModal({ type: "subfolder", gameId: folder.id, folder: { id: uid(), name: "", enabled: true, toggle_key: null } }) },
       { label: "Import profile…", onClick: async () => {
         try { const imported = await importProfile(db!.variables); if (!imported) return; imported.profile.name = imported.profile.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported.profile, imported.variables)); }
         catch (e) { reportError(e); }
@@ -2096,7 +2240,7 @@ export default function App() {
         </div>
       )}
       <div className="layout__body">
-        <Library db={db} disabledProfiles={disabledProfiles} openExes={openExes} selection={selection}
+        <Library db={db} disabledProfiles={disabledProfiles} openExes={openExes} selection={selection} itemDrag={itemDrag}
           query={query} collapsed={collapsed} width={libW}
           onQuery={setQuery} onToggleCollapse={toggleCollapse}
           onSelect={selectProfile} onToggleArmed={toggleArmed} onProfileContext={onProfileContext} onFolderContext={onFolderContext} onDb={handleDb} onModal={setModal} />
@@ -2109,7 +2253,7 @@ export default function App() {
             <div className="detail__scroll"><VariablesView db={db} onDb={handleDb} /></div>
           )}
           {selProfile && selFolder && (
-            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile} enabled={selProfile.armed && !disabledProfiles.has(selProfile.id)}
+            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile} itemDrag={itemDrag} enabled={selProfile.armed && profileFolderEnabled(selFolder, selProfile) && !disabledProfiles.has(selProfile.id)}
               showStates={statesFor === selProfile.id}
               onContext={e => onProfileContext(e, selFolder.id, selProfile)}
               onDb={handleDb} onModal={setModal} />
@@ -2136,8 +2280,17 @@ export default function App() {
       )}
       {modal?.type === "profileSettings" && (() => {
         const { gameId, profile, isNew } = modal;
-        return <ProfileSettingsModal initial={profile} isNew={isNew}
+        return <ProfileSettingsModal initial={profile} isNew={isNew} subfolders={db.scopes.find(folder => folder.id === gameId)?.subfolders}
           onSave={p => handleProfileSettingsSave(gameId, p, isNew)} onClose={() => setModal(null)} />;
+      })()}
+      {modal?.type === "subfolder" && (() => {
+        const owner = db.scopes.find(folder => folder.id === modal.gameId)!;
+        const folders = owner.subfolders ?? [];
+        return <SubfolderModal initial={modal.folder} onClose={() => setModal(null)}
+          onSave={async folder => { handleDb(await api.upsertGame({ ...owner, subfolders: folders.some(current => current.id === folder.id) ? folders.map(current => current.id === folder.id ? folder : current) : [folder, ...folders] })); }}
+          onDelete={folders.some(folder => folder.id === modal.folder.id) ? async () => {
+            handleDb(await api.upsertGame({ ...owner, subfolders: folders.filter(folder => folder.id !== modal.folder.id), profiles: owner.profiles.map(profile => profile.subfolder_id === modal.folder.id ? { ...profile, subfolder_id: null } : profile) }));
+          } : undefined} />;
       })()}
       {modal?.type === "editHotkey" && (() => {
         const { gameId, profileId: pid, index, hotkey, gameExe, states, overlays } = modal;

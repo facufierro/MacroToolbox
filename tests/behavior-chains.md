@@ -1,5 +1,16 @@
 # Triggered behavior chains
 
+**Wait for** has no settings or independent input value.
+Place one before Mouse press with **On release**: the physical mouse button's release
+must unblock the rest of the list without sending an extra click. Repeat with
+double click, a nested sequence, and Restart overlay. The next action retains all
+of its settings; reordering changes which action the wait owns. In a parallel
+list, the wait and its next action form one branch while other branches progress.
+A wait at the end of its own list must prevent saving. Focus loss or disabling
+the profile must cancel both the wait and its pending action.
+
+Existing saved input waits automatically convert to Wait for followed by a matching input action:
+
 After building and restarting, bind Q to:
 
 ```text
@@ -9,7 +20,7 @@ press(x);waitfor(LButton);press(y)
 Press and release Q: X should run once, and Y should wait for the next left click.
 The click should still reach the target app. If the button was already held when
 the wait began, release it and click again. Other keys or buttons must not advance
-the chain. Use the existing recorder on a **waitfor** step to select its trigger.
+the chain. Use the recorder on the following input action to select its trigger.
 
 Add multiple waitfor steps, including keyboard triggers and modifier combinations.
 Check that switching away from the profile's target app or disabling its profile

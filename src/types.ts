@@ -91,6 +91,7 @@ export interface Profile {
   kind: ProfileKind;
   armed: boolean;
   parent_id: string | null;
+  subfolder_id?: string | null;
   hotkeys: Hotkey[];
   events: BehaviorEvent[];
   /** Portable legacy definitions; normalized into Scope.states by the backend. */
@@ -123,6 +124,13 @@ export interface Script {
   path: string;
 }
 
+export interface Subfolder {
+  id: string;
+  name: string;
+  enabled: boolean;
+  toggle_key: string | null;
+}
+
 /** A folder owns the application target shared by its profiles. */
 export interface Scope {
   states: ProfileState[];
@@ -132,6 +140,7 @@ export interface Scope {
   exe: string;
   image: string | null;
   profiles: Profile[];
+  subfolders?: Subfolder[];
 }
 
 export interface Settings {

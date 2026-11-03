@@ -351,14 +351,16 @@ fn get_disabled_profiles(state: State<AppState>) -> Vec<String> {
 }
 
 fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) -> Result<(), String> {
+    config::normalize_behaviors(db)?;
     config::validate_variables(&db.variables)?;
     config::normalize_states(db);
     config::normalize_overlays(db);
     for game in &db.games {
+        game.validate_subfolders()?;
         for profile in game.profiles.iter().filter(|profile| profile.armed) {
             for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) {
                 let triggers = hotkey.trigger.resolve(&db.variables)?;
-                if triggers.is_empty() { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, None)?, true)?; }
+                if triggers.is_empty() { behavior::validate(&behavior::resolve_template(&hotkey.behavior, &db.variables)?, true)?; }
                 for trigger in triggers { behavior::validate(&behavior::resolve(&hotkey.behavior, &db.variables, Some(&trigger))?, true)?; }
             }
             for event in profile.events.iter().filter(|_| !profile.events_disabled) { behavior::validate(&behavior::resolve(&event.behavior, &db.variables, None)?, false)?; }
@@ -469,6 +471,26 @@ fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
     Ok(db)
 }
 
+#[tauri::command]
+fn move_hotkey(app: tauri::AppHandle, state: State<AppState>, source_game_id: String, source_profile_id: String, source_index: usize, hotkey: config::Hotkey, target_game_id: String, dependencies: Profile) -> Result<Database, String> {
+    let _access = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    db.move_hotkey(&source_game_id, &source_profile_id, source_index, &hotkey, &target_game_id, dependencies)?;
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
+#[tauri::command]
+fn move_overlay(app: tauri::AppHandle, state: State<AppState>, source_game_id: String, source_profile_id: String, selection: config::OverlaySelection, target_game_id: String, dependencies: Profile, target_group_id: Option<String>) -> Result<Database, String> {
+    let _access = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    db.move_overlay(&source_game_id, &source_profile_id, &selection, &target_game_id, dependencies, target_group_id.as_deref())?;
+    save_database(&app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
+    Ok(db)
+}
+
 /// Arm or disarm a profile. Arming makes its hotkeys/events/scripts live automatically whenever its
 /// folder's app is focused; multiple profiles can be armed at once.
 #[tauri::command]
@@ -507,6 +529,24 @@ fn publish_runtime(app: &tauri::AppHandle) {
     };
     if let Some(window) = app.get_webview_window("overlay") { let _ = window.emit("overlay-snapshot", snapshot); }
     if let Some(window) = app.get_webview_window("main") { let _ = window.emit("disabled-profiles", disabled); }
+}
+
+#[tauri::command]
+fn set_subfolder_enabled(app: tauri::AppHandle, game_id: String, subfolder_id: String, enabled: bool) -> Result<Database, String> {
+    update_subfolder_enabled(&app, &game_id, &subfolder_id, enabled)
+}
+
+fn update_subfolder_enabled(app: &tauri::AppHandle, game_id: &str, subfolder_id: &str, enabled: bool) -> Result<Database, String> {
+    let state = app.state::<AppState>();
+    let _access = state.db_access.lock().unwrap();
+    let mut db = config::load_db(&state.db_path)?;
+    let game = db.games.iter_mut().find(|game| game.id == game_id).ok_or("Folder not found.")?;
+    game.set_subfolder_enabled(subfolder_id, enabled)?;
+    save_database(app, &state, &mut db)?;
+    sync_hotkeys(&state, &db)?;
+    app.emit("database-changed", &db).map_err(|error| error.to_string())?;
+    publish_runtime(app);
+    Ok(db)
 }
 
 #[tauri::command]
@@ -737,9 +777,17 @@ fn sync_hotkeys(state: &AppState, db: &Database) -> Result<(), String> {
     {
         let runtime = state.runtime.lock().unwrap();
         for profile in &mut profiles {
-            profile["enabled"] = serde_json::json!(profile["armed"] == true && runtime.enabled(profile["id"].as_str().unwrap()));
+            let id = profile["id"].as_str().unwrap().to_string();
+            let owner = db.games.iter().find_map(|game| game.profiles.iter().find(|profile| profile.id == id).map(|profile| (game, profile))).ok_or("Profile not found.")?;
+            let folder_enabled = owner.0.profile_enabled(owner.1);
+            profile["enabled"] = serde_json::json!(profile["armed"] == true && folder_enabled && runtime.enabled(&id));
+            profile["folderEnabled"] = serde_json::json!(folder_enabled);
+            profile["folder"] = serde_json::json!(owner.0.id);
+            profile["subfolder"] = serde_json::json!(owner.1.subfolder_id);
         }
     }
+    let controls: Vec<_> = db.games.iter().flat_map(ahk::subfolder_controls).collect();
+    profiles.splice(0..0, controls);
     let profiles = serde_json::to_string(&profiles).map_err(|e| e.to_string())?;
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -883,6 +931,11 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
     let state = app.state::<AppState>();
     let profile = scope.profile.as_str();
     match kind {
+        "subfolder" => {
+            if value != "0" && value != "1" { return Err("Enabled must be 0 or 1.".into()); }
+            update_subfolder_enabled(app, profile, id, value == "1")?;
+            return Ok(());
+        }
         "enabled" => {
             if value != "0" && value != "1" { return Err("Enabled must be 0 or 1.".into()); }
             return set_runtime_profiles_enabled(app, &[profile.to_string()], value == "1");
@@ -919,11 +972,11 @@ fn run_script_for_profile(app: &tauri::AppHandle, source: &runtime::ExecutionSco
     let _access = state.db_access.lock().unwrap();
     let db = config::load_db(&state.db_path)?;
     if !source.script_owner.is_empty() && !source.is_active(&db) { return Ok(()); }
-    let game = db.games.iter().find(|game| game.profiles.iter().any(|profile| profile.id == profile_id && profile.armed)).ok_or("Profile is unavailable.")?;
+    let game = db.games.iter().find(|game| game.profiles.iter().any(|profile| profile.id == profile_id && profile.armed && game.profile_enabled(profile))).ok_or("Profile is unavailable.")?;
     if !state.runtime.lock().unwrap().enabled(profile_id) { return Err("Profile is disabled.".into()); }
     let caller_section = if matches!(caller_section, "hotkeys" | "events" | "scripts") { caller_section } else { "scripts" };
     if !game.profiles.iter().any(|profile| profile.id == profile_id && profile.section_enabled(caller_section)) { return Ok(()); }
-    let (owner, script) = game.profiles.iter().filter(|profile| profile.armed).find_map(|profile| profile.scripts.iter().find(|script| script.id == script_id && script.enabled).map(|script| (profile, script))).ok_or("Script is disabled or unavailable.")?;
+    let (owner, script) = game.profiles.iter().filter(|profile| profile.armed && game.profile_enabled(profile)).find_map(|profile| profile.scripts.iter().find(|script| script.id == script_id && script.enabled).map(|script| (profile, script))).ok_or("Script is disabled or unavailable.")?;
     if owner.scripts_disabled { return Ok(()); }
     if !state.runtime.lock().unwrap().enabled(&owner.id) { return Err("Script owner is disabled.".into()); }
     let scope = runtime::ExecutionScope { profile: profile_id.into(), section: caller_section.into(), script_owner: owner.id.clone() };
@@ -1743,7 +1796,7 @@ fn save_variables(app: tauri::AppHandle, state: State<AppState>, variables: Vec<
         for hotkey in &profile.hotkeys {
             let triggers = hotkey.trigger.resolve(&variables)?;
             if behavior::parse(&hotkey.behavior).is_ok() {
-                if triggers.is_empty() { behavior::resolve(&hotkey.behavior, &variables, None)?; }
+                if triggers.is_empty() { behavior::resolve_template(&hotkey.behavior, &variables)?; }
                 for trigger in triggers { behavior::resolve(&hotkey.behavior, &variables, Some(&trigger))?; }
             }
         }
@@ -2109,8 +2162,11 @@ pub fn run() {
             delete_game,
             reorder_folders,
             upsert_profile,
+            move_hotkey,
+            move_overlay,
             delete_profile,
             set_profile_armed,
+            set_subfolder_enabled,
             set_profile_part_enabled,
             get_ahk_status,
             save_settings,

@@ -113,11 +113,13 @@ class BindingHost {
     }
 
     ValidatePlan(steps) {
-        for node in steps {
+        for index, node in steps {
             kind := node["type"]
+            if kind = "waitfor" && !node.Has("key") && index = steps.Length
+                throw ValueError("Wait for requires a following action.")
             if kind = "parallel" || kind = "sequence"
                 this.ValidatePlan(node["steps"])
-            if kind = "press" || kind = "hold" || kind = "toggle" || kind = "repeat" || kind = "waitfor" {
+            if kind = "press" || kind = "hold" || kind = "toggle" || kind = "repeat" || (kind = "waitfor" && node.Has("key")) {
                 for key in HoldKeyList(RegExReplace(node["key"], "[,\s]+", " "))
                     if !GetKeyVK(key) && !GetKeySC(key)
                         throw ValueError("Unknown input key: " key)
@@ -128,7 +130,7 @@ class BindingHost {
     Matches(binding) {
         global enabled, behaviorRuntime
         profile := binding["profile"]
-        return profile["armed"] && (binding["toggle"] || enabled.Get(profile["id"], false))
+        return profile["armed"] && profile.Get("folderEnabled", true) && (binding["toggle"] || enabled.Get(profile["id"], false))
             && (profile["target"] = "*" || WinActive("ahk_exe " profile["target"]))
             && (binding["prerequisites"] = "" || TriggerChordHeld(binding["prerequisites"]))
             && (binding["toggle"] ? TriggerModifiersAllowed(binding["trigger"], true, behaviorRuntime.OwnedModifiers())
@@ -161,12 +163,30 @@ class BindingHost {
 
     ToggleProfiles(selected) {
         global enabled, behaviorRuntime
+        if selected.Has("subfolder") {
+            value := !selected["profile"]["subfolderEnabled"]
+            ; Release the group's input locally before persisting its switch state.
+            if !value
+                for profile in this.profiles
+                    if profile.Get("folder", "") = selected["folder"] && profile.Get("subfolder", "") = selected["subfolder"] {
+                        enabled[profile["id"]] := false
+                        behaviorRuntime.CancelProfile(profile["id"])
+                    }
+            try SendRuntimeAction(selected["folder"], "subfolder", selected["subfolder"], value ? "1" : "0")
+            catch Error as failure
+                ReportBehaviorError("", failure.Message)
+            finally {
+                this.source := ""
+                this.Reload()
+            }
+            return
+        }
         profiles := Map(selected["profile"]["id"], true)
         ; Equivalent shortcuts can have different native names (modifier order or
         ; generic/sided Ctrl). Match the held shortcut, not just its native key string.
         for key, bindings in this.bindings
             for binding in bindings
-                if binding["toggle"] && binding["chord"] = selected["chord"] && this.Matches(binding)
+                if binding["toggle"] && !binding.Has("subfolder") && binding["chord"] = selected["chord"] && this.Matches(binding)
                     profiles[binding["profile"]["id"]] := true
         value := true
         for id in profiles

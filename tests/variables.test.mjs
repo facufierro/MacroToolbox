@@ -2,11 +2,52 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { areStepsValid, describeBehavior, mapBehavior, mapStepValues, parseSteps, stepsToString } from "../src/behaviors.ts";
 import { isReference, resolveValue } from "../src/behaviorValues.ts";
-import { exportVariables, importVariables, profileVariableIds, readVariable } from "../src/variables.ts";
+import { duplicateVariable, exportVariables, importVariables, profileVariableIds, readVariable, validateVariableBehaviors } from "../src/variables.ts";
 
 const buff = { id: "buff", name: "buff timer", type: "number", value: 5000 };
 const pause = { id: "pause", name: "sleep timer", type: "number", value: 50 };
 const profile = (behavior, id = "profile") => ({ id, hotkeys: [{ behavior }], events: [] });
+
+test("duplicating every variable type creates a separate identity and preserves its value and references", () => {
+  const variables = [buff,
+    { id: "text", name: "Text", type: "text", value: "$buff; hello\nworld" },
+    { id: "keys", name: "Keys", type: "keys", value: "rctrl shift n" },
+    { id: "triggers", name: "Shortcuts", type: "triggers", value: ["lctrl 1", "lctrl 2"] },
+    { id: "behavior", name: "Cast", type: "behavior", value: stepsToString([
+      { type: "sequence", steps: [{ type: "sleep", ms: { variable: "buff" } },
+        { type: "press", key: { source: "trigger" }, onRelease: true },
+        { type: "behavior", variableId: "nested" },
+        { type: "securesend", credentialId: "b8483943-e86c-41aa-a593-7388833369cd" }] },
+    ]) },
+    { id: "nested", name: "Nested", type: "behavior", value: "send(hello)" },
+  ];
+  const before = structuredClone(variables);
+  const copies = variables.map(variable => duplicateVariable(variable, variables));
+  assert.equal(new Set([...variables, ...copies].map(variable => variable.id)).size, variables.length * 2);
+  for (const [index, copy] of copies.entries()) {
+    assert.deepEqual(readVariable(copy), copy);
+    assert.equal(copy.type, variables[index].type);
+    assert.deepEqual(copy.value, variables[index].value);
+    assert.equal(copy.name, `${variables[index].name} (copy)`);
+  }
+  assert.equal(validateVariableBehaviors([...variables, ...copies]), true);
+  copies[3].value[0] = "rctrl 3";
+  assert.deepEqual(variables, before);
+});
+
+test("repeated duplicates and copies of copies get unique case-insensitive names", () => {
+  const variables = [buff, { ...buff, id: "existing", name: " BUFF TIMER (COPY) " }];
+  const first = duplicateVariable(buff, variables);
+  variables.push(first);
+  const second = duplicateVariable(buff, variables);
+  variables.push(second);
+  const nested = duplicateVariable(first, variables);
+  assert.equal(first.name, "buff timer (copy) (2)");
+  assert.equal(second.name, "buff timer (copy) (3)");
+  assert.equal(nested.name, "buff timer (copy) (2) (copy)");
+  assert.equal(new Set([...variables, nested].map(variable => variable.id)).size, 5);
+  assert.equal(buff.name, "buff timer");
+});
 
 test("all numeric behavior parameters accept shared variables in nested groups", () => {
   const steps = [{ type: "parallel", steps: [
