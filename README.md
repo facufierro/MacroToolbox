@@ -6,6 +6,14 @@ Application-scoped hotkeys, app events, shared states, overlays, and Python/Auto
 
 Each profile has one editor for hotkeys, app events, overlay parts, and scripts. Existing profile categories remain readable as legacy metadata and do not restrict which parts a profile can contain.
 
+App folders can contain subfolders. Create one with New subfolder, set its toggle shortcut in Subfolder settings, and place profiles in it using the Subfolder selector in Profile settings. Its switch or shortcut enables or disables the contained profiles together while preserving their individual enabled settings. Shortcuts apply while the app folder's target is focused; Global shortcuts apply everywhere. Disabling a subfolder releases its running inputs, stops its scripts, and clears its owned overlay timers. Deleting a subfolder keeps its profiles in the app folder.
+
+Subfolders stay above profiles, with new subfolders added first. Drag their handles to reorder them. Drag a profile row or its handle onto a subfolder header to move it inside, or onto the app-folder header to move it back out. Profile moves stay within their app folder and work with empty or collapsed subfolders. The gear on each app folder opens its settings.
+
+Drag a hotkey behavior row or its handle onto a profile in the sidebar to move it there, including profiles in other app folders. Referenced scripts, states, and overlays remain available. The destination keeps its settings and existing hotkeys; a profile with the same assigned trigger cannot accept the move. Inherited behaviors must be moved from their owning profile.
+
+Drag an overlay card or its handle onto a sidebar profile to move the whole overlay and its parts. Individual parts can also move onto a profile, retaining their overlay settings, or directly onto another overlay card. Moves preserve part IDs, appearance, positions, timer links, and state definitions. Inherited overlays and parts must be moved from their owning profile.
+
 The plus button in the Overlays section creates a container for timer, icon, bar, and text parts. Add parts with the Timer, Icon, Bar, and Text buttons inside the overlay. Move existing transfers parts, Settings opens the form above the parts, and the overlay's plus button creates a hotkey that starts or restarts its parts. Arrangement choices use equal-width text buttons. Pick position, key recording, behavior choices, and file browsing have visible labels; familiar edit, copy, and delete controls use Font Awesome icons. Overlay visibility can follow a named timer directly; individual parts have the same timer visibility option.
 
 Every part belongs to an overlay. Existing standalone parts are wrapped in individual overlays while preserving their IDs, positions, and behavior references. Membership and part order remain stored on the profile's existing item list, using `overlay_groups` as the saved container definitions. Deleting an overlay deletes its owned parts after confirmation and removes references to deleted targets.
@@ -16,11 +24,11 @@ Managed scripts receive the calling profile and section as their API context. `M
 
 The bottom console opens for new errors from the app, overlay, cloud backup, and behavior runtime. It keeps the current session's messages with timestamps and repeated-error counts; Copy exports the messages and Clear empties them. Collapsing it does not stop logging. Missing overlay references remain visible in the behavior selector so they can be relinked to an existing part.
 
-Drag the dot handle to reorder folders, profiles, hotkeys, events, overlays and their parts, scripts, shared states, variables, and behavior steps. The insertion line marks the drop position; focused handles also accept Up and Down. Saved lists persist their order immediately. Behavior steps keep their draft order until the behavior is saved. Dragging stays within the same list, folder, or overlay. Inherited entries keep their source order; owned overrides fill their existing slots in the order saved by the current profile.
+Drag the dot handle to reorder folders, profiles, hotkeys, events, overlays and their parts, scripts, shared states, variables, and behavior steps. The insertion line marks the drop position; focused handles also accept Up and Down. Saved lists persist their order immediately. Behavior steps keep their draft order until the behavior is saved. Reordering stays within the same list, folder, or overlay. Inherited entries keep their source order; owned overrides fill their existing slots in the order saved by the current profile.
 
 ## Shared variables
 
-Variables are available to every profile. Number variables work in Sleep, Repeat timings, coordinates, resolution, and bar values. Text variables work in Type text. Keys variables work in key inputs, including Press, Hold, Repeat, Wait for input, and Mouse press.
+Variables are available to every profile. Number variables work in Sleep, Repeat timings, coordinates, resolution, and bar values. Text variables work in Type text. Keys variables work in key inputs, including Press, Hold, Repeat, and Mouse press.
 
 Trigger list variables contain separate shortcuts, such as `lctrl 1`, `lctrl 2`, and `lctrl 3`. Create the list in Variables or from a hotkey's Trigger source, then choose Variable for the trigger. Each shortcut runs the same saved behavior. Choose Matched trigger as the source for a Press step to replay the shortcut that activated it; other steps, such as Press `e`, stay shared. Trigger lists support recording, adding, deleting, and dragging individual entries. Matched trigger also works with a literal hotkey trigger and with On release, including nested steps; it requires a hotkey and cannot be used in app events or standalone script/API calls.
 
@@ -35,6 +43,8 @@ Secure send types a saved password when its hotkey runs. Add Secure send in the 
 - Target folders own application targets and shared state definitions. Profiles own their behaviors, overlay items, scripts, and running work.
 - `press` taps a key combination. `hold` and `repeat` last until trigger release. A sequence waits for each action; a parallel group advances independent branches and completes when every branch finishes.
 - Press and Mouse press offer On press and On release. On release waits for the activating hotkey key or chord to be released, then performs the tap or click. It keeps its place in a sequence and can wait independently in a parallel group. Release actions require a hotkey trigger and are unavailable for app events or standalone script/API behavior calls.
+- Wait for has no parameters and uses the following action in the same list. With Press or Mouse press, it observes that physical input without replaying it; On release waits for that input's release, and Double click waits for both clicks. Other actions retain their normal completion behavior. In a parallel group, the wait and its next action form one branch. A wait needs a following action in its own list. Saved input waits automatically become Wait for followed by the matching input action.
+- Start and Stop overlay can select several overlays or parts in one action. Start or Restart applies to every selected target before the next action continues.
 - Pressing a hotkey again after releasing it replaces that hotkey's pending activation, including click waits and delays. Its configured key presses or text are sent again; the cancelled activation releases its inputs and input observers. Holding the trigger does not restart the behavior.
 - A matched hotkey consumes its activating key's repeats and release until that key is released, even if its modifiers are released first or its behavior has already finished. A later plain press works normally.
 - Sending the trigger itself still produces a complete configured press. Its intercepted physical hold does not extend the output; independent physical keys and shared output owners remain held.
@@ -61,6 +71,12 @@ New edits serialize action trees as JSON inside the existing `behavior` field. E
 Variable references use `{ "variable": "id" }` in action parameters and hotkey triggers. Trigger lists store an array of shortcut strings; Press uses `{ "source": "trigger" }` for Matched trigger. Literal strings remain literal. The v7 schema reads existing number variables and numeric `$id` references automatically, and keeps `db.json.v6.bak` before upgrading v6 settings. New saves include each variable's Number, Text, Keys, or Trigger list type. Older application versions cannot read the v7 database.
 
 The v5 settings schema moves state definitions into folders and saves `db.json.v4.bak` before upgrading v4 settings. Existing folder definitions take precedence, followed by the first legacy definition for each state ID. Previous profile-local overrides become one shared definition. Older app versions cannot read the new schema.
+
+The v8 schema adds app-owned `subfolders` and profile `subfolder_id` membership. Startup backs up the original settings before upgrading, including skipped versions. Existing profiles stay in the app folder with their configuration and activation unchanged. Subfolder switch states and shortcuts persist across restarts.
+
+The v9 schema moves legacy Wait for input values into separate following Press or Mouse press actions, including nested behaviors and shared Behavior variables. Startup backs up the original settings and saves the upgraded setup atomically. Wait for itself stores no input value.
+
+The v10 schema stores Start and Stop overlay targets as lists. Existing single-overlay actions, including shared and nested behaviors, upgrade automatically with their selected target and Start/Restart mode preserved.
 
 ## Managed script API
 

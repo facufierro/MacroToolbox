@@ -329,6 +329,32 @@ pub struct ProfileContext<'a> {
     pub exe: &'a str,
 }
 
+fn runtime_binding(trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str) -> serde_json::Value {
+    let modifiers = trigger_modifier_symbols(trigger);
+    let base = trigger_to_key(trigger);
+    // Controls remain reachable while behaviors own extra modifiers.
+    let key = if toggle || allow_extra.unwrap_or(modifiers.is_empty()) || behavior::has_toggle(&steps) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
+    let chord = trigger_physical_chord_keys(trigger);
+    let prerequisites = trigger_chord_keys(trigger);
+    serde_json::json!({"key":key, "trigger":trigger, "modifiers":modifiers, "chord":chord.join(" "),
+        "prerequisites":prerequisites[..prerequisites.len().saturating_sub(1)].join(" "), "specificity":prerequisites.len().saturating_sub(1),
+        "exact":allow_extra == Some(false), "toggle":toggle, "steps":steps, "section":section})
+}
+
+// A subfolder's control stays available independently of its member profiles.
+pub fn subfolder_controls(game: &config::Game) -> Vec<serde_json::Value> {
+    if game.exe.trim().is_empty() { return Vec::new(); }
+    game.subfolders.iter().filter_map(|folder| {
+        let trigger = folder.toggle_key.as_deref().filter(|key| !key.trim().is_empty())?;
+        let mut binding = runtime_binding(trigger, Vec::new(), true, None, "");
+        binding["subfolder"] = serde_json::json!(folder.id);
+        binding["folder"] = serde_json::json!(game.id);
+        Some(serde_json::json!({"id":format!("subfolder:{}:{}", game.id, folder.id), "target":game.exe.trim(),
+            "armed":true,"overlay":false,"bindings":[binding],"events":{},"launchScripts":[],"sections":{},
+            "revision":format!("{}:{}:{}", game.exe, trigger, folder.enabled), "subfolderEnabled":folder.enabled}))
+    }).collect()
+}
+
 /// Serialize validated behavior data for the persistent input host.
 pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable]) -> Result<String, String> {
     use serde_json::json;
@@ -345,31 +371,19 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
             for trigger in hotkey.trigger.resolve(variables)? { hotkeys.push((hotkey, trigger)); }
         }
         hotkeys.sort_by_key(|(_, trigger)| std::cmp::Reverse(trigger_chord_keys(trigger).len()));
-        let binding = |trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str| {
-            let modifiers = trigger_modifier_symbols(trigger);
-            let base = trigger_to_key(trigger);
-            // Profile controls and toggle outputs must remain reachable while behaviors
-            // own extra modifiers; the shared hook distinguishes those from physical input.
-            let key = if toggle || allow_extra.unwrap_or(modifiers.is_empty()) || behavior::has_toggle(&steps) { format!("$*{}", base.trim_start_matches(&['$', '*'][..])) } else { base };
-            let chord = trigger_physical_chord_keys(trigger);
-            let prerequisites = trigger_chord_keys(trigger);
-            json!({"key":key, "trigger":trigger, "modifiers":modifiers, "chord":chord.join(" "),
-                "prerequisites":prerequisites[..prerequisites.len().saturating_sub(1)].join(" "), "specificity":prerequisites.len().saturating_sub(1),
-                "exact":allow_extra == Some(false), "toggle":toggle, "steps":steps, "section":section})
-        };
         for (hotkey, trigger) in hotkeys {
             let mut steps = behavior::resolve(&hotkey.behavior, variables, Some(&trigger))?;
             if profile.armed { behavior::validate(&steps, true).map_err(|error| format!("{} / {}: {error}", profile.name, trigger))?; }
             if let Some(state_id) = &hotkey.state_id { steps.push(behavior::Action::State { state_id: state_id.clone(), action: behavior::StateAction::Toggle }); }
             let extra_modifiers = hotkey.allow_extra_modifiers.or_else(|| matches!(&hotkey.trigger, crate::triggers::Trigger::Variable(_)).then_some(false));
-            bindings.push(binding(&trigger, steps, false, extra_modifiers, "hotkeys"));
+            bindings.push(runtime_binding(&trigger, steps, false, extra_modifiers, "hotkeys"));
         }
         for script in profile.scripts.iter().filter(|script| profile.armed && !profile.scripts_disabled && script.enabled && script.trigger == "hotkey" && !script.hotkey.trim().is_empty()) {
-            bindings.push(binding(&script.hotkey, vec![behavior::Action::Script { script_id: script.id.clone() }], false, None, "scripts"));
+            bindings.push(runtime_binding(&script.hotkey, vec![behavior::Action::Script { script_id: script.id.clone() }], false, None, "scripts"));
         }
         let mut toggles = HashSet::new();
         for trigger in [profile.toggle_hotkeys_key.as_deref(), profile.toggle_overlay_key.as_deref()].into_iter().flatten().filter(|trigger| profile.armed && !trigger.trim().is_empty()) {
-            if toggles.insert(trigger) { bindings.push(binding(trigger, Vec::new(), true, None, "")); }
+            if toggles.insert(trigger) { bindings.push(runtime_binding(trigger, Vec::new(), true, None, "")); }
         }
         let mut events = serde_json::Map::new();
         for event in config::resolve_profile_events(ap.siblings, profile).into_iter().filter(|_| profile.armed && !profile.events_disabled) {
@@ -903,7 +917,7 @@ BehaviorContextActive(configuredExe, enabledKey) {
 ; interrupting this thread can otherwise finish before KeyWait sees it. Raw input observes
 ; the same hardware without consuming it or replacing the shared AutoHotkey keyboard hook.
 class BehaviorInputWait {
-    __New(keyStr, configuredExe, enabledKey) {
+    __New(keyStr, configuredExe, enabledKey, onRelease := false, doubleClick := false) {
         if Trim(keyStr) = ""
             throw ValueError("waitfor requires a key or mouse button.")
         this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "[,\s]+", " "))
@@ -917,11 +931,19 @@ class BehaviorInputWait {
         this.error := 0
         this.configuredExe := configuredExe
         this.enabledKey := enabledKey
+        this.onRelease := onRelease
+        this.requiredClicks := doubleClick ? 2 : 1
+        this.presses := onRelease && !this.released && this.ModifiersHeld() ? 1 : 0
+        this.lastPress := A_TickCount
+        this.waitingRelease := this.presses > 0
     }
 
     Observe(down) {
         if !down {
             this.released := true
+            if this.onRelease && this.waitingRelease && this.presses >= this.requiredClicks && BehaviorContextActive(this.configuredExe, this.enabledKey)
+                this.completed := true
+            this.waitingRelease := false
             return
         }
         if !this.released || this.completed
@@ -929,12 +951,24 @@ class BehaviorInputWait {
         this.released := false
         if !BehaviorContextActive(this.configuredExe, this.enabledKey)
             return
+        if !this.ModifiersHeld()
+            return
+        if this.requiredClicks > 1 && A_TickCount - this.lastPress > DllCall("GetDoubleClickTime", "UInt")
+            this.presses := 0
+        this.lastPress := A_TickCount
+        this.presses++
+        this.waitingRelease := true
+        if !this.onRelease && this.presses >= this.requiredClicks
+            this.completed := true
+    }
+
+    ModifiersHeld() {
         for prerequisite in this.keys {
             mode := RegExMatch(prerequisite, "i)^(?:L|R)?(?:Ctrl|Shift|Alt|Win)$") ? "" : "P"
             if !GetKeyState(prerequisite, mode)
-                return
+                return false
         }
-        this.completed := true
+        return true
     }
 
     OnInput(wParam, lParam, msg, hwnd) {
@@ -1707,6 +1741,25 @@ mod tests {
         assert_eq!(control["key"], "$*<^<+SC029");
         assert_eq!(control["trigger"], "lctrl lshift `");
     }
+
+    #[test]
+    fn subfolder_controls_remain_available_with_no_enabled_members_and_use_the_shared_hook() {
+        let mut game: config::Game = serde_json::from_value(serde_json::json!({"id":"game","name":"Game","exe":"Game.exe",
+            "subfolders":[{"id":"combat","name":"Combat","enabled":false,"toggle_key":"rctrl shift n"}]})).unwrap();
+        let controls = subfolder_controls(&game);
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0]["armed"], true);
+        assert_eq!(controls[0]["subfolderEnabled"], false);
+        assert_eq!(controls[0]["target"], "Game.exe");
+        let binding = &controls[0]["bindings"][0];
+        assert_eq!(binding["subfolder"], "combat");
+        assert_eq!(binding["folder"], "game");
+        assert_eq!(binding["toggle"], true);
+        assert_eq!(binding["key"], "$*>^+n");
+        assert!(binding["steps"].as_array().unwrap().is_empty());
+        game.set_subfolder_enabled("combat", true).unwrap();
+        assert_ne!(subfolder_controls(&game)[0]["revision"], controls[0]["revision"]);
+    }
     #[test]
     fn changes_update_data_without_replacing_the_shared_hook_script() {
         let first = profile("press(x)"); let second = profile("press(y)");
@@ -1788,6 +1841,34 @@ mod tests {
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&context, &variables).unwrap()).unwrap();
         assert_eq!(data[0]["bindings"][0]["steps"][0]["key"], "v");
     }
+
+    #[test]
+    fn copied_trigger_dependent_hotkeys_stay_inactive_until_assigned_a_shortcut() {
+        let source = r#"[{"type":"press","key":{"source":"trigger"},"onRelease":true},{"type":"toggle","key":"w"}]"#;
+        let mut profile = profile(source);
+        let mut copy = profile.hotkeys[0].clone();
+        copy.trigger = "".into();
+        behavior::validate(&behavior::resolve_template(&copy.behavior, &[]).unwrap(), true).unwrap();
+        profile.hotkeys.push(copy);
+        // Reopening saved settings must preserve the unassigned copy without registering it.
+        let mut profile: Profile = serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
+        let data = |profile: &Profile| -> serde_json::Value {
+            let contexts = [ProfileContext { siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }];
+            serde_json::from_str(&runtime_config(&contexts, &[]).unwrap()).unwrap()
+        };
+        let before = data(&profile);
+        assert_eq!(before[0]["bindings"].as_array().unwrap().len(), 1);
+        assert_eq!(before[0]["bindings"][0]["trigger"], "rctrl o");
+        assert_eq!(profile.hotkeys[1].behavior, source);
+        profile.hotkeys[1].trigger = "rctrl p".into();
+        let after = data(&profile);
+        assert_eq!(after[0]["bindings"].as_array().unwrap().len(), 2);
+        let copy = after[0]["bindings"].as_array().unwrap().iter().find(|binding| binding["trigger"] == "rctrl p").unwrap();
+        assert_eq!(copy["steps"][0]["key"], "rctrl p");
+        assert_eq!(copy["steps"][0]["onRelease"], true);
+        assert_eq!(copy["steps"][1]["type"], "toggle");
+    }
+
     #[test]
     fn secure_send_bindings_contain_references_without_retrieving_passwords() {
         let source = r#"[{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]"#;

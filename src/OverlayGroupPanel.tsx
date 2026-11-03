@@ -1,6 +1,6 @@
 import { IconButton } from "./Icon";
 import { useErrorReporter } from "./AppConsole";
-import { useState, type ReactNode } from "react";
+import { useState, type DragEventHandler, type ReactNode } from "react";
 import { GotoInput } from "./BehaviorEditor";
 import { CompactNumber } from "./CompactNumber";
 import { EnableSwitch } from "./EnableSwitch";
@@ -9,13 +9,17 @@ import type { OverlayGroup, OverlayItem } from "./types";
 const PART_ICONS = { timer: "clock", icon: "image", bar: "chart-simple", text: "font" } as const;
 const PART_LABELS = { timer: "Timer", icon: "Icon", bar: "Bar", text: "Text" } as const;
 
-export function OverlayGroupPanel({ group, items, timers, gameExe, children, partsEditable = true, onSave, onEnabledChange, onDuplicate, onDelete, onAdd, onHotkey }: {
+export function OverlayGroupPanel({ group, items, timers, gameExe, children, partsEditable = true, dropActive, onDragOver, onDragLeave, onDrop, onSave, onEnabledChange, onDuplicate, onDelete, onAdd, onHotkey }: {
   group: OverlayGroup;
   items: OverlayItem[];
   timers: OverlayItem[];
   gameExe: string;
   children: ReactNode;
   partsEditable?: boolean;
+  dropActive?: boolean;
+  onDragOver?: DragEventHandler<HTMLFieldSetElement>;
+  onDragLeave?: DragEventHandler<HTMLFieldSetElement>;
+  onDrop?: DragEventHandler<HTMLFieldSetElement>;
   onSave: (group: OverlayGroup, members: string[]) => Promise<void>;
   onEnabledChange: (enabled: boolean) => Promise<void>;
   onDuplicate: () => Promise<void>;
@@ -53,7 +57,8 @@ export function OverlayGroupPanel({ group, items, timers, gameExe, children, par
     catch (error) { reportError(error); }
     finally { setSaving(false); }
   }
-  return <fieldset className={`overlay-group${group.disabled ? " overlay-group--disabled" : ""}`} aria-label={group.name || "Overlay"} disabled={saving}>
+  return <fieldset className={`overlay-group${group.disabled ? " overlay-group--disabled" : ""}`} aria-label={group.name || "Overlay"} disabled={saving}
+    data-item-drop={dropActive || undefined} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
     <div className="section-head overlay-group__head">
       <input className="overlay-group__name" aria-label="Overlay name" title="Overlay name" value={draft.name} onChange={event => change({ name: event.target.value })} />
       <div className="section-head__actions">

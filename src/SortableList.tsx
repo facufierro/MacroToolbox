@@ -1,26 +1,35 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import { useErrorReporter } from "./AppConsole";
 import { moveItem } from "./listOrder";
 
 const DRAG_TYPE = "application/x-macrotoolbox-sort";
 
-export function SortableList<T>({ items, itemKey, itemLabel, canMove = () => true, onReorder, children, empty, className = "steps-list" }: {
+export function SortableList<T>({ items, itemKey, itemLabel, canMove = () => true, onReorder, onItemDragStart, onItemDragEnd, dragFromContent = false, children, empty, className = "steps-list" }: {
   items: T[];
   itemKey: (item: T, index: number) => string;
   itemLabel: (item: T, index: number) => string;
   canMove?: (item: T) => boolean;
   onReorder: (from: string, to: string, after: boolean) => void | Promise<void>;
+  onItemDragStart?: (item: T) => void;
+  onItemDragEnd?: () => void;
+  dragFromContent?: boolean;
   children: (item: T, index: number) => ReactNode;
   empty?: ReactNode;
   className?: string;
 }) {
   const reportError = useErrorReporter();
   const source = useRef<string | null>(null);
+  const contentDragBlocked = useRef(false);
   const [dragging, setDragging] = useState<string | null>(null);
   const [target, setTarget] = useState<{ key: string; after: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
   const movable = items.map((item, index) => ({ item, key: itemKey(item, index) })).filter(({ item }) => canMove(item));
+  const dragAvailable = dragging === null || movable.some(entry => entry.key === dragging);
   function clearDrag() { source.current = null; setDragging(null); setTarget(null); }
+  useEffect(() => {
+    // Saving a transfer can disable or remove its source before the native dragend arrives.
+    if (!dragAvailable) { clearDrag(); onItemDragEnd?.(); }
+  }, [dragAvailable, onItemDragEnd]);
   async function reorder(from: string, to: string, after: boolean) {
     if (saving || moveItem(movable, entry => entry.key, from, to, after) === movable) return;
     setSaving(true);
@@ -31,8 +40,23 @@ export function SortableList<T>({ items, itemKey, itemLabel, canMove = () => tru
   return <div className={className} aria-busy={saving}>
     {items.map((item, index) => {
       const key = itemKey(item, index);
-      const enabled = canMove(item) && movable.length > 1;
+      const enabled = canMove(item) && (movable.length > 1 || !!onItemDragStart);
+      const beginDrag = (event: ReactDragEvent<HTMLElement>) => {
+        if ((event.target as Element).closest(".sortable-item") !== event.currentTarget.closest(".sortable-item")) return;
+        event.stopPropagation();
+        if (contentDragBlocked.current && !event.currentTarget.classList.contains("drag-handle")) { event.preventDefault(); return; }
+        source.current = key; setDragging(key);
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(DRAG_TYPE, key);
+        event.dataTransfer.setDragImage(event.currentTarget.closest(".sortable-item")!, 12, 12);
+        onItemDragStart?.(item);
+      };
+      const endDrag = (event: ReactDragEvent<HTMLElement>) => { event.stopPropagation(); clearDrag(); onItemDragEnd?.(); };
       return <div key={key} className={`sortable-item${dragging === key ? " sortable-item--dragging" : ""}`}
+        draggable={dragFromContent && enabled && !saving}
+        onPointerDownCapture={dragFromContent ? event => { contentDragBlocked.current = !!(event.target as Element).closest("input,textarea,select,[contenteditable=true],.scope-toggle,.step-row__btns,.section-head__actions"); } : undefined}
+        onDragStart={dragFromContent && enabled && !saving ? beginDrag : undefined}
+        onDragEnd={dragFromContent ? endDrag : undefined}
         data-drop={target?.key === key ? target.after ? "after" : "before" : undefined}
         onDragOver={event => {
           if (event.dataTransfer.types.includes(DRAG_TYPE)) event.preventDefault();
@@ -62,14 +86,8 @@ export function SortableList<T>({ items, itemKey, itemLabel, canMove = () => tru
         {enabled ? <button type="button" className="drag-handle" draggable={!saving} disabled={saving}
           aria-label={`Move ${itemLabel(item, index)}`}
           onClick={event => event.stopPropagation()}
-          onDragStart={event => {
-            event.stopPropagation();
-            source.current = key; setDragging(key);
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData(DRAG_TYPE, key);
-            event.dataTransfer.setDragImage(event.currentTarget.parentElement!, 12, 12);
-          }}
-          onDragEnd={event => { event.stopPropagation(); clearDrag(); }}
+          onDragStart={beginDrag}
+          onDragEnd={endDrag}
           onKeyDown={event => {
             if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
             event.preventDefault(); event.stopPropagation();

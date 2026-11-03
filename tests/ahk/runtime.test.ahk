@@ -7,6 +7,25 @@ global literalPackets := [], literalBuffer := 0, literalFailure := false, litera
 global suspendDuringText := false
 global literalOnPacket := 0
 global testOnProfilesEnabled := 0
+global testOnRuntimeAction := 0
+RunRuntimeTest("Wait for awaits its next mouse action including On release", TestNextWaitMouse.Bind(false))
+RunRuntimeTest("Wait for retains the next mouse action's double click", TestNextWaitMouse.Bind(true))
+RunRuntimeTest("Wait for observes the next mouse press without replaying it", TestNextWaitPress)
+RunRuntimeTest("Wait for can observe release of an already held mouse button", TestNextWaitHeldRelease)
+RunRuntimeTest("Wait for completes an overlay restart exactly once before continuing", TestNextWaitOverlay)
+RunRuntimeTest("Start overlay starts every selected target before continuing", TestOverlayBatch.Bind(false, false))
+RunRuntimeTest("Restart overlay restarts every selected target before continuing", TestOverlayBatch.Bind(false, true))
+RunRuntimeTest("Stop overlay stops every selected target before continuing", TestOverlayBatch.Bind(true, false))
+RunRuntimeTest("a failed overlay batch stops remaining targets and following actions", TestOverlayBatchFailure)
+RunRuntimeTest("cancelling an overlay batch stops its remaining targets", TestOverlayBatchCancel)
+RunRuntimeTest("Wait for awaits a following group without duplicating its actions", TestNextWaitGroup)
+RunRuntimeTest("Wait for owns its next branch without blocking parallel siblings", TestNextWaitParallel)
+RunRuntimeTest("focus loss cancels the next action pending inside Wait for", TestNextWaitCancel.Bind(false))
+RunRuntimeTest("profile disable cancels the next action pending inside Wait for", TestNextWaitCancel.Bind(true))
+RunRuntimeTest("missing next actions reject the whole plan before running any prefix", TestNextWaitInvalid)
+RunRuntimeTest("a failed awaited action stops the sequence and reports its error", TestNextWaitFailure)
+RunRuntimeTest("Wait for retains a following hold until its original trigger releases", TestNextWaitHold)
+RunRuntimeTest("Wait for can await an overlay action in a background event", TestNextWaitBackground)
 RunRuntimeTest("parallel branches make progress while a sibling holds", TestParallelHold)
 RunRuntimeTest("sequences wait for their previous action", TestStructuredSequence)
 RunRuntimeTest("focus loss cancels delays and releases owned keys", TestRuntimeFocusLoss)
@@ -55,6 +74,7 @@ RunRuntimeTest("live configuration preserves unrelated running behaviors", TestL
 RunRuntimeTest("disabling one section preserves the other sections", TestSectionCancellation)
 RunRuntimeTest("script work retains its calling section and defining owner", TestScriptSectionOwnership)
 RunRuntimeTest("a shared profile toggle disables and reenables every matching profile once per press", TestSharedProfileToggle)
+RunRuntimeTest("subfolder controls release their members and remain reachable while disabled", TestSubfolderToggle)
 RunRuntimeTest("shared toggles include equivalent modifier orders and generic Ctrl", TestEquivalentProfileToggles)
 RunRuntimeTest("shared toggles synchronize mixed states and skip inactive or disarmed profiles", TestScopedProfileToggle)
 RunRuntimeTest("a profile toggle takes priority over a behavior using the same shortcut", TestProfileTogglePriority)
@@ -134,8 +154,198 @@ RunRuntimeTest("runtime profile status survives reloads and resumes from the swi
 RunRuntimeTest("profile controls ignore macro-owned extra modifiers while preserving physical exactness", TestProfileToggleHeldModifiers)
 RunRuntimeTest("profile controls take priority across native wildcard and exact key variants", TestProfileToggleNativePriority)
 RunRuntimeTest("retriggering during window button release preserves the new output owner", TestMouseToggleRetrigger)
-FileAppend("All 128 structured runtime tests passed.`n", "*")
+FileAppend("All 146 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestNextWaitMouse(doubleClick) {
+    global testHeldKeys, testLogicalKeys, testWaitQueue
+    testHeldKeys := Map("q", true)
+    testLogicalKeys := Map("RCtrl", true, "Shift", true)
+    testWaitQueue := [InputBatch([])]
+    StartBehaviorRun("next-mouse", [Action("waitfor"), Action("mousepress", "key", "rctrl shift LButton", "onRelease", true, "doubleClick", doubleClick),
+        Action("send", "text", "done")], "", "Game.exe", "", "q")
+    Sleep 60
+    Assert(!testEvents.Length && !nativePosts.Length && testInputCallbacks.Count = 1, "Wait for did not observe the following mouse action")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    Sleep 10
+    Assert(!testEvents.Length, "original hotkey release satisfied the next mouse action")
+    loop doubleClick ? 2 : 1 {
+        DeliverNextWaitInput("LButton", true)
+        Assert(!testEvents.Length, "On release completed on button down")
+        DeliverNextWaitInput("LButton", false)
+    }
+    AwaitRuns()
+    Assert(!nativePosts.Length && !testClicks.Length, "Wait for replayed the physical click")
+    AssertKeys(["{text}done"])
+}
+
+DeliverNextWaitInput(key, down) {
+    global testRawPacket
+    testRawPacket := InputEvent(key, down)["raw"]
+    for callback in testInputCallbacks
+        callback.Call(0, 42, 0xFF, A_ScriptHwnd)
+    Sleep 10
+}
+
+TestNextWaitPress() {
+    global testWaitQueue
+    testWaitQueue := [InputBatch([InputEvent("LButton", true), InputEvent("LButton", false)])]
+    StartBehaviorRun("next-press", [Action("waitfor"), Action("mousepress", "key", "LButton"), Action("send", "text", "done")])
+    AwaitRuns()
+    AssertKeys(["{text}done"])
+    Assert(!nativePosts.Length && !testClicks.Length, "migrated wait sent an extra mouse click")
+}
+
+TestNextWaitHeldRelease() {
+    global testWaitQueue, testHeldKeys
+    testHeldKeys := Map("lbutton", true, "q", true)
+    testWaitQueue := [InputBatch([])]
+    StartBehaviorRun("next-held-release", [Action("waitfor"), Action("mousepress", "key", "LButton", "onRelease", true), Action("send", "text", "done")], "", "*", "", "q")
+    DeliverNextWaitInput("LButton", false)
+    AwaitRuns()
+    AssertKeys(["{text}done"])
+}
+
+TestNextWaitOverlay() {
+    global testOnRuntimeAction
+    testOnRuntimeAction := CheckNextOverlayAcknowledgement
+    StartBehaviorRun("next-overlay", [Action("waitfor"), Action("startoverlay", "itemIds", ["timer"], "restart", true), Action("send", "text", "done")])
+    AwaitRuns()
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].id = "timer" && runtimeActions[1].value = "restart", "Wait for changed or duplicated the next overlay operation")
+    AssertKeys(["{text}done"])
+}
+
+TestOverlayBatch(stop, restart) {
+    global testOnRuntimeAction, enabled
+    enabled["profile"] := true
+    testOnRuntimeAction := CheckOverlayBatchOrder
+    StartBehaviorRun("overlay-batch", [Action("waitfor"), stop
+        ? Action("stopoverlay", "itemIds", ["first", "second", "part"])
+        : Action("startoverlay", "itemIds", ["first", "second", "part"], "restart", restart), Action("send", "text", "done")], "", "*", "profile")
+    AwaitRuns()
+    Assert(runtimeActions.Length = 3, "overlay batch skipped or repeated a target")
+    expected := stop ? "stop" : restart ? "restart" : "start"
+    for index, id in ["first", "second", "part"]
+        Assert(runtimeActions[index].id = id && runtimeActions[index].value = expected && runtimeActions[index].profile = "profile", "overlay batch changed a selected target, mode, or owning profile")
+    AssertKeys(["{text}done"])
+}
+
+CheckOverlayBatchOrder(profile, kind, id, value) {
+    Assert(!testEvents.Length, "behavior continued before every selected overlay completed")
+}
+
+TestOverlayBatchFailure() {
+    global testOnRuntimeAction
+    testOnRuntimeAction := FailOverlayBatch
+    StartBehaviorRun("overlay-batch", [Action("startoverlay", "itemIds", ["first", "second", "must-not-run"]), Action("send", "text", "must not run")])
+    AwaitRuns()
+    Assert(!testEvents.Length && runtimeActions.Length = 2 && runtimeActions[1].id = "first" && runtimeActions[2].kind = "error", "failed overlay batch continued or lost its error")
+}
+
+FailOverlayBatch(profile, kind, id, value) {
+    if id = "second"
+        throw Error("simulated overlay batch failure")
+}
+
+TestOverlayBatchCancel() {
+    global testOnRuntimeAction
+    testOnRuntimeAction := CancelOverlayBatch
+    StartBehaviorRun("overlay-batch", [Action("stopoverlay", "itemIds", ["first", "must-not-run"]), Action("send", "text", "must not run")])
+    AwaitRuns()
+    Assert(!testEvents.Length && runtimeActions.Length = 1 && runtimeActions[1].id = "first", "cancelled overlay batch continued")
+}
+
+CancelOverlayBatch(profile, kind, id, value) {
+    behaviorRuntime.Cancel("overlay-batch")
+}
+
+CheckNextOverlayAcknowledgement(profile, kind, id, value) {
+    Assert(kind = "overlay" && id = "timer" && value = "restart", "Wait for replaced the next action")
+    Sleep 25
+    Assert(!testEvents.Length, "Wait for continued before the overlay operation returned")
+}
+
+TestNextWaitGroup() {
+    start := A_TickCount
+    StartBehaviorRun("next-group", [Action("waitfor"), Action("sequence", "steps", [Action("sleep", "ms", "50"),
+        Action("press", "key", "x")]), Action("send", "text", "done")])
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}", "{text}done"])
+    Assert(testEvents[1]["time"] - start >= 50, "awaited group skipped its delay")
+}
+
+TestNextWaitParallel() {
+    StartBehaviorRun("next-parallel", [Action("parallel", "steps", [Action("waitfor"), Action("sequence", "steps", [
+        Action("sleep", "ms", "50"), Action("send", "text", "ready")]), Action("send", "text", "independent")]), Action("send", "text", "complete")])
+    AwaitRuns()
+    AssertKeys(["{text}independent", "{text}ready", "{text}complete"])
+}
+
+TestNextWaitCancel(disable) {
+    global testHeldKeys, testFocusActive, enabled, testWaitQueue
+    enabled["profile"] := true
+    testHeldKeys := Map("q", true)
+    testWaitQueue := [InputBatch([])]
+    StartBehaviorRun("next-cancel", [Action("lock"), Action("waitfor"), Action("mousepress", "key", "LButton", "onRelease", true),
+        Action("send", "text", "must not run")], "", "Game.exe", "profile", "q")
+    if disable
+        enabled["profile"] := false
+    else
+        testFocusActive := false
+    AwaitRuns()
+    Assert(!testEvents.Length && !nativePosts.Length && !testInputCallbacks.Count, "cancelled wait delivered its pending action")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "cancelled wait left mouse input locked")
+}
+
+TestNextWaitInvalid() {
+    for steps in [[Action("send", "text", "prefix"), Action("waitfor")], [Action("send", "text", "prefix"),
+        Action("parallel", "steps", [Action("press", "key", "x"), Action("waitfor")])]] {
+        rejected := false
+        try StartBehaviorRun("next-invalid", steps)
+        catch ValueError
+            rejected := true
+        Assert(rejected && !testEvents.Length && !behaviorRuntime.runs.Count, "orphan wait executed part of its plan")
+        rejected := false
+        try BindingHost().ValidatePlan(steps)
+        catch ValueError
+            rejected := true
+        Assert(rejected, "input host accepted an orphan wait")
+    }
+}
+
+TestNextWaitFailure() {
+    global testOnRuntimeAction
+    testOnRuntimeAction := FailNextOverlayOperation
+    StartBehaviorRun("next-failure", [Action("waitfor"), Action("startoverlay", "itemIds", ["timer"], "restart", true), Action("send", "text", "must not run")])
+    AwaitRuns()
+    Assert(!testEvents.Length && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "awaited operation failure continued or lost its error")
+}
+
+FailNextOverlayOperation(profile, kind, id, value) {
+    if kind = "overlay"
+        throw Error("simulated awaited operation failure")
+}
+
+TestNextWaitHold() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true)
+    StartBehaviorRun("next-hold", [Action("waitfor"), Action("hold", "key", "rctrl x"), Action("send", "text", "done")], "", "*", "", "q")
+    Sleep 50
+    Assert(testEvents.Length = 2 && behaviorRuntime.runs.Count = 1, "Wait for did not retain the following hold")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    Assert(testEvents[testEvents.Length]["keys"] = "{text}done" && !heldOutputCounts.Count, "awaited hold did not release before continuing")
+}
+
+TestNextWaitBackground() {
+    global testFocusActive
+    testFocusActive := false
+    StartBehaviorRun("next-background", [Action("waitfor"), Action("startoverlay", "itemIds", ["timer"], "restart", true)], "", "Game.exe", "", "", true)
+    AwaitRuns()
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "overlay", "generic Wait for was incorrectly treated as an input action")
+}
 
 TestToggleOwnedModifiers(sided) {
     global testHeldKeys, testLogicalKeys, testOnSend, copilotCtrlHeld
@@ -993,7 +1203,7 @@ TestSecureSequence() {
 
 RunRuntimeTest(name, test) {
     global runtimeActions, nativePosts, testOnPost, testHotkeys, testHotCriterion, behaviorRuntime
-    global testInputSuspended, testOnProfilesEnabled
+    global testInputSuspended, testOnProfilesEnabled, testOnRuntimeAction
     runtimeActions := []
     nativePosts := []
     testOnPost := 0
@@ -1001,6 +1211,7 @@ RunRuntimeTest(name, test) {
     testHotCriterion := 0
     testInputSuspended := false
     testOnProfilesEnabled := 0
+    testOnRuntimeAction := 0
     RunTest(name, test)
     Assert(behaviorRuntime.runs.Count = 0, name " left a running behavior")
     behaviorRuntime.Stop()
@@ -1205,7 +1416,7 @@ TestStructuredSequence() {
 TestRetriggerWaitingChain(type) {
     global testHeldKeys, testWaitQueue, testInputCallbacks, testRawPacket
     prefix := type = "press" ? Action("press", "key", "e") : Action("send", "text", "e")
-    steps := [prefix, Action("waitfor", "key", "LButton"), Action("startoverlay", "itemId", "timer", "restart", true)]
+    steps := [prefix, Action("waitfor", "key", "LButton"), Action("startoverlay", "itemIds", ["timer"], "restart", true)]
     testHeldKeys := Map("e", true)
     testWaitQueue := [InputBatch([])]
     first := StartBehaviorRun("cast:e", steps, "", "Game.exe", "", "e")
@@ -1357,7 +1568,7 @@ TestRuntimeFailure() {
 TestRuntimeOperations() {
     global enabled
     enabled["profile"] := true
-    StartBehaviorRun("operations", [Action("state", "stateId", "buff", "action", "set"), Action("bar", "itemId", "health", "value", "42"), Action("stopoverlay", "itemId", "timer")], "", "*", "profile")
+    StartBehaviorRun("operations", [Action("state", "stateId", "buff", "action", "set"), Action("bar", "itemId", "health", "value", "42"), Action("stopoverlay", "itemIds", ["timer"])], "", "*", "profile")
     AwaitRuns()
     Assert(runtimeActions.Length = 3, "runtime operations were skipped")
     Assert(runtimeActions[1].profile = "profile" && runtimeActions[1].value = "set", "state operation lost its owner")
@@ -1830,6 +2041,74 @@ PressProfileToggle(host, key := "$<^<+SC029") {
     DispatchTestHotkey("$*SC029 up")
 }
 
+class SubfolderTestHost extends BindingHost {
+    Reload(*) {
+        this.reloads += 1
+        if this.HasOwnProp("restore")
+            this.Apply(this.restore)
+    }
+}
+
+TestSubfolderToggle() {
+    global enabled, testHeldKeys, testSubfolderFailure
+    testSubfolderFailure := false
+    control := ToggleTestProfile("subfolder-control")
+    control["subfolderEnabled"] := true
+    binding := control["bindings"][1]
+    binding["subfolder"] := "combat"
+    binding["folder"] := "game"
+    main := ToggleTestProfile("main")
+    paused := ToggleTestProfile("paused")
+    other := ToggleTestProfile("other", "rctrl", "$>^SC029")
+    for profile in [main, paused] {
+        profile["folder"] := "game"
+        profile["subfolder"] := "combat"
+        profile["folderEnabled"] := true
+    }
+    other["folder"] := "game"
+    other["subfolder"] := "other"
+    host := SubfolderTestHost()
+    host.reloads := 0
+    profiles := [control, main, paused, other]
+    host.Apply(profiles)
+    enabled["paused"] := false
+    testHeldKeys := Map("LCtrl", true, "LShift", true, "SC029", true, "q", true)
+    StartBehaviorRun("main:hold", [Action("hold", "key", "x")], "", "*", "main", "q")
+    StartBehaviorRun("other:hold", [Action("hold", "key", "y")], "", "*", "other", "q")
+    DispatchTestHotkey("$<^<+SC029")
+    DispatchTestHotkey("$<^<+SC029")
+    Assert(!enabled["main"] && !enabled["paused"] && enabled["other"], "subfolder changed another group's activation")
+    Assert(!heldOutputCounts.Has("x") && heldOutputCounts.Has("y"), "subfolder cancellation released the wrong input owner")
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "subfolder" && runtimeActions[1].profile = "game" && runtimeActions[1].id = "combat" && runtimeActions[1].value = "0", "subfolder toggle did not persist one group transition")
+    Assert(host.reloads = 1, "held shortcut repeated the subfolder transition")
+    testHeldKeys["SC029"] := false
+    DispatchTestHotkey("$*SC029 up")
+    control["subfolderEnabled"] := false
+    for profile in [main, paused] {
+        profile["folderEnabled"] := false
+        profile["enabled"] := false
+    }
+    host.Apply(profiles)
+    Assert(!host.Matches(main["bindings"][1]), "a profile shortcut bypassed its disabled subfolder")
+    PressProfileToggle(host)
+    Assert(runtimeActions.Length = 2 && runtimeActions[2].value = "1", "disabled subfolder could not be reenabled")
+    Assert(!enabled["main"] && !enabled["paused"], "reenabling started members before the persisted configuration arrived")
+    control["subfolderEnabled"] := true
+    main["folderEnabled"] := true
+    paused["folderEnabled"] := true
+    main["enabled"] := true
+    host.Apply(profiles)
+    Assert(enabled["main"] && !enabled["paused"] && enabled["other"], "reenabling lost independent profile choices")
+    Assert(!heldOutputCounts.Has("x") && heldOutputCounts.Has("y"), "reenabling restarted canceled work")
+    host.restore := profiles
+    testSubfolderFailure := true
+    try host.ToggleProfiles(binding)
+    finally testSubfolderFailure := false
+    Assert(host.reloads = 3 && enabled["main"] && !enabled["paused"], "failed switch did not reload the persisted activation state")
+    Assert(runtimeActions[runtimeActions.Length].kind = "error", "failed subfolder save was not reported")
+    behaviorRuntime.CancelProfile("other")
+}
+
 TestSharedProfileToggle() {
     global enabled, testHeldKeys
     profiles := [ToggleTestProfile("main"), ToggleTestProfile("buffs"), ToggleTestProfile("spells")]
@@ -1939,7 +2218,7 @@ TriggerTestHost(plain := false, chord := "SC013", steps := 0) {
     if !IsObject(steps)
         steps := [Action("press", "key", "NumpadEnter"), Action("send", "text", "!trade rep"),
             Action("press", "key", "NumpadEnter"), Action("press", "key", "Tab"),
-            Action("startoverlay", "itemId", "rep", "restart", true)]
+            Action("startoverlay", "itemIds", ["rep"], "restart", true)]
     binding := Map("key", "$<!SC013", "trigger", chord = "SC013" ? "lalt r" : "lalt q r", "modifiers", "!", "chord", chord,
         "prerequisites", chord = "SC013" ? "" : "q", "specificity", chord = "SC013" ? 0 : 1, "exact", true,
         "toggle", false, "section", "hotkeys", "steps", steps)
@@ -1967,7 +2246,7 @@ SelfTriggerTestHost(steps, wildcard := false) {
 TestConsumedSelfPress(quick) {
     global testHeldKeys, testWaitQueue, testRawPacket
     host := SelfTriggerTestHost([Action("press", "key", "e", "duration", "80"), Action("waitfor", "key", "LButton"),
-        Action("startoverlay", "itemId", "timer", "restart", true)])
+        Action("startoverlay", "itemIds", ["timer"], "restart", true)])
     loop 2 {
         testHeldKeys := Map("e", true, "SC012", true)
         testWaitQueue := [InputBatch([])]
@@ -2162,6 +2441,11 @@ DispatchTestHotkey(key) {
 }
 
 TestRuntimeAction(profile, kind, id, value := "") {
+    global testSubfolderFailure
+    if kind = "subfolder" && IsSet(testSubfolderFailure) && testSubfolderFailure
+        throw Error("simulated subfolder save failure")
+    if IsObject(testOnRuntimeAction)
+        testOnRuntimeAction.Call(profile, kind, id, value)
     runtimeActions.Push({profile: profile, kind: kind, id: id, value: value})
 }
 

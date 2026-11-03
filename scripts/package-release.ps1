@@ -18,16 +18,18 @@ $tauriConfig = Get-Content $tauriConfigPath -Raw | ConvertFrom-Json
 $gitTag = if ($Version) { $Version.Trim() } else { $env:HKM_RELEASE_VERSION }
 if (-not $gitTag) {
     # Pick the target version from changelog/vX.Y.Z.md. Prefer the highest changelog that
-    # has NOT been released yet (no git tag, no releases/ dir) so a minor/major bump there
+    # has NOT been released yet (no git tag or committed release archive). Local rebuilds
+    # stay on that development version. A minor/major bump in the changelog
     # is honored. If every changelog is already released, fall back to the highest existing
     # one and rebuild it, so pressing Build always produces a build instead of failing.
     $releasedTags = @(& git tag 2>$null | ForEach-Object { $_.Trim() })
+    $releasedArchives = @(& git ls-tree --name-only HEAD:releases 2>$null | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' })
     $changelogs = @(
         Get-ChildItem -Path (Join-Path $repoRoot "changelog") -Filter "v*.md" -File -ErrorAction SilentlyContinue |
         ForEach-Object {
             if ($_.BaseName -match '^v(\d+)\.(\d+)\.(\d+)$') {
                 $tag = "v$($matches[1]).$($matches[2]).$($matches[3])"
-                $isReleased = ($releasedTags -contains $tag) -or (Test-Path (Join-Path $repoRoot "releases\$tag"))
+                $isReleased = ($releasedTags -contains $tag) -or ($releasedArchives -contains $tag)
                 [pscustomobject]@{
                     Tag        = $tag
                     Version    = [version]"$($matches[1]).$($matches[2]).$($matches[3])"
