@@ -917,7 +917,7 @@ BehaviorContextActive(configuredExe, enabledKey) {
 ; interrupting this thread can otherwise finish before KeyWait sees it. Raw input observes
 ; the same hardware without consuming it or replacing the shared AutoHotkey keyboard hook.
 class BehaviorInputWait {
-    __New(keyStr, configuredExe, enabledKey, onRelease := false, doubleClick := false) {
+    __New(keyStr, configuredExe, enabledKey, onRelease := false, doubleClick := false, previousInput := 0) {
         if Trim(keyStr) = ""
             throw ValueError("waitfor requires a key or mouse button.")
         this.keys := HoldKeyList(RegExReplace(Trim(keyStr), "[,\s]+", " "))
@@ -933,7 +933,10 @@ class BehaviorInputWait {
         this.enabledKey := enabledKey
         this.onRelease := onRelease
         this.requiredClicks := doubleClick ? 2 : 1
-        this.presses := onRelease && !this.released && this.ModifiersHeld() ? 1 : 0
+        ; A release wait can observe an already-held input, unless the preceding
+        ; wait has consumed that press. Consecutive waits need distinct presses.
+        consumedPress := IsObject(previousInput) && previousInput.vk = this.vk && previousInput.sc = this.sc
+        this.presses := onRelease && !consumedPress && !this.released && this.ModifiersHeld() ? 1 : 0
         this.lastPress := A_TickCount
         this.waitingRelease := this.presses > 0
     }
