@@ -154,7 +154,7 @@ class BehaviorExecutor {
         }
     }
 
-    Advance(task, execution, now) {
+    Advance(task, execution, now, previousInput := 0) {
         if task.done || execution.cancelled
             return
         node := task.node
@@ -170,7 +170,7 @@ class BehaviorExecutor {
         if kind = "sequence" {
             while task.index <= task.children.Length {
                 child := task.children[task.index]
-                this.Advance(child, execution, now)
+                this.Advance(child, execution, now, task.index > 1 ? task.children[task.index - 1].input : previousInput)
                 if execution.cancelled || !child.done
                     return
                 task.index++
@@ -178,7 +178,7 @@ class BehaviorExecutor {
         } else if kind = "parallel" {
             complete := true
             for child in task.children {
-                this.Advance(child, execution, now)
+                this.Advance(child, execution, now, previousInput)
                 if execution.cancelled
                     return
                 complete := complete && child.done
@@ -230,7 +230,7 @@ class BehaviorExecutor {
             condition := !node.Has("key") ? task.children[1].node : node
             inputCondition := node.Has("key") || condition["type"] = "press" || condition["type"] = "mousepress"
             if !inputCondition {
-                this.Advance(task.children[1], execution, now)
+                this.Advance(task.children[1], execution, now, previousInput)
                 if !task.children[1].done
                     return
             } else {
@@ -238,7 +238,7 @@ class BehaviorExecutor {
                     throw TargetError("Input behavior requires the target app to be focused.")
                 if first {
                     task.input := BehaviorInputWait(condition["key"], execution.target, execution.profile,
-                        condition.Get("onRelease", false), condition.Get("doubleClick", false))
+                        condition.Get("onRelease", false), condition.Get("doubleClick", false), previousInput)
                     task.callback := task.input.OnInput.Bind(task.input)
                     StartBehaviorInput(task.callback)
                 }
