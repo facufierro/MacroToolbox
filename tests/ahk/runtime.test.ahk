@@ -12,6 +12,11 @@ RunRuntimeTest("Wait for awaits its next mouse action including On release", Tes
 RunRuntimeTest("Wait for retains the next mouse action's double click", TestNextWaitMouse.Bind(true))
 RunRuntimeTest("Wait for observes the next mouse press without replaying it", TestNextWaitPress)
 RunRuntimeTest("Wait for can observe release of an already held mouse button", TestNextWaitHeldRelease)
+RunRuntimeTest("consecutive waits require a new click before awaiting its release", TestConsecutiveWaitRelease.Bind("LButton", false, false))
+RunRuntimeTest("consecutive keyboard waits require a new press before awaiting its release", TestConsecutiveWaitRelease.Bind("x", false, false))
+RunRuntimeTest("a consecutive double-click wait requires two fresh clicks", TestConsecutiveWaitRelease.Bind("LButton", true, false))
+RunRuntimeTest("a following nested sequence cannot reuse the previous wait's press", TestConsecutiveWaitRelease.Bind("LButton", false, true))
+RunRuntimeTest("consecutive waits preserve releases of a different held input", TestConsecutiveWaitDifferentInput)
 RunRuntimeTest("Wait for completes an overlay restart exactly once before continuing", TestNextWaitOverlay)
 RunRuntimeTest("Start overlay starts every selected target before continuing", TestOverlayBatch.Bind(false, false))
 RunRuntimeTest("Restart overlay restarts every selected target before continuing", TestOverlayBatch.Bind(false, true))
@@ -154,7 +159,7 @@ RunRuntimeTest("runtime profile status survives reloads and resumes from the swi
 RunRuntimeTest("profile controls ignore macro-owned extra modifiers while preserving physical exactness", TestProfileToggleHeldModifiers)
 RunRuntimeTest("profile controls take priority across native wildcard and exact key variants", TestProfileToggleNativePriority)
 RunRuntimeTest("retriggering during window button release preserves the new output owner", TestMouseToggleRetrigger)
-FileAppend("All 146 structured runtime tests passed.`n", "*")
+FileAppend("All 151 structured runtime tests passed.`n", "*")
 ExitApp 0
 
 TestNextWaitMouse(doubleClick) {
@@ -205,6 +210,63 @@ TestNextWaitHeldRelease() {
     DeliverNextWaitInput("LButton", false)
     AwaitRuns()
     AssertKeys(["{text}done"])
+}
+
+TestConsecutiveWaitRelease(key, doubleClick, grouped) {
+    global testWaitQueue, testHeldKeys
+    testHeldKeys := Map("q", true)
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    kind := key = "LButton" ? "mousepress" : "press"
+    steps := [Action("send", "text", "prefix"), Action("waitfor"), Action(kind, "key", key)]
+    releaseAction := Action(kind, "key", key, "onRelease", true)
+    if kind = "mousepress"
+        releaseAction["doubleClick"] := doubleClick
+    following := [Action("waitfor"), releaseAction,
+        Action("press", "key", "f1"), Action("press", "key", "v")]
+    if grouped
+        steps.Push(Action("sequence", "steps", following))
+    else
+        steps.Push(following*)
+    StartBehaviorRun("spellbook", steps, "", "Game.exe", "", "q")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    testHeldKeys[StrLower(key)] := true
+    DeliverNextWaitInput(key, true)
+    Assert(testEvents.Length = 1 && testInputCallbacks.Count = 1 && !testWaitQueue.Length, "second wait did not start after the first press")
+    DeliverNextWaitInput(key, true)
+    testHeldKeys[StrLower(key)] := false
+    DeliverNextWaitInput(key, false)
+    Sleep 50
+    Assert(testEvents.Length = 1 && behaviorRuntime.runs.Count = 1 && testInputCallbacks.Count = 1, "the first click also completed the second wait")
+    loop doubleClick ? 2 : 1 {
+        testHeldKeys[StrLower(key)] := true
+        DeliverNextWaitInput(key, true)
+        Assert(testEvents.Length = 1, "second wait completed before the fresh input released")
+        testHeldKeys[StrLower(key)] := false
+        DeliverNextWaitInput(key, false)
+        if doubleClick && A_Index = 1
+            Assert(testEvents.Length = 1, "double-click wait completed after only one fresh click")
+    }
+    AwaitRuns()
+    AssertKeys(["{text}prefix", "{blind}{f1 downr}", "{blind}{f1 up}", "{blind}{v downr}", "{blind}{v up}"])
+    Assert(!nativePosts.Length && !testClicks.Length && !testInputCallbacks.Count, "consecutive waits replayed a click or retained an observer")
+}
+
+TestConsecutiveWaitDifferentInput() {
+    global testWaitQueue, testHeldKeys
+    testHeldKeys := Map("q", true, "lbutton", true)
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    StartBehaviorRun("different-input", [Action("waitfor"), Action("press", "key", "x"),
+        Action("waitfor"), Action("mousepress", "key", "LButton", "onRelease", true),
+        Action("send", "text", "done")], "", "*", "", "q")
+    DeliverNextWaitInput("x", true)
+    Assert(!testEvents.Length && testInputCallbacks.Count = 1 && !testWaitQueue.Length, "second wait did not start independently")
+    testHeldKeys["lbutton"] := false
+    DeliverNextWaitInput("LButton", false)
+    AwaitRuns()
+    AssertKeys(["{text}done"])
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
 }
 
 TestNextWaitOverlay() {

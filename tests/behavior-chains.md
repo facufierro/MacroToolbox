@@ -23,6 +23,9 @@ the wait began, release it and click again. Other keys or buttons must not advan
 the chain. Use the recorder on the following input action to select its trigger.
 
 Add multiple waitfor steps, including keyboard triggers and modifier combinations.
+For Spellbook, put Wait for before a left Mouse press, then another Wait for
+before a left Mouse press with On release. The first click must finish only the
+first wait; the following actions must wait until a second click is released.
 Check that switching away from the profile's target app or disabling its profile
 while waiting cancels the remaining actions. A Global profile may continue across
 apps. Other hotkeys must remain usable while a chain is waiting.
