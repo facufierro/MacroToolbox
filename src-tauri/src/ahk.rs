@@ -376,7 +376,10 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
             if profile.armed { behavior::validate(&steps, true).map_err(|error| format!("{} / {}: {error}", profile.name, trigger))?; }
             if let Some(state_id) = &hotkey.state_id { steps.push(behavior::Action::State { state_id: state_id.clone(), action: behavior::StateAction::Toggle }); }
             let extra_modifiers = hotkey.allow_extra_modifiers.or_else(|| matches!(&hotkey.trigger, crate::triggers::Trigger::Variable(_)).then_some(false));
-            bindings.push(runtime_binding(&trigger, steps, false, extra_modifiers, "hotkeys"));
+            let mut binding = runtime_binding(&trigger, steps, false, extra_modifiers, "hotkeys");
+            binding["cancelTriggers"] = json!(hotkey.cancel_triggers);
+            binding["cancelOnOtherBehavior"] = json!(hotkey.cancel_on_other_behavior);
+            bindings.push(binding);
         }
         for script in profile.scripts.iter().filter(|script| profile.armed && !profile.scripts_disabled && script.enabled && script.trigger == "hotkey" && !script.hotkey.trim().is_empty()) {
             bindings.push(runtime_binding(&script.hotkey, vec![behavior::Action::Script { script_id: script.id.clone() }], false, None, "scripts"));
@@ -1718,6 +1721,34 @@ mod tests {
         assert_eq!(binding["modifiers"], "^");
         assert_eq!(binding["trigger"], "rctrl o");
         assert_eq!(config[0]["target"], "Game.exe");
+    }
+    #[test]
+    fn cancel_triggers_belong_to_each_hotkey_binding_and_leave_actions_unchanged() {
+        let mut profile = profile("waitfor(LButton);send(done)");
+        profile.hotkeys[0].cancel_triggers = vec!["RButton".into(), "Esc".into()];
+        profile.hotkeys[0].cancel_on_other_behavior = true;
+        profile.hotkeys[0].trigger = serde_json::from_value(serde_json::json!({"variable":"shortcuts"})).unwrap();
+        let variables = [serde_json::from_value(serde_json::json!({"id":"shortcuts","name":"Shortcuts","type":"triggers","value":["e","rctrl e"]})).unwrap()];
+        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        let expected = serde_json::to_value(behavior::parse(&profile.hotkeys[0].behavior).unwrap()).unwrap();
+        for binding in data[0]["bindings"].as_array().unwrap() {
+            assert_eq!(binding["cancelTriggers"], serde_json::json!(["RButton", "Esc"]));
+            assert_eq!(binding["cancelOnOtherBehavior"], true);
+            assert_eq!(binding["steps"], expected);
+        }
+        let cancelled_revision = data[0]["sectionRevisions"]["hotkeys"].clone();
+        profile.hotkeys[0].cancel_triggers.clear();
+        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        assert_eq!(data[0]["bindings"][0]["cancelTriggers"], serde_json::json!([]));
+        assert_ne!(data[0]["sectionRevisions"]["hotkeys"], cancelled_revision);
+        let enabled_revision = data[0]["sectionRevisions"]["hotkeys"].clone();
+        profile.hotkeys[0].cancel_on_other_behavior = false;
+        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
+        assert_eq!(data[0]["bindings"][0]["cancelOnOtherBehavior"], false);
+        assert_ne!(data[0]["sectionRevisions"]["hotkeys"], enabled_revision);
     }
     #[test]
     fn toggle_bindings_reach_the_shared_hook_with_exact_modifier_matching_preserved() {
