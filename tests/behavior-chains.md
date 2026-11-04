@@ -1,5 +1,19 @@
 # Triggered behavior chains
 
+Set a hotkey's Trigger to E and add `RButton` and `Esc` to Cancel triggers.
+Start a list with a pending left-click wait or Sleep, then right-click: its
+remaining actions must stop and its held inputs and cursor locks must release.
+The right-click must still reach the target application. Repeat using Escape:
+either key must cancel independently. Repeat with simultaneous
+branches, release E before cancelling, and start E again after cancellation.
+Removing every cancel trigger must restore the existing behavior. Reopen the editor
+and verify that the cancel list persists without adding any behavior steps.
+
+Enable **Another behavior starts** under **Cancel on** for E, then start a different
+behavior while E is waiting or holding input. E must stop and release its resources
+before the new list sends input. Repeat across profiles and with the option off;
+the default remains concurrent. Steps nested within E must not cancel E.
+
 **Wait for** has no settings or independent input value.
 Place one before Mouse press with **On release**: the physical mouse button's release
 must unblock the rest of the list without sending an extra click. Repeat with

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v10 stores Start/Stop overlay selections as target lists.
-pub const CURRENT_DB_VERSION: u32 = 10;
+/// older files. v13 adds opt-in cancellation when another behavior starts.
+pub const CURRENT_DB_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -512,6 +512,10 @@ pub struct Hotkey {
     #[serde(default)]
     pub name: String,
     pub trigger: crate::triggers::Trigger,
+    #[serde(default, alias = "cancel_trigger", deserialize_with = "deserialize_cancel_triggers")]
+    pub cancel_triggers: Vec<String>,
+    #[serde(default)]
+    pub cancel_on_other_behavior: bool,
     pub behavior: String,
     /// Missing values preserve legacy matching for literal triggers: unmodified keys accept
     /// held modifiers. Trigger lists require the configured modifier combination exactly.
@@ -525,6 +529,19 @@ pub struct Hotkey {
 pub struct BehaviorEvent {
     pub event: String,
     pub behavior: String,
+}
+
+fn deserialize_cancel_triggers<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedTriggers { Single(String), List(Vec<String>) }
+    let entries = match SavedTriggers::deserialize(deserializer)? {
+        SavedTriggers::Single(value) if value.trim().is_empty() => Vec::new(),
+        SavedTriggers::Single(value) => vec![value],
+        SavedTriggers::List(entries) => entries,
+    };
+    if entries.is_empty() { return Ok(entries); }
+    crate::variables::read_trigger_list(&entries).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -610,7 +627,7 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         }
         // These versions share the folder-owned profile shape. Defaults, typed
         // variable deserialization, and normalization below upgrade their fields.
-        3..=9 => {
+        3..=12 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             db.version = CURRENT_DB_VERSION;
             (db, true)
@@ -1628,9 +1645,14 @@ mod tests {
             assert!(profile.armed);
             assert_eq!(profile.id, "keys");
             assert_eq!(profile.hotkeys[0].behavior, "send(ø)");
+            assert!(profile.hotkeys[0].cancel_triggers.is_empty());
+            assert!(!profile.hotkeys[0].cancel_on_other_behavior);
             assert_eq!(migrated.settings.ahk_exe, "AutoHotkey64.exe");
             assert!(migrated.settings.close_to_tray);
             let saved = std::fs::read(&path).unwrap();
+            let persisted: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+            assert_eq!(persisted["scopes"][0]["profiles"][0]["hotkeys"][0]["cancel_triggers"], serde_json::json!([]));
+            assert_eq!(persisted["scopes"][0]["profiles"][0]["hotkeys"][0]["cancel_on_other_behavior"], false);
             let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
             load_db(&path).unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), saved);
@@ -1831,6 +1853,101 @@ mod tests {
             assert_eq!(saved["allow_extra_modifiers"], serde_json::json!(allow));
             let copied: Hotkey = serde_json::from_value(saved).unwrap();
             assert_eq!(copied.allow_extra_modifiers, Some(allow));
+        }
+    }
+
+    #[test]
+    fn cancel_triggers_round_trip_and_a_failed_startup_upgrade_preserves_settings() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-cancel-trigger-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":10,"settings":{"ahk_exe":"ahk.exe"},"scopes":[{
+            "id":"global","name":"Global","exe":"*","profiles":[{"id":"keys","name":"Keys","armed":true,
+                "hotkeys":[{"trigger":"e","cancel_trigger":"RButton","behavior":"waitfor(LButton);send(done)"}]}]}]}).to_string();
+        std::fs::write(&path, &source).unwrap();
+        let temporary = std::path::PathBuf::from(format!("{}.tmp", path.display()));
+        std::fs::create_dir(&temporary).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        std::fs::remove_dir(&temporary).unwrap();
+        let migrated = load_db(&path).unwrap();
+        assert_eq!(migrated.games[0].profiles[0].hotkeys[0].cancel_triggers, ["RButton"]);
+        assert_eq!(migrated.games[0].profiles[0].hotkeys[0].behavior, "[{\"type\":\"waitfor\"},{\"type\":\"mousepress\",\"key\":\"LButton\"},{\"type\":\"send\",\"text\":\"done\"}]");
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(load_db(&path).unwrap().games[0].profiles[0].hotkeys[0].cancel_triggers, ["RButton"]);
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        let backup = std::path::PathBuf::from(format!("{}.v10.bak", path.display()));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
+    fn cancellation_policy_upgrades_preserve_keys_and_survive_failed_writes_and_reopening() {
+        for enabled in [false, true] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-cancel-policy-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let source = serde_json::json!({"version":12,"settings":{"ahk_exe":"ahk.exe"},"scopes":[{
+                "id":"global","name":"Global","exe":"*","profiles":[{"id":"keys","name":"Keys","armed":true,
+                    "hotkeys":[{"trigger":"e","cancel_triggers":["RButton","Esc"],"cancel_on_other_behavior":enabled,"behavior":"send(done)"}]}]}]}).to_string();
+            std::fs::write(&path, &source).unwrap();
+            let temporary = std::path::PathBuf::from(format!("{}.tmp", path.display()));
+            std::fs::create_dir(&temporary).unwrap();
+            assert!(load_db(&path).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+            std::fs::remove_dir(&temporary).unwrap();
+            let db = load_db(&path).unwrap();
+            let hotkey = &db.games[0].profiles[0].hotkeys[0];
+            assert_eq!(hotkey.cancel_on_other_behavior, enabled);
+            assert_eq!(hotkey.cancel_triggers, ["RButton", "Esc"]);
+            assert_eq!(hotkey.behavior, "send(done)");
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert_eq!(load_db(&path).unwrap().games[0].profiles[0].hotkeys[0], *hotkey);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let backup = std::path::PathBuf::from(format!("{}.v12.bak", path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn single_cancel_keys_upgrade_to_lists_and_reopen_without_rewriting() {
+        for key in ["", " RButton ", "rctrl Esc"] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-cancel-list-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let source = serde_json::json!({"version":11,"settings":{"ahk_exe":"ahk.exe"},"scopes":[{
+                "id":"global","name":"Global","exe":"*","profiles":[{"id":"keys","name":"Keys","armed":true,
+                    "hotkeys":[{"trigger":"e","cancel_trigger":key,"behavior":"send(done)"}]}]}]}).to_string();
+            std::fs::write(&path, &source).unwrap();
+            let db = load_db(&path).unwrap();
+            let expected: Vec<_> = if key.trim().is_empty() { vec![] } else { vec![key.trim().to_string()] };
+            assert_eq!(db.games[0].profiles[0].hotkeys[0].cancel_triggers, expected);
+            assert_eq!(db.games[0].profiles[0].hotkeys[0].behavior, "send(done)");
+            let saved = std::fs::read(&path).unwrap();
+            let persisted: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+            let hotkey = &persisted["scopes"][0]["profiles"][0]["hotkeys"][0];
+            assert_eq!(hotkey["cancel_triggers"], serde_json::json!(expected));
+            assert!(hotkey.get("cancel_trigger").is_none());
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            assert_eq!(load_db(&path).unwrap().games[0].profiles[0].hotkeys[0].cancel_triggers, expected);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let backup = std::path::PathBuf::from(format!("{}.v11.bak", path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn cancellation_lists_preserve_alternatives_and_reject_invalid_entries() {
+        let mut value = serde_json::json!({"trigger":"e","behavior":"send(done)","cancel_triggers":[" RButton ","rctrl   Esc"]});
+        let hotkey: Hotkey = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(hotkey.cancel_triggers, ["RButton", "rctrl Esc"]);
+        let copied: Hotkey = serde_json::from_value(serde_json::to_value(&hotkey).unwrap()).unwrap();
+        assert_eq!(copied, hotkey);
+        for invalid in [serde_json::json!(["RButton", " "]), serde_json::json!(["Esc", " esc "]), serde_json::json!(["RButton", 1])] {
+            value["cancel_triggers"] = invalid;
+            assert!(serde_json::from_value::<Hotkey>(value.clone()).is_err());
         }
     }
 

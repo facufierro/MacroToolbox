@@ -4,12 +4,23 @@ These instructions apply to the entire repository.
 
 ## Preserve the app's UI style
 
-- When adding or changing features, do not add tutorial labels, explanatory descriptions,
-  helper text, compatibility notices, or instructional tooltips unless the user explicitly
-  requests them.
-- Match the app's existing visual style, control patterns, layout density, spacing, typography,
-  and colors. Keep new UI as concise as comparable existing controls; do not redesign adjacent UI
-  unless requested.
+- The UI must be intuitive, compact, and simple. Strictly follow the app's established visual
+  style, control patterns, layout density, spacing, typography, colors, and icons. Reuse existing
+  components and patterns; do not introduce a different visual language for a new feature.
+- Clarity and discoverability take priority over removing labels. Use a short visible label
+  whenever an icon or value alone would be ambiguous, unfamiliar, or easy to miss. Essential
+  meaning must not depend on hovering for a tooltip. Reserve icon-only controls for familiar,
+  self-explanatory actions, and remove only redundant labels. Keep concise tooltips and accessible
+  names for additional context.
+- Keep secondary and optional controls inline or in the app's existing compact menus/popovers.
+  Do not add a dedicated heading, full-width section, or extra row when an existing row can hold
+  the control clearly and readably. Match the surrounding interface instead of expanding it
+  into a form.
+- Put short control explanations in tooltips rather than permanent helper text. Do not add
+  tutorial prose, explanatory descriptions, or compatibility notices unless requested.
+- Before handing off UI changes, visually inspect empty and configured states at normal and
+  narrower window sizes. Passing functional tests alone does not establish that the UI fits
+  the app's style. Do not redesign adjacent UI unless requested.
 
 ## Settings must migrate automatically on upgrade
 
