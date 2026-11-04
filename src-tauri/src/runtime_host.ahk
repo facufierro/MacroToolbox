@@ -40,8 +40,14 @@ class BindingHost {
                 for event, steps in profile.Get("events", Map())
                     this.ValidatePlan(steps)
             for binding in profile["bindings"] {
-                if profile["armed"]
+                if profile["armed"] {
                     this.ValidatePlan(binding["steps"])
+                    for cancelTrigger in binding.Get("cancelTriggers", []) {
+                        for cancelKey in HoldKeyList(RegExReplace(cancelTrigger, "[,\s]+", " "))
+                            if !GetKeyVK(cancelKey) && !GetKeySC(cancelKey)
+                                throw ValueError("Unknown cancel trigger key: " cancelKey)
+                    }
+                }
                 key := binding["key"]
                 if !bindings.Has(key)
                     bindings[key] := []
@@ -270,7 +276,7 @@ class BindingHost {
             return
         }
         StartBehaviorRun(profile["id"] ":" binding["trigger"], binding["steps"], binding["modifiers"],
-            profile["target"], profile["id"], binding["chord"], false, binding.Get("section", "hotkeys"))
+            profile["target"], profile["id"], binding["chord"], false, binding.Get("section", "hotkeys"), "", binding.Get("cancelTriggers", []), binding.Get("cancelOnOtherBehavior", false))
     }
 
     Release(key, *) {

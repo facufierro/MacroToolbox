@@ -21,6 +21,8 @@ export function prepareHotkeyMove(db: Database, source: HotkeySource, gameId: st
   const current = origin?.profiles.find(profile => profile.id === source.profileId)?.hotkeys[source.index];
   if (!current || current.name !== source.hotkey.name || current.behavior !== source.hotkey.behavior
       || triggerIdentity(current.trigger) !== triggerIdentity(source.hotkey.trigger)
+      || JSON.stringify(current.cancel_triggers ?? []) !== JSON.stringify(source.hotkey.cancel_triggers ?? [])
+      || (current.cancel_on_other_behavior ?? false) !== (source.hotkey.cancel_on_other_behavior ?? false)
       || (current.state_id ?? null) !== (source.hotkey.state_id ?? null)
       || (current.allow_extra_modifiers ?? null) !== (source.hotkey.allow_extra_modifiers ?? null)) {
     throw new Error("The dragged behavior changed. Drag it again.");

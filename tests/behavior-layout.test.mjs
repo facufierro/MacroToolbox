@@ -60,7 +60,7 @@ async function scenario() {
     check('the complete grouped action picker fits inside nested editors', fits() && inner.querySelectorAll('.action-picker__group').length === 5);
     inner.querySelector('[aria-label="Find action"]').dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true})); await wait();
     window.showNested(false); await wait();
-    check('recording controls and activation choices remain available on input actions', document.querySelectorAll('button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 4);
+    check('recording controls and activation choices remain available on input actions', document.querySelectorAll('.step-row button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 4);
     check('the action toolbar only shows Add action and Save as variable', document.querySelectorAll('.step-add-btns > button').length === 2 && !document.querySelector('.action-picker'));
     document.querySelector('button[aria-label="Add action"]').click(); await wait();
     check('all existing actions remain available within the editor width', document.querySelectorAll('.action-picker button').length === 26 && fits());

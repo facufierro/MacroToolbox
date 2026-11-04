@@ -159,8 +159,307 @@ RunRuntimeTest("runtime profile status survives reloads and resumes from the swi
 RunRuntimeTest("profile controls ignore macro-owned extra modifiers while preserving physical exactness", TestProfileToggleHeldModifiers)
 RunRuntimeTest("profile controls take priority across native wildcard and exact key variants", TestProfileToggleNativePriority)
 RunRuntimeTest("retriggering during window button release preserves the new output owner", TestMouseToggleRetrigger)
-FileAppend("All 151 structured runtime tests passed.`n", "*")
+RunRuntimeTest("a separate right-click cancel trigger stops an E cast waiting for a click", TestCancelTriggerCast.Bind("RButton"))
+RunRuntimeTest("a keyboard alternative cancels the same E cast independently", TestCancelTriggerCast.Bind("Esc"))
+RunRuntimeTest("cancellation requires a fresh press after an already-held button", TestCancelTriggerHeld)
+RunRuntimeTest("a keyboard cancel trigger ignores other keys", TestCancelTriggerKeyboard.Bind(false))
+RunRuntimeTest("cancel chords observe Copilot's logical Right Ctrl without releasing physical modifiers", TestCancelTriggerKeyboard.Bind(true))
+RunRuntimeTest("cancel triggers release parallel holds repeats waits and cursor locks", TestCancelTriggerParallel)
+RunRuntimeTest("cancelling one run preserves unrelated runs and shared output", TestCancelTriggerShared)
+RunRuntimeTest("completion focus loss disable and exit remove cancel observers", TestCancelTriggerCleanup)
+RunRuntimeTest("fresh hotkey presses replace cancel observers without leaving stale callbacks", TestCancelTriggerRetrigger)
+RunRuntimeTest("cancel input failures stop the run and report their error", TestCancelTriggerInputFailure)
+RunRuntimeTest("cancel observer registration failures stop before any actions run", TestCancelTriggerRegistrationFailure)
+RunRuntimeTest("empty cancel triggers run without registering an observer", TestCancelTriggerEmpty)
+RunRuntimeTest("invalid cancel triggers reject configuration before replacing live bindings", TestCancelTriggerInvalid)
+RunRuntimeTest("any alternative cancel key stops the list and removes the whole listener", TestCancelTriggerAlternatives)
+RunRuntimeTest("an already-held cancel key does not prevent another alternative from cancelling", TestCancelTriggerHeldAlternative)
+RunRuntimeTest("another behavior cancels an opted-in list in the same profile", TestCancelOnOtherBehavior.Bind(false))
+RunRuntimeTest("another behavior cancels an opted-in list across profiles", TestCancelOnOtherBehavior.Bind(true))
+RunRuntimeTest("default behavior remains concurrent and nested actions do not cancel their own list", TestCancelOnOtherDefault)
+RunRuntimeTest("ignored repeats and stopping toggles do not count as starting another behavior", TestCancelOnOtherIgnored)
+RunRuntimeTest("failed behavior starts do not cancel an existing list", TestCancelOnOtherFailure)
+RunRuntimeTest("an event activation cancels an opted-in list", TestCancelOnOtherSection.Bind("events"))
+RunRuntimeTest("a script API activation cancels an opted-in list", TestCancelOnOtherSection.Bind("scripts"))
+RunRuntimeTest("a newer activation during cancellation cleanup remains active", TestCancelOnOtherReentrant)
+FileAppend("All 174 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestCancelOnOtherBehavior(acrossProfiles) {
+    global behaviorRuntime, testWaitQueue, testHeldKeys
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    testHeldKeys := Map("e", true, "q", true)
+    old := Map("key", "$*e", "trigger", "e", "modifiers", "", "chord", "e", "prerequisites", "", "specificity", 0,
+        "exact", false, "toggle", false, "cancelTriggers", ["RButton"], "cancelOnOtherBehavior", true, "section", "hotkeys",
+        "steps", [Action("lock"), Action("parallel", "steps", [Action("hold", "key", "x"),
+            Action("sequence", "steps", [Action("waitfor"), Action("press", "key", "z"), Action("send", "text", "must not run")])])])
+    other := Map("key", "$*q", "trigger", "q", "modifiers", "", "chord", "q", "prerequisites", "", "specificity", 0,
+        "exact", false, "toggle", false, "section", "hotkeys", "steps", [Action("send", "text", "other")])
+    profiles := [Map("id", "one", "target", "Game.exe", "armed", true, "revision", "one", "bindings", acrossProfiles ? [old] : [old, other])]
+    if acrossProfiles
+        profiles.Push(Map("id", "two", "target", "Game.exe", "armed", true, "revision", "two", "bindings", [other]))
+    host := BindingHost()
+    host.Apply(profiles)
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    DispatchTestHotkey("$*e")
+    previous := behaviorRuntime.runs["one:e"]
+    Assert(testInputCallbacks.Count = 2 && heldOutputCounts.Has("x"), "first behavior did not start its hold and listeners")
+    DispatchTestHotkey("$*q")
+    Assert(previous.cancelled && !behaviorRuntime.runs.Count && !testInputCallbacks.Count && !heldOutputCounts.Count, "new behavior left the opted-in activation or its resources running")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "cancellation did not unlock the cursor")
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}", "{text}other"])
+    Assert(!runtimeActions.Length, "cancellation reported an error or continued old actions")
+}
+
+TestCancelOnOtherDefault() {
+    previous := StartBehaviorRun("concurrent", [Action("sleep", "ms", "1000")])
+    nested := StartBehaviorRun("nested", [Action("sequence", "steps", [Action("sleep", "ms", "20"), Action("send", "text", "done")])],
+        "", "Game.exe", "", "", false, "hotkeys", "", [], true)
+    Assert(!previous.cancelled && !nested.cancelled, "the option cancelled a default run or its own nested steps")
+    behaviorRuntime.Cancel("concurrent")
+    AwaitRuns()
+    AssertKeys(["{text}done"])
+}
+
+TestCancelOnOtherIgnored() {
+    global testHeldKeys
+    testHeldKeys := Map("q", true, "e", true)
+    steps := [Action("toggle", "key", "x")]
+    StartBehaviorRun("toggle-source", steps, "", "Game.exe", "", "q")
+    previous := StartBehaviorRun("opted-in", [Action("sleep", "ms", "1000")], "", "Game.exe", "", "e", false, "hotkeys", "", [], true)
+    StartBehaviorRun("toggle-source", steps, "", "Game.exe", "", "q")
+    Assert(!previous.cancelled, "a held-key repeat cancelled another list")
+    testHeldKeys["q"] := false
+    behaviorRuntime.ReleaseTrigger("q")
+    testHeldKeys["q"] := true
+    StartBehaviorRun("toggle-source", steps, "", "Game.exe", "", "q")
+    Assert(!previous.cancelled && !heldOutputCounts.Count, "stopping an existing toggle counted as a new start")
+    behaviorRuntime.Cancel("opted-in")
+}
+
+TestCancelOnOtherFailure() {
+    previous := StartBehaviorRun("survivor", [Action("sleep", "ms", "1000")], "", "Game.exe", "", "", false, "hotkeys", "", [], true)
+    failed := StartBehaviorRun("failed-start", [Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", ["RButton"])
+    Assert(failed.cancelled && !previous.cancelled && !testEvents.Length, "a registration failure cancelled an existing behavior or executed actions")
+    rejected := false
+    try StartBehaviorRun("invalid-start", [Action("waitfor")])
+    catch ValueError
+        rejected := true
+    Assert(rejected && !previous.cancelled, "an invalid action plan cancelled the current behavior")
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "the failed start did not report its registration error")
+    behaviorRuntime.Cancel("survivor")
+}
+
+TestCancelOnOtherSection(section) {
+    previous := StartBehaviorRun("hotkey", [Action("sleep", "ms", "1000")], "", "Game.exe", "", "", false, "hotkeys", "", [], true)
+    StartBehaviorRun("other-section", [Action("send", "text", "other")], "", "Game.exe", "", "", false, section)
+    Assert(previous.cancelled, section " activation did not cancel the opted-in hotkey")
+    AwaitRuns()
+    AssertKeys(["{text}other"])
+}
+
+TestCancelOnOtherReentrant() {
+    global testHeldKeys, testOnSend
+    testHeldKeys := Map("e", true)
+    StartBehaviorRun("old", [Action("hold", "key", "x")], "", "Game.exe", "", "e", false, "hotkeys", "", [], true)
+    testOnSend := StartDuringOtherCancellation
+    interrupted := StartBehaviorRun("interrupted-start", [Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", [], true)
+    Assert(interrupted.cancelled && behaviorRuntime.runs.Has("newest"), "cleanup lost the newer activation or resumed an older start")
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}", "{text}newest"])
+}
+
+StartDuringOtherCancellation(keys) {
+    global testOnSend
+    if keys != "{blind}{x up}"
+        return
+    testOnSend := 0
+    StartBehaviorRun("newest", [Action("sleep", "ms", "20"), Action("send", "text", "newest")], "", "Game.exe", "", "", false, "hotkeys", "", [], true)
+}
+
+TestCancelTriggerAlternatives() {
+    global testWaitQueue
+    for key in ["RButton", "Esc", "XButton1"] {
+        testWaitQueue := [InputBatch([])]
+        StartBehaviorRun("cancel-alternatives", [Action("sleep", "ms", "1000"), Action("send", "text", "must not run")],
+            "", "Game.exe", "", "", false, "hotkeys", "", ["RButton", "Esc", "XButton1"])
+        Assert(testInputCallbacks.Count = 1, "alternative cancel keys installed multiple raw input callbacks")
+        DeliverNextWaitInput("LButton", true)
+        Assert(behaviorRuntime.runs.Count = 1, "an unlisted key cancelled the run")
+        DeliverNextWaitInput(key, true)
+        Assert(!behaviorRuntime.runs.Count && !testInputCallbacks.Count && !testEvents.Length, key " failed to stop the run or remove its listener")
+    }
+}
+
+TestCancelTriggerHeldAlternative() {
+    global testWaitQueue, testHeldKeys
+    testWaitQueue := [InputBatch([])]
+    testHeldKeys := Map("rbutton", true)
+    StartBehaviorRun("cancel-held-alternative", [Action("sleep", "ms", "1000")], "", "Game.exe", "", "", false, "hotkeys", "", ["RButton", "Esc"])
+    DeliverNextWaitInput("RButton", true)
+    Assert(behaviorRuntime.runs.Count = 1, "an already-held alternative cancelled the run")
+    DeliverNextWaitInput("Esc", true)
+    Assert(!behaviorRuntime.runs.Count && !testInputCallbacks.Count, "a held button blocked cancellation by another key")
+}
+
+TestCancelTriggerCast(cancelKey) {
+    global testWaitQueue, testHeldKeys, behaviorRuntime
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    testHeldKeys := Map("e", true)
+    binding := Map("key", "$*e", "trigger", "e", "modifiers", "", "chord", "e", "prerequisites", "", "specificity", 0,
+        "exact", false, "toggle", false, "cancelTriggers", ["RButton", "Esc"], "section", "hotkeys",
+        "steps", [Action("press", "key", "e"), Action("waitfor"), Action("mousepress", "key", "LButton"), Action("send", "text", "must not run")])
+    host := BindingHost()
+    host.Apply([Map("id", "profile", "target", "Game.exe", "armed", true, "revision", "cast", "bindings", [binding])])
+    behaviorRuntime := BehaviorExecutor(host.PhysicalOwnsOutput.Bind(host))
+    Assert(IsObject(DispatchTestHotkey("$*e")), "E did not start the configured behavior")
+    Sleep 70
+    Assert(testInputCallbacks.Count = 2, "cancel trigger and click wait did not both observe input")
+    testHeldKeys["e"] := false
+    host.Release("e")
+    DeliverNextWaitInput(cancelKey, true)
+    Assert(!behaviorRuntime.runs.Count && !testInputCallbacks.Count, "right click left the cast or an observer running")
+    DeliverNextWaitInput("LButton", true)
+    AssertKeys(["{blind}{e downr}", "{blind}{e up}"])
+    Assert(!nativePosts.Length && !testClicks.Length && !runtimeActions.Length, "cancellation replayed input or continued the cast")
+    for item in testHotkeys
+        Assert(!InStr(item.key, "rbutton"), "cancel trigger installed a consuming mouse hotkey")
+}
+
+TestCancelTriggerHeld() {
+    global testWaitQueue, testHeldKeys
+    testHeldKeys := Map("rbutton", true)
+    testWaitQueue := [InputBatch([])]
+    StartBehaviorRun("cancel-held", [Action("sleep", "ms", "1000"), Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", ["RButton"])
+    DeliverNextWaitInput("RButton", true)
+    Assert(behaviorRuntime.runs.Count = 1, "an already-held button cancelled the run")
+    DeliverNextWaitInput("RButton", false)
+    Assert(behaviorRuntime.runs.Count = 1, "button release cancelled the run")
+    DeliverNextWaitInput("RButton", true)
+    Assert(!behaviorRuntime.runs.Count && !testEvents.Length, "a fresh button press did not cancel")
+}
+
+TestCancelTriggerKeyboard(modified) {
+    global testWaitQueue, testLogicalKeys, testHeldKeys, copilotCtrlHeld
+    testWaitQueue := [InputBatch([])]
+    testHeldKeys := Map("LWin", true, "LShift", true)
+    testLogicalKeys := Map("RCtrl", false)
+    copilotCtrlHeld := modified
+    try {
+        StartBehaviorRun("cancel-key", [Action("sleep", "ms", "1000"), Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", [modified ? "rctrl Esc" : "Esc"])
+        DeliverNextWaitInput("x", true)
+        Assert(behaviorRuntime.runs.Count = 1, "an unrelated key cancelled the run")
+        if modified {
+            DeliverNextWaitInput("Esc", true)
+            Assert(behaviorRuntime.runs.Count = 1, "cancel chord ignored its Right Ctrl requirement")
+            DeliverNextWaitInput("Esc", false)
+            testLogicalKeys["RCtrl"] := true
+        }
+        DeliverNextWaitInput("Esc", true)
+        Assert(!behaviorRuntime.runs.Count && !testEvents.Length, "keyboard cancellation sent output or failed to stop")
+        Assert(testHeldKeys["LWin"] && testHeldKeys["LShift"] && (!modified || testLogicalKeys["RCtrl"]), "cancellation changed independently held modifiers")
+    } finally copilotCtrlHeld := false
+}
+
+TestCancelTriggerParallel() {
+    global testWaitQueue, testHeldKeys
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    testHeldKeys := Map("e", true)
+    StartBehaviorRun("cancel-parallel", [Action("lock"), Action("parallel", "steps", [Action("hold", "key", "x"),
+        Action("repeat", "key", "y", "interval", "100", "hold", "6"),
+        Action("sequence", "steps", [Action("waitfor"), Action("press", "key", "z"), Action("send", "text", "must not run")])])],
+        "", "Game.exe", "", "e", false, "hotkeys", "", ["RButton"])
+    DeliverNextWaitInput("RButton", true)
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count && !syntheticDown.Count && !testInputCallbacks.Count, "cancelled branches retained owned resources")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "cancellation left the cursor locked")
+    count := testEvents.Length
+    Sleep 120
+    Assert(testEvents.Length = count && !runtimeActions.Length, "a repeat or trailing action continued after cancellation")
+}
+
+TestCancelTriggerShared() {
+    global testWaitQueue, testHeldKeys
+    testWaitQueue := [InputBatch([])]
+    testHeldKeys := Map("e", true, "q", true)
+    StartBehaviorRun("other", [Action("hold", "key", "x")], "", "*", "", "q")
+    StartBehaviorRun("cancel-shared", [Action("hold", "key", "x")], "", "*", "", "e", false, "hotkeys", "", ["RButton"])
+    DeliverNextWaitInput("RButton", true)
+    Assert(behaviorRuntime.runs.Count = 1 && heldOutputCounts["x"] = 1 && testEvents.Length = 1, "cancellation disturbed another output owner")
+    testHeldKeys["q"] := false
+    AwaitRuns()
+    AssertKeys(["{blind}{x downr}", "{blind}{x up}"])
+}
+
+TestCancelTriggerCleanup() {
+    global testWaitQueue, testFocusActive, enabled
+    for reason in ["complete", "focus", "disable", "stop"] {
+        testFocusActive := true
+        enabled["profile"] := true
+        testWaitQueue := [InputBatch([])]
+        execution := StartBehaviorRun("cancel-cleanup", [Action("sleep", "ms", reason = "complete" ? "10" : "1000")], "", "Game.exe", "profile", "", false, "hotkeys", "", ["RButton"])
+        callback := execution.cancelCallback
+        if reason = "focus"
+            testFocusActive := false
+        else if reason = "disable"
+            enabled["profile"] := false
+        else if reason = "stop"
+            behaviorRuntime.Stop()
+        AwaitRuns()
+        Assert(!testInputCallbacks.Count && !IsObject(execution.cancelCallback), reason " retained its cancel observer")
+        callback.Call(0, 42, 0xFF, A_ScriptHwnd)
+        Assert(!runtimeActions.Length, "a stale cancellation callback reported an input error")
+    }
+}
+
+TestCancelTriggerRetrigger() {
+    global testWaitQueue, testHeldKeys
+    testWaitQueue := [InputBatch([]), InputBatch([])]
+    testHeldKeys := Map("e", true)
+    steps := [Action("sleep", "ms", "1000"), Action("send", "text", "must not run")]
+    old := StartBehaviorRun("cancel-retrigger", steps, "", "Game.exe", "", "e", false, "hotkeys", "", ["RButton"])
+    callback := old.cancelCallback
+    testHeldKeys["e"] := false
+    behaviorRuntime.ReleaseTrigger("e")
+    testHeldKeys["e"] := true
+    replacement := StartBehaviorRun("cancel-retrigger", steps, "", "Game.exe", "", "e", false, "hotkeys", "", ["RButton"])
+    callback.Call(0, 42, 0xFF, A_ScriptHwnd)
+    Assert(old.cancelled && !replacement.cancelled && testInputCallbacks.Count = 1, "retrigger retained its old listener or cancelled the replacement")
+    DeliverNextWaitInput("RButton", true)
+    Assert(replacement.cancelled && !testEvents.Length, "new activation did not have its own cancel trigger")
+}
+
+TestCancelTriggerInputFailure() {
+    global testWaitQueue, testRawPacket
+    testWaitQueue := [InputBatch([])]
+    execution := StartBehaviorRun("cancel-error", [Action("lock"), Action("sleep", "ms", "1000"), Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", ["RButton"])
+    testRawPacket := 0
+    execution.cancelCallback.Call(0, 42, 0xFF, A_ScriptHwnd)
+    Assert(execution.cancelled && !testInputCallbacks.Count && !testEvents.Length, "input failure left the run or listener active")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff" && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "input failure left a lock or failed silently")
+}
+
+TestCancelTriggerRegistrationFailure() {
+    execution := StartBehaviorRun("cancel-register", [Action("send", "text", "must not run")], "", "Game.exe", "", "", false, "hotkeys", "", ["RButton"])
+    Assert(execution.cancelled && !testEvents.Length && !testInputCallbacks.Count && runtimeActions.Length = 1, "registration failure ran actions or retained resources")
+}
+
+TestCancelTriggerEmpty() {
+    StartBehaviorRun("cancel-empty", [Action("send", "text", "done")], "", "Game.exe", "", "", false, "hotkeys", "", [])
+    AwaitRuns()
+    AssertKeys(["{text}done"])
+    Assert(!testInputCallbacks.Count, "an empty cancel trigger registered input")
+}
+
+TestCancelTriggerInvalid() {
+    host := BindingHost()
+    binding := Map("key", "$*e", "trigger", "e", "modifiers", "", "chord", "e", "prerequisites", "", "specificity", 0,
+        "exact", false, "toggle", false, "cancelTriggers", ["RButton", "not-a-key"], "steps", [Action("send", "text", "must not run")])
+    rejected := false
+    try host.Apply([Map("id", "profile", "target", "Game.exe", "armed", true, "revision", "invalid", "bindings", [binding])])
+    catch ValueError
+        rejected := true
+    Assert(rejected && !host.bindings.Count && !testHotkeys.Length, "invalid cancel input partially installed bindings")
+}
 
 TestNextWaitMouse(doubleClick) {
     global testHeldKeys, testLogicalKeys, testWaitQueue

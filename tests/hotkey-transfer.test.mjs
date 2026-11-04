@@ -13,7 +13,7 @@ const variables = [{id:"nested",name:"Nested",type:"behavior",value:stepsToStrin
   {type:"startoverlay",itemId:"overlay"}, {type:"securesend",credentialId:"saved-password"},
 ])}];
 function fixture(trigger = "rctrl f1") {
-  const hotkey = {name:"Move me",trigger,state_id:"state",allow_extra_modifiers:false,
+  const hotkey = {name:"Move me",trigger,cancel_triggers:["RButton","Esc"],cancel_on_other_behavior:true,state_id:"state",allow_extra_modifiers:false,
     behavior:stepsToString([{type:"sequence",steps:[{type:"behavior",variableId:"nested"},{type:"press",key:{source:"trigger"},onRelease:true}]}])};
   const owner = profile("source", {hotkeys:[hotkey],scripts:[script],overlay_items:[timer],
     overlay_groups:[{id:"overlay",name:"Overlay",visible_while_timer_id:"timer"}]});
@@ -92,7 +92,8 @@ test("missing targets, same-profile drops and stale source indices leave setting
   }
   for (const change of [{index:3},{profileId:"missing"},{gameId:"missing"},
     {hotkey:{...source.hotkey,behavior:"send(changed)"}},{hotkey:{...source.hotkey,state_id:"changed"}},
-    {hotkey:{...source.hotkey,allow_extra_modifiers:true}}]) {
+    {hotkey:{...source.hotkey,allow_extra_modifiers:true}},{hotkey:{...source.hotkey,cancel_triggers:["Esc"]}},
+    {hotkey:{...source.hotkey,cancel_on_other_behavior:false}}]) {
     assert.throws(()=>prepareHotkeyMove(db,{...source,...change},"target-app","target"),/changed/);
   }
   assert.deepEqual(db,before);

@@ -1,6 +1,8 @@
 export interface Hotkey {
   name: string;
   trigger: string | VariableReference;
+  cancel_triggers?: string[];
+  cancel_on_other_behavior?: boolean;
   behavior: string;
   allow_extra_modifiers?: boolean | null;
   state_id: string | null;

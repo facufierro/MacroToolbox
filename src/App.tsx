@@ -10,12 +10,13 @@ import { useErrorReporter } from "./AppConsole";
 import { CloudSettings } from "./CloudSettings";
 import { VariablesView } from "./VariablesView";
 import { TriggerInput } from "./TriggerInput";
-import { triggerIdentity, triggerLabel, isTriggerValid } from "./triggers";
+import { triggerIdentity, triggerLabel, isTriggerValid, readTriggerList } from "./triggers";
 import { SortableList } from "./SortableList";
 import { useProfileItemDrag, profileDropKey, type ProfileItemDrag } from "./useProfileItemDrag";
 import { moveItem, orderOwnedSlots } from "./listOrder";
 import { exportVariables, importVariables, mapVariableBehaviors, readVariable } from "./variables";
 import { KeyInput } from "./KeyInput";
+import { CancelTriggersInput } from "./CancelTriggersInput";
 import { EnableSwitch } from "./EnableSwitch";
 import { ProfileSection } from "./ProfileSection";
 import { OverlayGroupPanel } from "./OverlayGroupPanel";
@@ -810,6 +811,8 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, o
 }) {
   const [name, setName] = useState(initial.name);
   const [trigger, setTrigger] = useState(initial.trigger);
+  const [cancelTriggers, setCancelTriggers] = useState(initial.cancel_triggers ?? []);
+  const [cancelOnOtherBehavior, setCancelOnOtherBehavior] = useState(initial.cancel_on_other_behavior ?? false);
   const [allowExtraModifiers, setAllowExtraModifiers] = useState(() => allowsExtraModifiers(initial));
   const [secureTexts, setSecureTexts] = useState<SecureTextDraft[]>([]);
   const [saving, setSaving] = useState(false);
@@ -822,11 +825,15 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, o
     return parsed.length || initial.trigger ? parsed : [{ type: "press", key: "" }];
   });
 
+  let cancelKeys: string[] | null = null;
+  try { cancelKeys = cancelTriggers.length ? readTriggerList(cancelTriggers) : []; } catch { /* Incomplete list draft. */ }
+
   async function save() {
-    if (saving || !isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)) return;
+    if (saving || !cancelKeys || !isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)) return;
     setSaving(true);
     try {
       await onSave({ name: name.trim(), trigger: typeof trigger === "string" ? trigger.trim() : trigger,
+        cancel_triggers: cancelKeys, cancel_on_other_behavior: cancelOnOtherBehavior,
         behavior: stepsToString(steps), allow_extra_modifiers: allowExtraModifiers, state_id: null }, usedSecureTexts(steps, secureTexts));
     } catch (error) { reportError(secureTexts.length ? "Could not save the hotkey's password." : error); }
     finally { setSaving(false); }
@@ -839,7 +846,11 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, o
 
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Name" autoFocus />
 
-        <TriggerInput value={trigger} variables={variables} onChange={setTrigger} onDb={onDb} />
+        <div className="hotkey-triggers">
+          <TriggerInput value={trigger} variables={variables} onChange={setTrigger} onDb={onDb} />
+          <CancelTriggersInput value={cancelTriggers} onChange={setCancelTriggers} cancelOnOtherBehavior={cancelOnOtherBehavior}
+            onCancelOnOtherBehaviorChange={setCancelOnOtherBehavior} disabled={saving} />
+        </div>
 
         <label className="checkbox-row">
           <input type="checkbox" checked={allowExtraModifiers} onChange={e => setAllowExtraModifiers(e.target.checked)} />
@@ -851,7 +862,7 @@ function HotkeyModal({ initial, gameExe, states, overlays, scripts, variables, o
 
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
-          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)}
+          <IconButton icon="check" label="Save" className="btn btn--primary" disabled={!cancelKeys || !isTriggerValid(trigger, variables) || !areStepsValid(steps, variables, true, secureTexts)}
             onClick={() => void save()} />
         </div>
       </fieldset>

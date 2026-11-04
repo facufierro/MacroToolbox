@@ -10,7 +10,7 @@ class BehaviorExecutor {
         this.callback := this.Tick.Bind(this)
     }
 
-    Start(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {
+    Start(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "", cancelTriggers := 0, cancelOnOtherBehavior := false) {
         if chord = "" && BehaviorNeedsHotkey(steps)
             throw ValueError("This behavior requires a hotkey trigger.")
         if chord != "" && this.latches.Has(owner)
@@ -31,14 +31,39 @@ class BehaviorExecutor {
         MouseGetPos &x, &y
         execution := {id: this.nextId, owner: owner, target: target, profile: profile,
             modifiers: modifiers, chord: chord, triggerHeld: true, x: x, y: y,
-            cursorButtons: this.CursorButtons(), cursorClicks: Map(),
+            cursorButtons: this.CursorButtons(), cursorClicks: Map(), cancelInputs: [], cancelCallback: 0, cancelOnOtherBehavior: cancelOnOtherBehavior,
             locked: false, cancelled: false, section: section, scriptOwner: scriptOwner, background: background && !BehaviorContextActive(target, profile), task: this.Task(Map("type", "sequence", "steps", steps)), failure: 0}
         this.runs[owner] := execution
         if chord != ""
             this.latches[owner] := chord
         SetTimer this.callback, 5
+        if cancelTriggers && cancelTriggers.Length {
+            try {
+                for cancelTrigger in cancelTriggers
+                    execution.cancelInputs.Push(BehaviorInputWait(cancelTrigger, target, profile))
+                execution.cancelCallback := this.CancelOnInput.Bind(this, execution)
+                StartBehaviorInput(execution.cancelCallback)
+            } catch Error as failure {
+                execution.failure := failure
+                this.Cancel(owner)
+                ReportBehaviorError(profile, failure.Message)
+                return execution
+            }
+        }
+        this.CancelForNewBehavior(execution)
         this.Tick()
         return execution
+    }
+
+    CancelForNewBehavior(started) {
+        owners := []
+        for owner, execution in this.runs
+            if execution.id < started.id && execution.cancelOnOtherBehavior
+                owners.Push(owner)
+        ; Cleanup can yield to a newer activation. This start must not cancel it.
+        for owner in owners
+            if this.runs.Has(owner) && this.runs[owner].id < started.id
+                this.Cancel(owner)
     }
 
     Task(node) {
@@ -318,6 +343,26 @@ class BehaviorExecutor {
         task.done := true
     }
 
+    CancelOnInput(execution, wParam, lParam, msg, hwnd) {
+        if execution.cancelled
+            return
+        for input in execution.cancelInputs {
+            input.OnInput(wParam, lParam, msg, hwnd)
+            if execution.cancelled
+                return
+            if IsObject(input.error) {
+                execution.failure := input.error
+                this.Cancel(execution.owner)
+                ReportBehaviorError(execution.profile, input.error.Message)
+                return
+            } else if input.completed {
+                this.Cancel(execution.owner)
+                return
+            }
+        }
+        ; Leave WM_INPUT unhandled for Windows' raw input cleanup.
+    }
+
     CursorButtons() {
         global heldOutputCounts
         buttons := Map()
@@ -397,6 +442,13 @@ class BehaviorExecutor {
         ; Input delivery can yield to a new activation of the same hotkey. Detach
         ; this run before cleanup so it cannot delete or resume that replacement.
         this.runs.Delete(owner)
+        try {
+            if IsObject(execution.cancelCallback) {
+                try StopBehaviorInput(execution.cancelCallback)
+                finally execution.cancelCallback := 0
+            }
+        } catch Error as failure
+            ReportBehaviorError(execution.profile, failure.Message)
         try this.Release(execution.task)
         catch Error as failure
             ReportBehaviorError(execution.profile, failure.Message)
@@ -459,9 +511,9 @@ BehaviorHasToggle(steps) {
     return false
 }
 
-StartBehaviorRun(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "") {
+StartBehaviorRun(owner, steps, modifiers := "", target := "", profile := "", chord := "", background := false, section := "", scriptOwner := "", cancelTriggers := 0, cancelOnOtherBehavior := false) {
     global behaviorRuntime
-    return behaviorRuntime.Start(owner, steps, modifiers, target, profile, chord, background, section, scriptOwner)
+    return behaviorRuntime.Start(owner, steps, modifiers, target, profile, chord, background, section, scriptOwner, cancelTriggers, cancelOnOtherBehavior)
 }
 
 SendRuntimeAction(profile, kind, id, value := "") {
