@@ -34,9 +34,8 @@ async function scenario() {
     check('clicking outside closes the selection list', !picker(1).open);
     await save();
     let saved = JSON.parse(window.saved.behavior);
-    check('Start restart and Stop save the complete selected lists', JSON.stringify(saved) === JSON.stringify([
-      { type: 'startoverlay', restart: true, itemIds: ['a', 'b', 'timer'] }, { type: 'stopoverlay', itemIds: ['b', 'a'] }
-    ]));
+    check('Start restart and Stop save the complete selected lists', saved.length === 2 && saved[0].type === 'startoverlay' && saved[0].restart === true
+      && saved[0].itemIds.join(',') === 'a,b,timer' && saved[1].type === 'stopoverlay' && saved[1].itemIds.join(',') === 'b,a');
     document.getElementById('reload').click(); await wait();
     check('reopening preserves both selections and restart mode', selection(0) === 'First, Second, Timer' && selection(1) === 'Second, First' && rows()[0].querySelector('[aria-label="Overlay action"]').value === 'restart');
     await toggle(0, 'Second');
@@ -62,8 +61,10 @@ test('Start and Stop support multiple overlays through the real editor', { skip:
   const mocks = ['./api', './AppConsole', './App.css', './CloudSettings', '@tauri-apps/api/event', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-opener', '@tauri-apps/plugin-notification'];
   const bundle = browserModules(['App.tsx'], { mocks, expose: { [join(root, 'src/App.tsx')]: ['HotkeyModal'] } });
   const harness = `const modules={${bundle.declarations}},cache={};
+window.reportError=error=>{throw error;};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>{throw error;}};return module.exports;}
+if(id==='./api'){module.exports={api:{async getDatabase(){return {version:8,scopes:[],variables:[],settings:{}};}}};return module.exports;}
+if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal}=load(${JSON.stringify(bundle.entry)});
 function Fixture(){const [revision,setRevision]=React.useState(0);return React.createElement(React.Fragment,null,React.createElement('button',{id:'reload',onClick:()=>setRevision(revision+1)},'Reload'),

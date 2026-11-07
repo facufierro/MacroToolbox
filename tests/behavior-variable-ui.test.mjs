@@ -89,11 +89,11 @@ async function scenario() {
     check('saving an inner scalar variable does not submit or discard the outer behavior form', document.querySelectorAll('form.modal').length === 1 && get('[aria-label="Variable name"]').value === 'Cast' && JSON.parse(variable('Cast').value).find(step=>step.type==='sleep').ms.variable === 'delay' && get('form.modal [aria-label="Sleep (ms) variable"]').value === variable('Child delay').id);
     await add('Secure send');
     await set([...document.querySelectorAll('form.modal [aria-label="Password"]')].at(-1), 'fixture-only-secret');
-    await add('State'); await add('Run script'); await add('Start overlay');
+    await add('State'); await add('Run script'); await add('Overlay');
     const overlays = [...document.querySelectorAll('form.modal .overlay-targets')].at(-1);
     overlays.querySelector('summary').click(); await wait();
-    const extraOverlay = [...overlays.querySelectorAll('input')].find(input => !input.checked);
-    extraOverlay.click(); await wait();
+    overlays.querySelectorAll('input')[0].click(); await wait();
+    overlays.querySelectorAll('input')[1].click(); await wait();
     overlays.querySelector('summary').click(); await wait();
     check('the shared editor offers state, script, overlay and masked password controls', get('form.modal [aria-label="Password"]').type === 'password' && document.querySelectorAll('form.modal .step-row').length === 8);
     await click('form.modal button[type="submit"]');
@@ -124,10 +124,10 @@ async function scenario() {
 test('complete shared behaviors work through creation, editing, secure storage and real import/export controls', {skip:!browser && 'Chrome or Edge is required'}, async t => {
   const mocks = ['./api','./AppConsole','./App.css','./CloudSettings','@tauri-apps/api/event','@tauri-apps/plugin-dialog','@tauri-apps/plugin-opener','@tauri-apps/plugin-notification'];
   const bundle = browserModules(['App.tsx'], {mocks,expose:{[join(root,'src/App.tsx')]:['HotkeyModal','EventModal','exportProfile','importProfile','importScope']}});
-  const harness = `const modules={${bundle.declarations}},cache={};window.errors=[];window.credentials=new Map();window.passwordWrites=0;window.hotkeyDraftCounts=[];
+  const harness = `const modules={${bundle.declarations}},cache={};window.errors=[];window.reportError=error=>window.errors.push(String(error));window.credentials=new Map();window.passwordWrites=0;window.hotkeyDraftCounts=[];
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async saveVariables(variables,secureTexts=[]){if(window.failSave)throw Error('simulated failure');for(const draft of secureTexts){window.credentials.set(draft.credentialId,draft.password);window.passwordWrites++;}return {...window.snapshot.db,variables};},async writeTextFile(path,text){window.exported=JSON.parse(text);},async readTextFile(){return JSON.stringify(window.importData);}}};return module.exports;}
-if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
+if(id==='./api'){module.exports={api:{async getDatabase(){return structuredClone(window.snapshot.db);},async saveVariables(variables,secureTexts=[]){if(window.failSave)throw Error('simulated failure');for(const draft of secureTexts){window.credentials.set(draft.credentialId,draft.password);window.passwordWrites++;}return {...window.snapshot.db,variables};},async writeTextFile(path,text){window.exported=JSON.parse(text);},async readTextFile(){return JSON.stringify(window.importData);}}};return module.exports;}
+if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
 if(id==='@tauri-apps/plugin-dialog'){module.exports={open:async()=> 'fixture.hkm-profile',save:async()=> 'fixture.hkm-profile'};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}

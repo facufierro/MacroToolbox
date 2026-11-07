@@ -1,11 +1,12 @@
 import { useEffect, useRef } from "react";
-import { Icon } from "./Icon";
+import { Icon, IconButton } from "./Icon";
 import type { OverlayTarget } from "./types";
 
-export function OverlayTargetsInput({ overlays, value, onChange }: {
+export function OverlayTargetsInput({ overlays, value, onChange, onEdit }: {
   overlays: OverlayTarget[];
   value: string[];
   onChange: (ids: string[]) => void;
+  onEdit?: (id: string) => void;
 }) {
   const menu = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
@@ -29,10 +30,15 @@ export function OverlayTargetsInput({ overlays, value, onChange }: {
   }}>
     <summary aria-label="Overlays"><span>{value.length ? value.map(label).join(", ") : "Select overlays"}</span><Icon name="chevron-down" /></summary>
     <div className="overlay-targets__menu">
-      {ids.map(id => <label className="checkbox-row" key={id}>
-        <input type="checkbox" checked={value.includes(id)} onChange={event => onChange(event.target.checked ? [...value, id] : value.filter(selected => selected !== id))} />
-        <span>{label(id)}</span>
-      </label>)}
+      {ids.map(id => <div className="overlay-targets__option" key={id}>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={value.includes(id)} onChange={event => onChange(event.target.checked ? [...value, id] : value.filter(selected => selected !== id))} />
+          <span>{label(id)}</span>
+        </label>
+        {onEdit && overlays.some(overlay => overlay.id === id && overlay.type === "group") &&
+          <IconButton icon="pen" label={`Edit ${label(id)}`} className="icon-btn" onClick={() => { if (menu.current) menu.current.open = false; onEdit(id); }} />}
+      </div>)}
+      {!ids.length && <div className="steps-empty">No overlays yet</div>}
     </div>
   </details>;
 }

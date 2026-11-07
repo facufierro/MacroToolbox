@@ -1,3 +1,4 @@
+import { resolveProfileEntries } from "../src/profileEntries.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
@@ -52,11 +53,11 @@ test("owned entries follow saved order while inherited slots and resolved overri
 
 // Exercise the app's resolver with the same ownership invariant used by the backend.
 const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-const resolvers = ["resolveProfileEntries", "hotkeyEntryKey", "resolveHotkeys"].map(name =>
+const resolvers = ["hotkeyEntryKey", "resolveHotkeys"].map(name =>
   app.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name).getText(app));
 const code = ts.transpileModule(resolvers.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 const { resolveProfileEntries: resolveEntries, resolveHotkeys, hotkeyEntryKey } = runInNewContext(
-  `${code};({resolveProfileEntries,resolveHotkeys,hotkeyEntryKey})`, { orderOwnedSlots, triggerIdentity });
+  `${code};({resolveProfileEntries,resolveHotkeys,hotkeyEntryKey})`, { orderOwnedSlots, triggerIdentity, resolveProfileEntries });
 
 test("profile overrides can be reordered without modifying the parent or inherited entries", () => {
   const parent = { id: "parent", parent_id: null, entries: items.slice(0, 3), overlay_groups: items.slice(0, 3) };

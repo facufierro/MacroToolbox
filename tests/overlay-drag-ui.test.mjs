@@ -10,98 +10,74 @@ async function scenario() {
   const results=[],wait=()=>new Promise(resolve=>setTimeout(resolve,40));
   const get=selector=>{const element=document.querySelector(selector);if(!element)throw Error(`Missing ${selector}`);return element;};
   const check=(name,value)=>{if(!value)throw Error(name);results.push(name);};
-  const owner=()=>window.snapshot.scopes[0].profiles[0], grouped=()=>window.snapshot.scopes[0].profiles[1];
-  const across=()=>window.snapshot.scopes[1].profiles[0],fresh=()=>window.snapshot.scopes[1].profiles[1];
-  const card=name=>get(`.overlay-group[aria-label="${name}"]`);
-  const handle=name=>get(`.editor .drag-handle[aria-label="Move ${name}"]`);
-  const destination=name=>[...document.querySelectorAll('.profile-row')].find(row=>row.querySelector('.profile-row__name').textContent===name);
-  async function drag(from,to,{drop=true,end=true}={}){
-    from.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));
-    const transfer=new DataTransfer(),start=new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer});
-    from.dispatchEvent(start);await wait();
-    to.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));await wait();
-    const marker=to.dataset.itemDrop;
-    if(drop)to.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
-    if(end)from.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:transfer}));
-    await wait();return{marker,start,from,transfer};
+  const owner=()=>window.snapshot.scopes[0].profiles[0];
+  const editor=()=>get('.behavior-overlay-editor');
+  const button=(container,label)=>[...container.querySelectorAll('button')].find(button=>button.getAttribute('aria-label')===label||button.textContent.trim()===label);
+  const click=async element=>{if(!element)throw Error('Missing button');element.click();await wait();};
+  const handle=name=>get(`.behavior-overlay-editor .drag-handle[aria-label="Move ${name}"]`);
+  const order=()=>[...editor().querySelectorAll('.overlay-type-badge--text')].map(element=>element.closest('.step-row').querySelector('.overlay-item-desc').textContent.split('"')[1]).join(',');
+  async function drag(from,to,drop=true){
+    const transfer=new DataTransfer(),destination=to.closest('.sortable-item');
+    from.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));await wait();
+    const bounds=destination.getBoundingClientRect();
+    destination.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer,clientY:bounds.top+1}));await wait();
+    const marker=destination.dataset.drop;
+    if(drop)destination.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer,clientY:bounds.top+1}));
+    from.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:transfer}));await wait();return marker;
   }
   try{
-    await wait();
-    check('a single owned overlay has a working drag handle and a draggable card',handle('Magic').draggable&&card('Magic').closest('.sortable-item').draggable);
-    check('inherited overlays and their parts cannot be dragged from the consuming profile',!card('Inherited').closest('.sortable-item').draggable&&!card('Inherited').querySelector('.overlay-item-row').closest('.sortable-item').draggable&&!document.querySelector('[aria-label="Move Inherited"]'));
-    const before=JSON.stringify(window.snapshot),original=structuredClone(owner());
-    const canceled=await drag(card('Magic'),destination('Grouped'),{drop:false});
-    check('dragging an overlay card highlights its target and cancellation changes nothing',canceled.marker==='true'&&!window.moveCalls.length&&JSON.stringify(window.snapshot)===before&&!document.querySelector('[data-item-drop]'));
-    await drag(handle('Magic'),destination('Source'));
-    const blocked=await drag(card('Magic').querySelector('[aria-label="Overlay name"]'),destination('Grouped'));
-    check('same-profile drops and dragging editable fields do not move an overlay',!window.moveCalls.length&&blocked.start.defaultPrevented&&JSON.stringify(window.snapshot)===before);
-    window.holdSave=true;
-    const pending=await drag(handle('Magic'),destination('Grouped'),{end:false});
-    check('overlay moves use one atomic API request and lock edits while saving',window.moveCalls.length===1&&window.moveCalls[0].selection.kind==='overlay'&&window.moveCalls[0].selection.items.length===4&&JSON.stringify(window.snapshot)===before&&get('.editor').disabled);
-    pending.from.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:pending.transfer}));await wait();
-    window.finishSave(false);await wait();window.holdSave=false;
-    check('failed overlay moves retain all parts and clear pending drag feedback',JSON.stringify(window.snapshot)===before&&window.errors.length===1&&!get('.editor').disabled&&!document.querySelector('[data-item-drop],[data-drop],.sortable-item--dragging'));
-    await drag(card('Magic'),destination('Grouped'));
-    check('dropping a whole overlay onto a grouped sidebar profile transfers every owned part',!owner().overlay_groups.length&&!owner().overlay_items.length&&grouped().overlay_groups.some(group=>group.id==='magic')&&grouped().overlay_items.length===4&&window.moveCalls.length===2);
-    check('whole-overlay moves preserve all four part types and raw saved appearance settings',JSON.stringify(grouped().overlay_items)===JSON.stringify(original.overlay_items)&&JSON.stringify(grouped().overlay_groups.find(group=>group.id==='magic'))===JSON.stringify(original.overlay_groups[0]));
-    check('moving an overlay preserves profile activation membership and existing behavior references',owner().armed&&!grouped().armed&&grouped().subfolder_id==='off'&&!window.snapshot.scopes[0].subfolders[0].enabled&&owner().hotkeys[0].behavior===original.hotkeys[0].behavior&&grouped().overlay_groups[0].id==='existing');
-    destination('Grouped').click();await wait();
-    const icon=card('Magic').querySelector('.overlay-type-badge--icon').closest('.overlay-item-row');
-    const partDrop=await drag(icon,card('Existing'));
-    check('a nested part row moves between overlays without dragging its parent overlay',partDrop.marker==='true'&&window.moveCalls.at(-1).selection.kind==='overlayPart'&&window.moveCalls.at(-1).targetGroupId==='existing'&&grouped().overlay_groups.length===2&&grouped().overlay_items.find(item=>item.id==='icon').group_id==='existing'&&grouped().overlay_items.length===4);
-    await drag(handle('Magic Text 0'),destination('Across apps'));
-    check('individual part handles move to profiles in another app with their overlay container',!grouped().overlay_items.some(item=>item.id==='text')&&across().overlay_items.length===1&&across().overlay_items[0].id==='text'&&across().overlay_groups[0].id==='magic'&&!across().armed);
-    await drag(card('Magic'),destination('Fresh'));
-    check('whole overlays also move across app folders with their timer state references',!grouped().overlay_groups.some(group=>group.id==='magic')&&grouped().overlay_items.length===1&&fresh().overlay_items.map(item=>item.id).join(',')==='timer,bar'&&window.snapshot.scopes[1].states.some(state=>state.id==='buff')&&fresh().overlay_items[0].timer_state_id==='buff');
-    check('moving the overlay does not remove or move unrelated parts',grouped().overlay_groups.length===1&&grouped().overlay_groups[0].id==='existing'&&grouped().overlay_items[0].id==='icon'&&across().overlay_items[0].content==='Literal overlay text');
-    const singleton=handle('Existing Icon 0');
-    check('a single remaining overlay part still has a drag handle',singleton.draggable);
-    await drag(singleton,destination('Across apps'));
-    check('the last part moves independently while its original empty overlay remains',grouped().overlay_groups.length===1&&!grouped().overlay_items.length&&across().overlay_items.length===2&&across().overlay_items.find(item=>item.id==='icon').group_id==='existing');
-    get('#reload').click();await wait();
-    check('overlay moves survive reopening without stale drag state or duplicate parts',!owner().overlay_items.length&&!grouped().overlay_items.length&&across().overlay_items.length===2&&fresh().overlay_items.length===2&&!document.querySelector('[data-item-drop],[data-drop],.sortable-item--dragging'));
+    await wait();await click(button(document,'Edit overlay'));
+    const original=structuredClone(owner()),before=JSON.stringify(window.snapshot);
+    check('inherited parts remain visible without a drag handle in the consuming group',editor().querySelector('.step-row--muted')&&!document.querySelector('[aria-label="Move Magic Bar 0"]'));
+    await drag(handle('Magic Text 1'),handle('Magic Text 0'),false);
+    check('cancelling a part drag leaves the complete saved group unchanged',order()==='First,Second'&&JSON.stringify(window.snapshot)===before&&window.saveCalls===0&&!document.querySelector('[data-drop]'));
+    const marker=await drag(handle('Magic Text 1'),handle('Magic Text 0'));
+    check('parts reorder inside the behavior draft without changing the saved group',marker==='before'&&order()==='Second,First'&&window.saveCalls===0&&JSON.stringify(window.snapshot)===before);
+    window.failSave=true;await click(button(editor(),'Save overlay'));
+    check('failed group saves retain the dragged order and all original data',order()==='Second,First'&&JSON.stringify(window.snapshot)===before&&window.errors.length===1);
+    window.failSave=false;await click(button(editor(),'Save overlay'));
+    check('saving preserves part identity, raw appearance settings, and inherited parts',owner().overlay_items.map(item=>item.id).join(',')==='timer,icon,bar,text2,text'&&owner().overlay_items.find(item=>item.id==='icon').src===original.overlay_items[1].src&&window.snapshot.scopes[0].profiles[1].overlay_items.length===1);
+    await click(button(document,'Edit overlay'));
+    handle('Magic Text 0').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}));await wait();
+    await click(button(editor(),'Cancel overlay'));
+    check('cancelling keyboard reordering does not write over the saved group',owner().overlay_items.map(item=>item.id).join(',')==='timer,icon,bar,text2,text'&&window.saveCalls===1);
+    await click(button(document,'Edit overlay'));await click(button(editor(),'Duplicate overlay'));
+    check('duplicating a whole group creates an unsaved draft with all inherited and owned parts',editor().querySelectorAll('.overlay-item-row').length===6&&owner().overlay_groups.length===1&&window.saveCalls===1);
+    await click(button(editor(),'Save overlay'));
+    const copy=owner().overlay_groups.find(group=>group.id!=='magic'),parts=owner().overlay_items.filter(item=>item.group_id===copy.id);
+    check('the behavior selects the complete saved duplicate with fresh group and part identities',copy.name==='Magic (copy)'&&parts.length===6&&parts.every(item=>!original.overlay_items.some(original=>original.id===item.id))&&get('.step-row--overlay .overlay-targets summary > span').textContent==='Magic (copy)');
+    check('duplication remaps timer links and preserves original shared state references',parts.find(item=>item.type==='icon').visible_while_timer_id===parts.find(item=>item.type==='timer').id&&parts.find(item=>item.type==='timer').timer_state_id==='buff');
+    await click(button(document,'Edit overlay'));window.confirmAnswer=false;await click(button(editor(),'Delete overlay'));
+    check('dismissing deletion leaves the saved group and selected behavior intact',owner().overlay_groups.length===2&&!!editor()&&window.saveCalls===2);
+    window.confirmAnswer=true;window.failSave=true;await click(button(editor(),'Delete overlay'));
+    check('failed deletion leaves the group editable and reports the failure',owner().overlay_groups.length===2&&!!editor()&&window.errors.length===2&&!editor().disabled);
+    window.failSave=false;await click(button(editor(),'Delete overlay'));
+    check('deleting the duplicate removes its group, parts, and in-flight behavior reference',owner().overlay_groups.length===1&&owner().overlay_items.length===5&&!document.querySelector('.behavior-overlay-editor,.step-row--overlay')&&window.saveCalls===3);
+    check('group deletion preserves the original overlay and all raw part settings',JSON.stringify(owner().overlay_groups)===JSON.stringify(original.overlay_groups)&&owner().overlay_items.every(item=>JSON.stringify(item)===JSON.stringify(original.overlay_items.find(original=>original.id===item.id))));
     document.getElementById('results').textContent=JSON.stringify({results});
   }catch(error){document.getElementById('results').textContent=JSON.stringify({results,error:error.message,stack:error.stack});}
 }
 
-test('whole overlays and nested parts move through actual profile and overlay drop targets', {skip:!browser&&'Chrome or Edge is required'},async t=>{
+test('overlay behaviors own part ordering, duplication, and confirmed group deletion', {skip:!browser&&'Chrome or Edge is required'},async t=>{
   const mocks=['./api','./AppConsole','./App.css','./CloudSettings','@tauri-apps/api/event','@tauri-apps/plugin-dialog','@tauri-apps/plugin-opener','@tauri-apps/plugin-notification'];
-  const bundle=browserModules(['App.tsx'],{mocks,expose:{[join(root,'src/App.tsx')]:['Library','ProfileEditor','useProfileItemDrag']}});
-  const profile=(id,name,extra={})=>({id,name,kind:'overlay',armed:true,parent_id:null,hotkeys:[],events:[],scripts:[],states:[],overlay_groups:[],overlay_items:[],overlay_triggers:[],...extra});
-  const part={name:'Legacy saved name',group_id:'magic',state_id:'buff',x:3,y:4};
-  const initial={version:8,variables:[],settings:{},scopes:[
-    {id:'app',name:'App',exe:'app.exe',states:[{id:'buff',name:'Buff',duration_ms:5000}],subfolders:[{id:'off',name:'Disabled',enabled:false}],profiles:[
-      profile('owner','Source',{parent_id:'parent',overlay_groups:[{id:'magic',name:'Magic',x:15,y:25,layout:'row',gap:6,disabled:true}],overlay_items:[
-        {...part,id:'timer',type:'timer',duration_ms:5000,color:'#ffffff',font_size:22,timer_state_id:'buff',start_with_overlay:true,show_only_running:true},
-        {...part,id:'icon',type:'icon',w:48,h:64,src:'data:image/png;base64,image'},
-        {...part,id:'bar',type:'bar',w:200,h:20,color:'#aabbcc',max_value:100},
-        {...part,id:'text',type:'text',content:'Literal overlay text',color:'#ffffff',font_size:18}],hotkeys:[{name:'Show',trigger:'f1',behavior:'startoverlay(magic)',state_id:null}]}),
-      profile('grouped','Grouped',{armed:false,subfolder_id:'off',overlay_groups:[{id:'existing',name:'Existing'}]}),
-      profile('parent','Parent',{overlay_groups:[{id:'inherited',name:'Inherited'}],overlay_items:[{...part,id:'inherited-text',group_id:'inherited',type:'text',content:'Inherited',font_size:16,color:'#fff'}]}),
-    ]},
-    {id:'other',name:'Other app',exe:'other.exe',states:[],subfolders:[],profiles:[profile('across','Across apps',{armed:false}),profile('fresh','Fresh')]},
-  ]};
-  const harness=`const modules={${bundle.declarations}},cache={};window.errors=[];window.moveCalls=[];window.saved=${JSON.stringify(initial)};
+  const bundle=browserModules(['App.tsx'],{mocks,expose:{[join(root,'src/App.tsx')]:['HotkeyModal']}});
+  const part={name:'Legacy saved name',group_id:'magic',state_id:null,x:3,y:4};
+  const profile={id:'owner',name:'Source',kind:'overlay',armed:true,parent_id:'parent',hotkeys:[],events:[],scripts:[],states:[],overlay_triggers:[],overlay_groups:[{id:'magic',name:'Magic',x:15,y:25,layout:'row',gap:6,disabled:true}],overlay_items:[
+    {...part,id:'timer',type:'timer',duration_ms:5000,color:'#ffffff',font_size:22,timer_state_id:'buff',start_with_overlay:true,show_only_running:true},
+    {...part,id:'icon',type:'icon',w:48,h:64,src:'data:image/png;base64,image',visible_while_timer_id:'timer'},
+    {...part,id:'bar',type:'bar',w:200,h:20,color:'#aabbcc',max_value:100},
+    {...part,id:'text',type:'text',content:'First',color:'#ffffff',font_size:18},
+    {...part,id:'text2',type:'text',content:'Second',color:'#ffffff',font_size:18}]};
+  const initial={version:8,variables:[],settings:{},scopes:[{id:'app',name:'App',exe:'app.exe',states:[{id:'buff',name:'Buff',duration_ms:5000}],profiles:[profile,
+    {...profile,id:'parent',parent_id:null,overlay_groups:[],overlay_items:[{...part,id:'inherited',type:'bar',w:100,h:20,color:'#ffffff',max_value:100}]}]}]};
+  const harness=`const modules={${bundle.declarations}},cache={};window.errors=[];window.saveCalls=0;window.reportError=error=>window.errors.push(String(error));
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async moveOverlay(sourceGameId,sourceProfileId,selection,targetGameId,dependencies,targetGroupId){window.moveCalls.push(structuredClone({sourceGameId,sourceProfileId,selection,targetGameId,dependencies,targetGroupId}));
-if(window.holdSave)await new Promise((resolve,reject)=>window.finishSave=success=>success?resolve():reject(Error('simulated persistence failure')));
-const next=structuredClone(window.snapshot),origin=next.scopes.find(scope=>scope.id===sourceGameId),from=origin.profiles.find(profile=>profile.id===sourceProfileId),scope=next.scopes.find(scope=>scope.id===targetGameId),to=scope.profiles.find(profile=>profile.id===dependencies.id);
-const items=structuredClone(selection.kind==='overlay'?selection.items:[selection.item]);
-let group=selection.kind==='overlay'?structuredClone(selection.group):structuredClone(origin.profiles.flatMap(profile=>profile.overlay_groups).find(group=>group.id===selection.item.group_id));
-if(selection.kind==='overlay')from.overlay_groups=from.overlay_groups.filter(current=>current.id!==group.id);
-from.overlay_items=from.overlay_items.filter(item=>!items.some(moved=>moved.id===item.id));
-if(targetGroupId){for(const item of items)item.group_id=targetGroupId;group=null;}
-if(group&&!to.overlay_groups.some(current=>current.id===group.id))to.overlay_groups.push(group);to.overlay_items.push(...items);
-for(const part of ['overlay_groups','overlay_items'])for(const item of dependencies[part])if(!scope.profiles.some(profile=>profile[part].some(current=>current.id===item.id)))to[part].push(structuredClone(item));
-for(const state of dependencies.states)if(!scope.states.some(current=>current.id===state.id))scope.states.push(structuredClone(state));window.saved=next;return structuredClone(next);}}};return module.exports;}
-if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
+if(id==='./api'){module.exports={api:{async getDatabase(){return structuredClone(window.snapshot);},async upsertGame(folder){if(window.failSave)throw Error('fixture failure');window.saveCalls++;return {...window.snapshot,scopes:[folder]};}}};return module.exports;}
+if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
+if(id==='@tauri-apps/plugin-dialog'){module.exports={confirm:async()=>window.confirmAnswer};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
-const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{Library,ProfileEditor,useProfileItemDrag}=load(${JSON.stringify(bundle.entry)});
-function Fixture(){const [db,onDb]=React.useState(window.saved),[selection,onSelect]=React.useState({kind:'profile',folderId:'app',profileId:'owner'}),[revision,setRevision]=React.useState(0),itemDrag=useProfileItemDrag(db,onDb);window.snapshot=db;
-const folder=db.scopes.find(folder=>folder.id===selection.folderId),profile=folder.profiles.find(profile=>profile.id===selection.profileId);
-return React.createElement(React.Fragment,null,React.createElement('button',{id:'reload',onClick:()=>{onDb(structuredClone(window.saved));setRevision(revision+1);}},'Reload'),
-React.createElement('div',{className:'main-layout'},React.createElement(Library,{key:revision,db,itemDrag,disabledProfiles:new Set(),openExes:new Set(),selection,query:'',collapsed:new Set(),width:320,onQuery(){},onToggleCollapse(){},onSelect,onToggleArmed(){},onProfileContext(){},onFolderContext(){},onDb,onModal(){}}),
-React.createElement(ProfileEditor,{key:profile.id+revision,folder,profile,variables:db.variables,itemDrag,showStates:false,onContext(){},onDb,onModal(){}})));}
+const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal}=load(${JSON.stringify(bundle.entry)}),{availableOverlayTargets}=load(${JSON.stringify(join(root,'src/overlayItems.ts'))});
+function Fixture(){const [db,onDb]=React.useState(${JSON.stringify(initial)});window.snapshot=db;return React.createElement(HotkeyModal,{initial:{name:'Show',trigger:'q',behavior:'startoverlay(magic)',state_id:null},overlayProfileId:'owner',gameExe:'app.exe',states:db.scopes[0].states,overlays:availableOverlayTargets(db.scopes[0].profiles,[]),scripts:[],variables:[],onDb,onSave(){},onClose(){}});}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Fixture));(${scenario})();`;
   const logs=join(root,'logs');mkdirSync(logs,{recursive:true});const directory=mkdtempSync(join(logs,'overlay-drag-ui-'));let result;
   try{
