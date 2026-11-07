@@ -286,7 +286,6 @@ body {
 .section-toggle > span { color: var(--text2); }
 .setup-section--disabled > .setup-section__body { opacity: 0.55; }
 .overlay-group--disabled > .steps-list { opacity: 0.55; }
-.overlay-groups { margin-top: 8px; }
 .overlay-group { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; min-width: 0; container-type: inline-size; }
 .overlay-group .section-head { margin-bottom: 6px; justify-content: flex-start; flex-wrap: wrap; gap: 6px; }
 .overlay-group__head > .section-head__actions { margin-left: auto; }
@@ -300,9 +299,6 @@ body {
 .overlay-group__config > select { height: 30px; padding: 4px 6px; font-size: 0.82rem; }
 .overlay-group__config input:disabled { opacity: 0.45; }
 .overlay-group__position { flex: 0 0 auto; }
-.overlay-group__save { flex: 1 0 100%; display: flex; justify-content: flex-end; gap: 6px; padding-top: 4px; }
-.overlay-group__save > .btn { min-width: 76px; }
-.overlay-group__members { display: flex; flex-wrap: wrap; gap: 8px 16px; border: 0; min-width: 0; padding-top: 10px; }
 .overlay-group__add { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 .overlay-item-row { min-width: 0; }
 .overlay-item-row__open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; border: 0; background: none; color: inherit; padding: 2px 0; text-align: left; font: inherit; }
@@ -630,6 +626,14 @@ textarea { resize: vertical; }
 .step-row__params { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .step-row__params input { min-width: 0; }
 .step-row__params input, .step-row__params select { height: 30px; padding: 4px 6px; }
+.step-row--overlay { flex-wrap: wrap; }
+.step-row--overlay > .step-row__params { flex-wrap: wrap; }
+.step-row--overlay .overlay-targets { flex: 1 1 140px; }
+.step-row--overlay .btn { white-space: nowrap; }
+.step-row__overlay { flex-basis: 100%; min-width: 0; }
+.behavior-overlay-editor { border: 0; padding: 0; min-width: 0; }
+.behavior-overlay-editor > .modal__actions { margin-top: 8px; }
+.behavior-overlay-editor > select { margin-bottom: 6px; }
 .overlay-targets { position: relative; flex: 1; min-width: 0; }
 .overlay-targets > summary { display: flex; align-items: center; gap: 8px; height: 30px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); cursor: pointer; font-size: 0.85rem; list-style: none; }
 .overlay-targets > summary::-webkit-details-marker { display: none; }
@@ -640,6 +644,8 @@ textarea { resize: vertical; }
 .overlay-targets__menu .checkbox-row:hover { background: var(--bg3); }
 .overlay-targets__menu .checkbox-row input { width: 14px; height: 14px; padding: 0; flex-shrink: 0; }
 .overlay-targets__menu span { overflow-wrap: anywhere; }
+.overlay-targets__option { display: flex; align-items: center; }
+.overlay-targets__option > label { flex: 1; min-width: 0; }
 .cancel-triggers { flex: 0 1 auto; max-width: 40%; }
 .cancel-triggers > summary { gap: 6px; color: var(--text2); background: transparent; }
 .cancel-triggers > summary:hover, .cancel-triggers[open] > summary { color: var(--text); background: var(--bg3); }

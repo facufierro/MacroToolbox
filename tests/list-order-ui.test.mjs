@@ -75,10 +75,6 @@ async function scenario() {
     check("editing a reordered hotkey targets its current saved index", window.modal.index === 0 && window.modal.hotkey.trigger === "3");
     await drag("Focus gained", "App started");
     check("events keep their behavior when reordered", own().events[0].event === "focus_gained" && own().events[0].behavior === "press(b)");
-    await drag("Beta overlay", "Alpha overlay");
-    check("overlay dragging preserves each overlay's membership", ids(own().overlay_groups) === "gb,ga" && own().overlay_items.find(item => item.id === "x").group_id === "ga");
-    await drag("Alpha overlay Text 1", "Alpha overlay Text 0");
-    check("dragging parts only reorders their own overlay and preserves identities", ids(own().overlay_items) === "y,x,z" && own().overlay_items[0].content === "y" && ids(own().overlay_groups) === "gb,ga");
     [...document.querySelectorAll('.section-toggle')].find(button => button.querySelector('h3')?.textContent === "Scripts").click(); await wait();
     await drag("Script two", "Script one");
     check("scripts reorder without changing code or enabled state", ids(own().scripts) === "two,one" && own().scripts[0].code === "two" && !own().scripts[0].enabled);
@@ -95,7 +91,7 @@ async function scenario() {
     externalTarget.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() })); await wait();
     check("external text and file drops cannot reorder app lists", window.saveCalls.length === calls);
     await click('#reload');
-    check("folder, profile, hotkey and overlay order survives a fresh render of persisted data", ids(window.snapshot.db.scopes) === "alpha,global,game" && ids(current().profiles) === "p,p3,hidden,parent" && own().hotkeys[0].trigger === "3" && ids(own().overlay_items) === "y,x,z");
+    check("folder, profile, and hotkey order survives a fresh render without altering saved overlay parts", ids(window.snapshot.db.scopes) === "alpha,global,game" && ids(current().profiles) === "p,p3,hidden,parent" && own().hotkeys[0].trigger === "3" && ids(own().overlay_items) === "x,y,z");
     await click('#variables');
     await drag("Other timer", "Buff timer", { after: true });
     check("variables save a drop-after order without changing IDs or values", ids(window.snapshot.db.variables) === "a,c,b" && window.snapshot.db.variables[1].value === 300);
@@ -154,7 +150,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
     const page = join(directory, "lists.html");
     writeFileSync(page, `<!doctype html><style>${readFileSync(join(root, "src/App.css"), "utf8")}#root{display:flex;flex-direction:column}nav{display:flex;gap:8px;padding:8px}.test-main{flex:1;min-width:0;padding:20px;overflow:auto}#results{position:absolute;left:-10000px}</style><div id="root"></div><pre id="results"></pre><script>${harness.replace(/<\/script/gi, "<\\/script")}</script>`);
     const output = execFileSync(browser, ["--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${join(directory, "profile")}`,
-      "--window-size=1200,1500", "--virtual-time-budget=15000", ...(process.env.LIST_ORDER_SCREENSHOT ? [`--screenshot=${resolve(logs, "list-order-preview.png")}`] : []), "--dump-dom", pathToFileURL(page).href], { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "pipe"] });
+      "--window-size=1200,1500", "--virtual-time-budget=15000", ...(process.env.LIST_ORDER_SCREENSHOT ? [`--screenshot=${resolve(logs, "list-order-preview.png")}`] : []), "--dump-dom", pathToFileURL(page).href], { encoding: "utf8", timeout: 30000, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
     const match = output.match(/<pre id="results">([^<]+)<\/pre>/);
     assert.ok(match, "browser did not complete the drag-and-drop scenario");
     result = JSON.parse(match[1].replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">"));

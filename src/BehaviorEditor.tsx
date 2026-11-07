@@ -1,16 +1,16 @@
 import { Icon, IconButton } from "./Icon";
-import { useErrorReporter } from "./AppConsole";
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { BehaviorActionPicker } from "./BehaviorActionPicker";
-import { CompactNumber } from "./CompactNumber";
-import { api } from "./api";
+import { CoordinatePicker } from "./GotoInput";
 import { ValueInput } from "./ValueInput";
 import { VariableModal } from "./VariableModal";
 import { SecureSendInput } from "./SecureSendInput";
 import { OverlayTargetsInput } from "./OverlayTargetsInput";
+import { BehaviorOverlayEditor, type OverlayEditingChange } from "./BehaviorOverlayEditor";
 import { SortableList } from "./SortableList";
 import { moveItem } from "./listOrder";
-import { areStepsValid, type Step } from "./behaviors";
+import { areStepsValid, parseSteps, stepsToString, type Step } from "./behaviors";
+import { mapOverlayActions } from "./overlayItems";
 import type { Database, Variable, OverlayTarget, ProfileState, Script, SecureTextDraft } from "./types";
 
 function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTarget[], scripts: Script[]): Step {
@@ -21,8 +21,8 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
     case "repeat": return { type, key: "", interval: "100", hold: "6" };
     case "sequence": case "parallel": return { type, steps: [{ type: "press", key: "" }] };
     case "state": return { type, stateId: states[0]?.id ?? "", action: "toggle" };
-    case "startoverlay": return { type, itemIds: overlays.length ? [overlays[0].id] : [], restart: true };
-    case "stopoverlay": return { type, itemIds: overlays.length ? [overlays[0].id] : [] };
+    case "startoverlay": return { type, itemIds: [], restart: true };
+    case "stopoverlay": return { type, itemIds: [] };
     case "bar": return { type, itemId: overlays.find(item => item.type === "bar")?.id ?? "", value: "0" };
     case "script": return { type, scriptId: scripts[0]?.id ?? "" };
     case "send": return { type, text: "" };
@@ -36,30 +36,7 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
   }
 }
 
-function CoordinatePicker({ gameExe, onPick }: { gameExe: string; onPick: (x: string, y: string) => void }) {
-  const reportError = useErrorReporter();
-  const [picking, setPicking] = useState(false);
-  async function pick() {
-    setPicking(true);
-    try {
-      const [x, y] = await api.pickCoordinate(gameExe);
-      onPick(String(x), String(y));
-    } catch (error) { reportError(error); }
-    finally { setPicking(false); }
-  }
-  return <IconButton showLabel={picking} icon={picking ? "spinner" : "crosshairs"} label={picking ? "Click in app" : "Pick position"}
-    spin={picking} className="btn btn--ghost btn--sm coordinate-picker" onClick={pick} disabled={picking} />;
-}
-
-export function GotoInput({ x, y, gameExe, onChange }: { x: string; y: string; gameExe: string; onChange: (x: string, y: string) => void }) {
-  return <div className="goto-input">
-    <CompactNumber label="X (%)" prefix="X" unit="%" min={0} max={100} step={0.1} value={x} onChange={value => onChange(value, y)} />
-    <CompactNumber label="Y (%)" prefix="Y" unit="%" min={0} max={100} step={0.1} value={y} onChange={value => onChange(x, value)} />
-    <CoordinatePicker gameExe={gameExe} onPick={onChange} />
-  </div>;
-}
-
-function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, hasTrigger, secureTexts, editingVariableId, onSecureTextChange, onDb, onChange, onDelete, onMove }: {
+function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, hasTrigger, secureTexts, editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange, onDelete, onMove }: {
   step: Step;
   index: number;
   total: number;
@@ -71,6 +48,10 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   hasTrigger: boolean;
   secureTexts: SecureTextDraft[];
   editingVariableId?: string;
+  overlayProfileId?: string;
+  editingOverlay?: boolean;
+  onOverlayEditingChange?: OverlayEditingChange;
+  onOverlayRemoved: (ids: string[]) => void;
   onSecureTextChange?: (credentialId: string, password: string) => void;
   onDb: (db: Database) => void;
   onChange: (s: Step) => void;
@@ -78,10 +59,18 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   onMove: (dir: -1 | 1) => void;
 }) {
   const [editingBehavior, setEditingBehavior] = useState<Variable | "new" | null>(null);
+  const [overlayEditor, setOverlayEditor] = useState<string | null>(() =>
+    (step.type === "startoverlay" || step.type === "stopoverlay") && !step.itemIds.length ? "" : null);
+  const overlayEditorId = useId();
+  useEffect(() => {
+    if (overlayEditor === null) return;
+    onOverlayEditingChange?.(overlayEditorId, true);
+    return () => onOverlayEditingChange?.(overlayEditorId, false);
+  }, [overlayEditor, overlayEditorId, onOverlayEditingChange]);
   const behaviorChoices = variables.filter(variable => variable.type === "behavior" && variable.id !== editingVariableId);
   return (
-    <div className={`step-row${step.type === "sequence" || step.type === "parallel" ? " step-row--group" : ""}`}>
-      <span className="step-row__type">{step.type}</span>
+    <div className={`step-row${step.type === "startoverlay" || step.type === "stopoverlay" ? " step-row--overlay" : ""}${step.type === "sequence" || step.type === "parallel" ? " step-row--group" : ""}`}>
+      <span className="step-row__type">{step.type === "startoverlay" || step.type === "stopoverlay" ? "overlay" : step.type}</span>
       <div className="step-row__params">
         {step.type === "behavior" && <>
           <select aria-label="Behavior variable" value={step.variableId} onChange={event => onChange({ ...step, variableId: event.target.value })}>
@@ -115,7 +104,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           </select>
         )}
         {(step.type === "sequence" || step.type === "parallel") && (
-          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} onSecureTextChange={onSecureTextChange} onDb={onDb}
+          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={onOverlayRemoved} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={steps => onChange({ ...step, steps })} />
         )}
         {step.type === "unknown" && <input value={step.source} readOnly aria-label="Unsupported action" />}
@@ -157,17 +146,23 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           </select>
           </>
         )}
-        {step.type === "startoverlay" && (
-          <>
-            <select value={step.restart ? "restart" : "start"} aria-label="Overlay action"
-              onChange={e => onChange({ ...step, restart: e.target.value === "restart" })}>
-              <option value="start">Start</option>
-              <option value="restart">Restart</option>
-            </select>
-          </>
-        )}
-        {(step.type === "startoverlay" || step.type === "stopoverlay") && <OverlayTargetsInput overlays={overlays} value={step.itemIds}
-          onChange={itemIds => onChange({ ...step, itemIds })} />}
+        {(step.type === "startoverlay" || step.type === "stopoverlay") && <>
+          <select value={step.type === "stopoverlay" ? "stop" : step.restart ? "restart" : "start"} aria-label="Overlay action"
+            title="Start keeps running timers; Restart resets them; Stop hides the selected overlays"
+            onChange={event => onChange(event.target.value === "stop"
+              ? { type: "stopoverlay", itemIds: step.itemIds }
+              : { type: "startoverlay", itemIds: step.itemIds, restart: event.target.value === "restart" })}>
+            <option value="start">Start</option>
+            <option value="restart">Restart</option>
+            <option value="stop">Stop</option>
+          </select>
+          {(overlays.length > 0 || step.itemIds.length > 0) && <OverlayTargetsInput overlays={overlays} value={step.itemIds} onChange={itemIds => {
+            onChange({ ...step, itemIds });
+            setOverlayEditor(itemIds.length ? null : "");
+          }} onEdit={editingOverlay ? undefined : setOverlayEditor} />}
+          {step.itemIds.length === 1 && overlays.some(overlay => overlay.id === step.itemIds[0] && overlay.type === "group") &&
+            <IconButton icon="pen" label="Edit overlay" className="icon-btn" disabled={editingOverlay} onClick={() => setOverlayEditor(step.itemIds[0])} />}
+        </>}
         {step.type === "bar" && (
           <>
             <select value={step.itemId} onChange={e => onChange({ ...step, itemId: e.target.value })} aria-label="Overlay item">
@@ -194,12 +189,20 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           onChange={onSecureTextChange && ((credentialId, password) => { onSecureTextChange(credentialId, password); onChange({ ...step, credentialId }); })} />}
       </div>
       <div className="step-row__btns">
-        <IconButton icon="arrow-up" label="Move up"  className="icon-btn" disabled={index === 0} onClick={() => onMove(-1)} />
-        <IconButton icon="arrow-down" label="Move down"  className="icon-btn" disabled={index === total - 1} onClick={() => onMove(1)} />
-        <IconButton icon="trash-can" label="Delete step" className="icon-btn icon-btn--danger" onClick={onDelete} />
+        <IconButton icon="arrow-up" label="Move up"  className="icon-btn" disabled={editingOverlay || index === 0} onClick={() => onMove(-1)} />
+        <IconButton icon="arrow-down" label="Move down"  className="icon-btn" disabled={editingOverlay || index === total - 1} onClick={() => onMove(1)} />
+        <IconButton icon="trash-can" label="Delete step" className="icon-btn icon-btn--danger" disabled={editingOverlay} onClick={onDelete} />
       </div>
+      {overlayEditor !== null && (step.type === "startoverlay" || step.type === "stopoverlay") && <div className="step-row__overlay">
+        <BehaviorOverlayEditor groupId={overlayEditor} defaultProfileId={overlayProfileId} onDb={onDb} onClose={() => {
+          if (overlayEditor === "" && !step.itemIds.length) onDelete();
+          else setOverlayEditor(null);
+        }}
+          onSaved={id => { if (overlayEditor !== id) onChange({ ...step, itemIds: [id] }); setOverlayEditor(null); }}
+          onDeleted={ids => { onOverlayRemoved(ids); setOverlayEditor(null); }} />
+      </div>}
       {editingBehavior && <VariableModal initial={editingBehavior === "new" ? undefined : editingBehavior} variables={variables} fixedType="behavior"
-        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} />}
+        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
         onClose={() => setEditingBehavior(null)} onSaved={(variable, db) => {
           onDb(db);
           if (step.type === "behavior") onChange({ ...step, variableId: variable.id });
@@ -209,7 +212,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   );
 }
 
-export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], hasTrigger = true, secureTexts = [], editingVariableId, onSecureTextChange, onDb, onChange }: {
+export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], hasTrigger = true, secureTexts = [], editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange }: {
   steps: Step[];
   gameExe: string;
   states: ProfileState[];
@@ -219,6 +222,10 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
   hasTrigger?: boolean;
   secureTexts?: SecureTextDraft[];
   editingVariableId?: string;
+  overlayProfileId?: string;
+  editingOverlay?: boolean;
+  onOverlayEditingChange?: OverlayEditingChange;
+  onOverlayRemoved?: (ids: string[]) => void;
   onSecureTextChange?: (credentialId: string, password: string) => void;
   onDb: (db: Database) => void;
   onChange: (steps: Step[]) => void;
@@ -226,6 +233,7 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
   const [savingAsVariable, setSavingAsVariable] = useState(false);
   const [addingAction, setAddingAction] = useState(false);
   const addButton = useRef<HTMLButtonElement>(null);
+  const removeOverlayTargets = onOverlayRemoved ?? (ids => onChange(parseSteps(mapOverlayActions(stepsToString(steps), id => ids.includes(id) ? null : id))));
   function closeActions() { setAddingAction(false); addButton.current?.focus(); }
   function addStep(step: Step) { onChange([...steps, step]); }
   function removeStep(i: number) { onChange(steps.filter((_, index) => index !== i)); }
@@ -241,24 +249,24 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
   return (
     <div className="steps-section">
       <SortableList items={steps} itemKey={(_step, index) => String(index)} itemLabel={(step, index) => `${step.type} step ${index + 1}`}
-        onReorder={(from, to, after) => onChange(moveItem(steps, (_step, index) => String(index), from, to, after))}
+        canMove={() => !editingOverlay} onReorder={(from, to, after) => onChange(moveItem(steps, (_step, index) => String(index), from, to, after))}
         empty={<div className="steps-empty">No steps yet</div>}>
         {(step, i) => (
-          <StepRow step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} onSecureTextChange={onSecureTextChange} onDb={onDb}
+          <StepRow step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={removeOverlayTargets} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={next => updateStep(i, next)}
             onDelete={() => removeStep(i)}
             onMove={direction => moveStep(i, direction)} />
         )}
       </SortableList>
       <div className="step-add-btns">
-        <button ref={addButton} type="button" className="btn btn--ghost btn--sm action-label-btn" aria-label="Add action" aria-expanded={addingAction} onClick={() => setAddingAction(!addingAction)}><Icon name="plus" /><span>Add action</span></button>
+        <button ref={addButton} type="button" className="btn btn--ghost btn--sm action-label-btn" aria-label="Add action" disabled={editingOverlay} aria-expanded={addingAction} onClick={() => setAddingAction(!addingAction)}><Icon name="plus" /><span>Add action</span></button>
         {!!steps.length && <IconButton icon="floppy-disk" label="Save as variable" className="btn btn--ghost btn--sm"
-          disabled={!areStepsValid(steps, variables, hasTrigger, secureTexts)} onClick={() => setSavingAsVariable(true)} />}
+          disabled={editingOverlay || !areStepsValid(steps, variables, hasTrigger, secureTexts)} onClick={() => setSavingAsVariable(true)} />}
       </div>
       {addingAction && <BehaviorActionPicker hasTrigger={hasTrigger} canSecureSend={!!onSecureTextChange}
         onClose={closeActions} onSelect={type => { addStep(newStep(type, states, overlays, scripts)); closeActions(); }} />}
       {savingAsVariable && <VariableModal variables={variables} fixedType="behavior" initialBehavior={steps} initialSecureTexts={secureTexts}
-        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} />}
+        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
         onClose={() => setSavingAsVariable(false)} onSaved={(variable, db) => {
           onDb(db);
           onChange([{ type: "behavior", variableId: variable.id }]);

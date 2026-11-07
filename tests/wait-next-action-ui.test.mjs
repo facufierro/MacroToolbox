@@ -30,7 +30,10 @@ async function scenario(){
     check('reordering updates the next action without storing a stale target or key',JSON.parse(window.saved.behavior)[1].type==='startoverlay'&&JSON.parse(window.saved.behavior)[1].restart&&!('key'in JSON.parse(window.saved.behavior)[0]));
     await add('Wait for');
     check('new Wait for steps have no controls and require a following action',!rows().at(-1).querySelector('.step-row__params').querySelector('input,select,button')&&get('[aria-label="Save"]').disabled);
-    await add('Start overlay');
+    await add('Overlay');
+    const targets=rows().at(-1).querySelector('.overlay-targets');
+    targets.querySelector('summary').click();await wait();targets.querySelector('input').click();await wait();
+    targets.querySelector('summary').click();await wait();
     check('overlay actions can follow Wait for without a hardcoded input field',!get('[aria-label="Save"]').disabled);
     await click('[aria-label="Save"]');
     const appended=JSON.parse(window.saved.behavior);
@@ -45,8 +48,10 @@ test('Wait for defaults to the next action and preserves existing waits through 
   const original=[{type:'waitfor',key:'LButton'},{type:'mousepress',key:'rctrl LButton',onRelease:true,doubleClick:true},{type:'startoverlay',itemId:'timer',restart:true}];
   const expected=[{type:'waitfor'},{type:'mousepress',key:'LButton'},original[1],{type:'startoverlay',restart:true,itemIds:['timer']}];
   const harness=`const modules={${bundle.declarations}},cache={};window.original=${JSON.stringify(original)};window.expected=${JSON.stringify(expected)};
+window.reportError=error=>{throw error;};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>{throw error;}};return module.exports;}
+if(id==='./api'){module.exports={api:{async getDatabase(){return {version:8,scopes:[],variables:[],settings:{}};}}};return module.exports;}
+if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal}=load(${JSON.stringify(bundle.entry)});
 function Fixture(){const [revision,setRevision]=React.useState(0);return React.createElement(React.Fragment,null,React.createElement('button',{id:'reload',onClick:()=>setRevision(revision+1)},'Reload'),
