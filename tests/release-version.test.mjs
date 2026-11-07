@@ -32,19 +32,22 @@ function Check-Version($tags, $archives, $requested = '') {
   [pscustomobject]@{ tag = $gitTag; released = @($changelogs | Where-Object IsReleased | ForEach-Object Tag) }
 }
 New-Item -ItemType Directory -Path (Join-Path $FixturePath 'changelog'), (Join-Path $FixturePath 'releases/v6.4.0') -Force | Out-Null
+Set-Content (Join-Path $FixturePath 'changelog/v4.3.0.md') 'Historical changelog with its tag and archive removed'
 Set-Content (Join-Path $FixturePath 'changelog/v6.3.2.md') 'Previous release'
 Set-Content (Join-Path $FixturePath 'changelog/v6.4.0.md') 'Current development release'
 $local = Check-Version @('v6.3.2') @('v6.3.2')
 $tagged = Check-Version @('v6.3.2', 'v6.4.0') @('v6.3.2')
+$taggedWithoutArchive = Check-Version @('v6.4.0') @()
 $archived = Check-Version @('v6.3.2') @('v6.3.2', 'v6.4.0')
 Set-Content (Join-Path $FixturePath 'changelog/v6.5.0.md') 'Next development release'
 $next = Check-Version @('v6.3.2', 'v6.4.0') @('v6.3.2')
 $explicit = Check-Version @('v6.3.2') @('v6.3.2') 'v6.4.0'
-@{local=$local;tagged=$tagged;archived=$archived;next=$next;explicit=$explicit} | ConvertTo-Json -Depth 5 -Compress
+@{local=$local;tagged=$tagged;taggedWithoutArchive=$taggedWithoutArchive;archived=$archived;next=$next;explicit=$explicit} | ConvertTo-Json -Depth 5 -Compress
 `);
     const output = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-ProjectPath", root, "-FixturePath", fixture], { encoding: "utf8", timeout: 15000 });
     const result = JSON.parse(output.trim().split(/\r?\n/).at(-1));
     assert.equal(result.local.tag, "v6.4.0");
+    assert.equal(result.taggedWithoutArchive.tag, "v6.4.0", "a tagged release missing its installer must rebuild that release instead of a historical changelog");
     assert.deepEqual(result.local.released, ["v6.3.2"]);
     for (const state of ["tagged", "archived"]) {
       assert.equal(result[state].tag, "v6.4.0");
