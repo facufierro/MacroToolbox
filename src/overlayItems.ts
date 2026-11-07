@@ -1,6 +1,34 @@
 import { expandBehavior, mapBehavior } from "./behaviors.ts";
+import { resolveProfileEntries } from "./profileEntries.ts";
 import { orderOwnedSlots } from "./listOrder.ts";
 import type { OverlayGroup, OverlayItem, OverlayTarget, Profile, Scope, Variable } from "./types";
+
+export function newOverlayItem(type: OverlayItem["type"], groupId: string): OverlayItem {
+  const base = { id: crypto.randomUUID(), name: "", x: 0, y: 0, state_id: null, group_id: groupId };
+  switch (type) {
+    case "timer": return { ...base, type, duration_ms: 60000, color: "#ffffff", font_size: 22, timer_state_id: null, show_only_running: true };
+    case "icon": return { ...base, type, w: 64, h: 64, src: null };
+    case "bar": return { ...base, type, w: 200, h: 20, color: "#4ade80", max_value: 100 };
+    case "text": return { ...base, type, font_size: 16, color: "#ffffff", content: "" };
+  }
+}
+
+// Merge only the edited group into the latest folder, preserving unrelated edits.
+export function updateBehaviorOverlay(scope: Scope, profileId: string, group: OverlayGroup, items: OverlayItem[]): Scope {
+  const profile = scope.profiles.find(profile => profile.id === profileId);
+  if (!profile) throw new Error("Profile not found.");
+  if (items.some(item => item.group_id !== group.id)) throw new Error("Overlay part belongs to another group.");
+  const removedItems = profile.overlay_items.filter(item => item.group_id === group.id && !items.some(current => current.id === item.id));
+  const next = { ...scope, profiles: scope.profiles.map(profile => profile.id !== profileId ? profile : { ...profile,
+    overlay_groups: profile.overlay_groups.some(current => current.id === group.id)
+      ? profile.overlay_groups.map(current => current.id === group.id ? group : current) : [...profile.overlay_groups, group],
+    overlay_items: orderOwnedSlots([
+      ...profile.overlay_items.filter(item => !removedItems.some(removed => removed.id === item.id)).map(item => items.find(current => current.id === item.id) ?? item),
+      ...items.filter(item => !profile.overlay_items.some(current => current.id === item.id)),
+    ], items, item => item.id),
+  }) };
+  return removedItems.reduce((scope, item) => removeUnavailableTarget(scope, item.id), next);
+}
 
 // Part names are a view of their overlay and order; legacy saved names are not editable.
 export function nameOverlayParts(items: OverlayItem[], groups: OverlayGroup[]): OverlayItem[] {
@@ -42,6 +70,14 @@ export function availableOverlayTargets(profiles: Profile[], items: OverlayItem[
   for (const profile of profiles)
     for (const group of profile.overlay_groups ?? []) if (!groups.has(group.id)) groups.set(group.id, group);
   return [...[...groups.values()].map(group => ({ ...group, type: "group" as const })), ...availableOverlayItems(profiles, items, [...groups.values()])];
+}
+
+export function findOverlayOwner(profiles: Profile[], groupId: string, profileId?: string): Profile | undefined {
+  const preferred = profiles.find(profile => profile.id === profileId);
+  const inherited = preferred && resolveProfileEntries(profiles, preferred,
+    owner => owner.overlay_groups.map(group => ({ owner, group })), entry => entry.group.id)
+    .find(({ value }) => value.group.id === groupId)?.value.owner;
+  return inherited || profiles.find(profile => profile.overlay_groups.some(group => group.id === groupId));
 }
 
 export function saveOverlayGroup(profile: Profile, group: OverlayGroup, members: string[]): Profile {
@@ -174,4 +210,10 @@ function removeUnavailableTarget(scope: Scope, itemId: string): Scope {
       events: profile.events.map(event => ({ ...event, behavior: removeAction(event.behavior) })),
     })),
   };
+}
+
+export function resolveOverlayItems(profiles: Profile[], profile: Profile): Array<{ item: OverlayItem; source: OverlayItem; own: boolean }> {
+  const entries = resolveProfileEntries(profiles, profile, current => current.overlay_items, item => item.id);
+  const items = nameOverlayParts(entries.map(({ value }) => value), resolveOverlayGroups(profiles, profile));
+  return entries.map(({ own, value }, index) => ({ item: items[index], source: value, own }));
 }

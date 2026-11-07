@@ -7,6 +7,7 @@ import { readVariable, validateVariableBehaviors } from "./variables";
 import { areStepsValid, parseSteps, stepsToString, type Step } from "./behaviors";
 import { usedSecureTexts } from "./secureText";
 import { TriggerListInput } from "./TriggerListInput";
+import { useOverlayEditors, type OverlayEditingChange } from "./BehaviorOverlayEditor";
 import type { Database, Variable, VariableType, ValueType, SecureTextDraft } from "./types";
 
 type VariableDraft = { type: "triggers"; value: string[] } | { type: ValueType | "behavior"; value: string };
@@ -17,6 +18,8 @@ export interface VariableBehaviorEditorProps {
   secureTexts: SecureTextDraft[];
   onSecureTextChange: (credentialId: string, password: string) => void;
   editingVariableId: string;
+  editingOverlay: boolean;
+  onOverlayEditingChange: OverlayEditingChange;
 }
 
 export function VariableModal({ initial, initialBehavior, initialSecureTexts = [], variables, fixedType, lockType = false, renderBehavior, onSaved, onClose }: {
@@ -41,6 +44,7 @@ export function VariableModal({ initial, initialBehavior, initialSecureTexts = [
   const { type, value } = draft;
   const [saving, setSaving] = useState(false);
   const [secureTexts, setSecureTexts] = useState<SecureTextDraft[]>(initialSecureTexts);
+  const overlayEditors = useOverlayEditors();
   let variable: Variable | null = null;
   try {
     if (type === "number" && !value.trim()) throw new Error("Enter a number");
@@ -54,7 +58,7 @@ export function VariableModal({ initial, initialBehavior, initialSecureTexts = [
   } catch { variable = null; }
   async function save() {
     const saved = variable;
-    if (!saved) return;
+    if (!saved || overlayEditors.editingOverlay) return;
     setSaving(true);
     try {
       const next = variables.some(current => current.id === id)
@@ -73,7 +77,7 @@ export function VariableModal({ initial, initialBehavior, initialSecureTexts = [
         setDraft(next === "triggers" ? { type: next, value: [""] } : { type: next, value: next === "number" ? "0" : "" });
       }}><option value="number">Number</option><option value="text">Text</option><option value="keys">Keys</option><option value="triggers">Trigger list</option>{renderBehavior && <option value="behavior">Behavior</option>}</select></label>
       <div className="form-field"><span>Value</span>
-        {type === "behavior" ? <fieldset className="variable-behavior-editor" disabled={saving}>{renderBehavior?.({ steps: parseSteps(value), editingVariableId: id,
+        {type === "behavior" ? <fieldset className="variable-behavior-editor" disabled={saving}>{renderBehavior?.({ steps: parseSteps(value), editingVariableId: id, ...overlayEditors,
           onChange: steps => setDraft({ type: "behavior", value: stepsToString(steps) }), secureTexts,
           onSecureTextChange: (credentialId, password) => setSecureTexts(current => [...current.filter(draft => draft.credentialId !== credentialId), { credentialId, password }]),
         })}</fieldset> : type === "triggers" ? <TriggerListInput value={value} disabled={saving} onChange={next => setDraft({ type: "triggers", value: next })} />
@@ -83,7 +87,7 @@ export function VariableModal({ initial, initialBehavior, initialSecureTexts = [
       </div>
       <div className="modal__actions">
         <button type="button" className="btn btn--secondary" disabled={saving} onClick={onClose}>Cancel</button>
-        <button type="submit" className="btn btn--primary" disabled={saving || !variable}>{fixedType ? "Save and use" : "Save"}</button>
+        <button type="submit" className="btn btn--primary" disabled={saving || overlayEditors.editingOverlay || !variable}>{fixedType ? "Save and use" : "Save"}</button>
       </div>
     </form>
   </div>, document.body);

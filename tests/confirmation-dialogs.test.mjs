@@ -6,19 +6,20 @@ import ts from "typescript";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 // Exercise the actual action callbacks without mounting the app or opening native dialogs.
-const source = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"),
-  ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const handlers = [];
-function visit(node) {
+function visit(node, source) {
   if (ts.isCallExpression(node) && ["confirm", "confirmDialog"].includes(node.expression.getText(source))) {
     let handler = node.parent;
     while (handler && !ts.isArrowFunction(handler)) handler = handler.parent;
     assert.ok(handler, "confirmation must belong to an action callback");
     handlers.push({ label: node.arguments[0].head.text, code: handler.getText(source) });
   }
-  ts.forEachChild(node, visit);
+  ts.forEachChild(node, child => visit(child, source));
 }
-visit(source);
+for (const name of ["App.tsx", "BehaviorOverlayEditor.tsx"]) {
+  const source = ts.createSourceFile(name, readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  visit(source, source);
+}
 assert.equal(handlers.length, 4, "cover overlay, profile, folder, and process confirmations");
 
 for (const { label, code } of handlers) {
@@ -34,16 +35,17 @@ for (const { label, code } of handlers) {
       } } };
       const api = Object.fromEntries(["upsertGame", "deleteProfile", "deleteGame", "killGame"]
         .map(name => [name, async () => { actions.push(name); return {}; }]));
+      api.getDatabase = async () => ({ scopes: [{ profiles: [{ id: "profile", overlay_items: [] }] }] });
       const failure = new Error("dialog unavailable");
       let running;
       try {
-        const run = runInNewContext(`(${code})`, {
+        const run = runInNewContext(ts.transpileModule(`(${code})`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, {
           confirm() { throw new Error("The browser confirm shim calls an unavailable command"); },
           confirmDialog, api,
-          group: { name: "Overlay" }, p: { id: "profile", name: "Profile" },
+          group: { id: "overlay", name: "Overlay" }, p: { id: "profile", name: "Profile" },
           folder: { id: "folder", name: "Folder" }, folderId: "folder", profileId: "profile", targetExe: "game.exe",
-          profile: { overlay_items: [] }, removeOverlayGroup: () => ({}),
-          onDb() {}, handleDb() {}, reportError: error => errors.push(error),
+          profile: { overlay_items: [] }, removeOverlayGroup: () => ({ profiles: [] }),
+          onDb() {}, onDeleted() {}, setSaving() {}, handleDb() {}, reportError: error => errors.push(error),
         });
         running = run().catch(error => errors.push(error));
         await Promise.resolve();
