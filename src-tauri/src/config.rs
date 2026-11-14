@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v13 adds opt-in cancellation when another behavior starts.
-pub const CURRENT_DB_VERSION: u32 = 13;
+/// older files. v14 unifies Press and makes legacy mouse delivery explicitly compatible.
+pub const CURRENT_DB_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -627,7 +627,7 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         }
         // These versions share the folder-owned profile shape. Defaults, typed
         // variable deserialization, and normalization below upgrade their fields.
-        3..=12 => {
+        3..=13 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             db.version = CURRENT_DB_VERSION;
             (db, true)
@@ -1140,6 +1140,79 @@ mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
 
     #[test]
+    fn press_migration_preserves_methods_references_and_configuration_across_skipped_versions() {
+        for version in [3, 7, 12, 13] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-press-{version}-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let behavior = serde_json::json!([{"type":"sequence","steps":[
+                {"type":"press","key":"LButton","onRelease":true},
+                {"type":"parallel","steps":[{"type":"mousepress","key":{"variable":"mouse"},"doubleClick":true,"onRelease":true},
+                    {"type":"send","text":"literal mousepress(LButton) stays text"}]},
+                {"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]}]).to_string();
+            let source = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe","close_to_tray":true},
+                "variables":[{"id":"mouse","name":"Mouse","type":"keys","value":"rctrl LButton"},
+                    {"id":"shared","name":"Shared","type":"behavior","value":"press(LButton);pressalt(RButton)"}],
+                "scopes":[{"id":"global","name":"Global","exe":"*"},{"id":"game","name":"Game","exe":"game.exe",
+                    "states":[{"id":"state","name":"State"}],"subfolders":[{"id":"group","name":"Group","enabled":false}],
+                    "profiles":[{"id":"p","name":"Login","armed":true,"subfolder_id":"group",
+                        "hotkeys":[{"trigger":"f8","state_id":"state","behavior":behavior}],
+                        "events":[{"event":"focus_gained","behavior":"mousepress(MButton)"}]}]}]}).to_string();
+            std::fs::write(&path, &source).unwrap();
+            let db = load_db(&path).unwrap();
+            assert_eq!(db.version, super::CURRENT_DB_VERSION);
+            let game = &db.games[1];
+            let profile = &game.profiles[0];
+            assert_eq!((&game.id, &game.exe, &game.states[0].id), (&"game".to_string(), &"game.exe".to_string(), &"state".to_string()));
+            assert_eq!(profile.subfolder_id.as_deref(), Some("group"));
+            assert!(profile.armed && !game.subfolders[0].enabled && db.settings.close_to_tray);
+            assert_eq!(profile.hotkeys[0].state_id.as_deref(), Some("state"));
+            let actions: serde_json::Value = serde_json::from_str(&profile.hotkeys[0].behavior).unwrap();
+            assert_eq!(actions[0]["steps"][0], serde_json::json!({"type":"press","key":"LButton","onRelease":true}));
+            assert_eq!(actions[0]["steps"][1]["steps"][0], serde_json::json!({"type":"press","key":{"variable":"mouse"},"compatibility":true,"doubleClick":true,"onRelease":true}));
+            assert_eq!(actions[0]["steps"][1]["steps"][1]["text"], "literal mousepress(LButton) stays text");
+            assert_eq!(actions[0]["steps"][2]["credentialId"], "b8483943-e86c-41aa-a593-7388833369cd");
+            let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
+            assert_eq!(event, serde_json::json!([{"type":"press","key":"MButton","compatibility":true}]));
+            let crate::variables::VariableValue::Behavior(shared) = &db.variables[1].value else { panic!("wrong variable type"); };
+            assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap(), serde_json::json!([
+                {"type":"press","key":"LButton"},{"type":"press","key":"RButton","compatibility":true}]));
+            let resolved = crate::behavior::resolve(&profile.hotkeys[0].behavior, &db.variables, Some("f8")).unwrap();
+            crate::behavior::validate(&resolved, true).unwrap();
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak", path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let reopened = load_db(&path).unwrap();
+            assert_eq!(reopened.games[1].profiles[0].hotkeys, profile.hotkeys);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
+            std::fs::remove_file(path).unwrap();
+            std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_press_upgrade_keeps_original_settings_and_its_backup() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-press-failure-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut source = serde_json::json!({"version":13,"settings":{"ahk_exe":""},"scopes":[{"id":"game","name":"Game","profiles":[{
+            "id":"p","name":"Login","hotkeys":[{"trigger":"q","behavior":"[{\"type\":\"mousepress\",\"key\":\"LButton\",\"doubleClick\":\"invalid\"}]"}]}]}]});
+        std::fs::write(&path, source.to_string()).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source.to_string());
+        source["scopes"][0]["profiles"][0]["hotkeys"][0]["behavior"] = serde_json::json!("mousepress(LButton)");
+        std::fs::write(&path, source.to_string()).unwrap();
+        let pending = std::path::PathBuf::from(format!("{}.tmp", path.display()));
+        std::fs::create_dir(&pending).unwrap();
+        assert!(load_db(&path).is_err());
+        let backup = std::path::PathBuf::from(format!("{}.v13.bak", path.display()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source.to_string());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), source.to_string());
+        std::fs::remove_dir(pending).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
     fn overlay_selections_upgrade_across_versions_and_reopen_without_rewriting() {
         for version in [3, 8, 9] {
             let path = std::env::temp_dir().join(format!("macrotoolbox-overlay-targets-{version}-{}.json",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
@@ -1157,7 +1230,7 @@ mod tests {
             let profile = &db.games[1].profiles[0];
             let upgraded: serde_json::Value = serde_json::from_str(&profile.hotkeys[0].behavior).unwrap();
             assert_eq!(upgraded[0]["steps"],serde_json::json!([
-                {"type":"waitfor"},{"type":"mousepress","key":"LButton"},
+                {"type":"waitfor"},{"type":"press","key":"LButton","compatibility":true},
                 {"type":"startoverlay","itemIds":["first"],"restart":true},{"type":"stopoverlay","itemIds":["first","second"]}]));
             let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
             assert_eq!(event[0]["itemIds"],serde_json::json!(["first"]));
@@ -1222,7 +1295,7 @@ mod tests {
             let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
             assert_eq!(event[1],serde_json::json!({"type":"press","key":"rctrl x"}));
             let shared = match &upgraded.variables[1].value { crate::variables::VariableValue::Behavior(value) => value, _ => panic!("wrong variable type") };
-            assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap()[1],serde_json::json!({"type":"mousepress","key":"LButton"}));
+            assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap()[1],serde_json::json!({"type":"press","key":"LButton","compatibility":true}));
             let saved = std::fs::read(&path).unwrap();
             let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
             load_db(&path).unwrap();
@@ -1513,7 +1586,7 @@ mod tests {
 
     #[test]
     fn unassigned_copies_remain_distinct_across_inheritance_and_reopening_settings() {
-        let db: super::Database = serde_json::from_value(serde_json::json!({
+        let mut db: super::Database = serde_json::from_value(serde_json::json!({
             "version": super::CURRENT_DB_VERSION, "settings": {"ahk_exe":""}, "scopes":[{
                 "id":"game", "name":"Game", "exe":"game.exe", "profiles":[
                     {"id":"parent", "name":"Parent", "hotkeys":[
@@ -1528,6 +1601,7 @@ mod tests {
             }]
         })).unwrap();
         let path = std::env::temp_dir().join(format!("macrotoolbox-copies-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        super::ensure_global_folder(&mut db);
         super::save_db(&path, &db).unwrap();
         let mut loaded = load_db(&path).unwrap();
         assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&db).unwrap());
@@ -1870,7 +1944,8 @@ mod tests {
         std::fs::remove_dir(&temporary).unwrap();
         let migrated = load_db(&path).unwrap();
         assert_eq!(migrated.games[0].profiles[0].hotkeys[0].cancel_triggers, ["RButton"]);
-        assert_eq!(migrated.games[0].profiles[0].hotkeys[0].behavior, "[{\"type\":\"waitfor\"},{\"type\":\"mousepress\",\"key\":\"LButton\"},{\"type\":\"send\",\"text\":\"done\"}]");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&migrated.games[0].profiles[0].hotkeys[0].behavior).unwrap(), serde_json::json!([
+            {"type":"waitfor"},{"type":"press","key":"LButton","compatibility":true},{"type":"send","text":"done"}]));
         let saved = std::fs::read(&path).unwrap();
         assert_eq!(load_db(&path).unwrap().games[0].profiles[0].hotkeys[0].cancel_triggers, ["RButton"]);
         assert_eq!(std::fs::read(&path).unwrap(), saved);

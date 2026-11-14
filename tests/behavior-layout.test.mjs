@@ -37,7 +37,7 @@ async function scenario() {
       const controls = [...row.querySelectorAll('.step-row__params input,.step-row__params select,.step-row__params button,.step-row__params output')];
       const centers = controls.map(element => { const rect = bounds(element); return rect.top + rect.height / 2; });
       const type = row.querySelector('.step-row__type').textContent;
-      if (innerWidth < 900 && type === 'mousepress') {
+      if (innerWidth < 900 && row.querySelector('[aria-label="Click type"]')) {
         const frame = bounds(row);
         check('mousepress controls wrap within the row at narrower widths', frame.height < 100 && controls.every(element => {
           const rect = bounds(element);
@@ -63,7 +63,7 @@ async function scenario() {
     check('recording controls and activation choices remain available on input actions', document.querySelectorAll('.step-row button[aria-label="Record key"]').length === 4 && document.querySelectorAll('[aria-label="Activation"]').length === 4);
     check('the action toolbar only shows Add action and Save as variable', document.querySelectorAll('.step-add-btns > button').length === 2 && !document.querySelector('.action-picker'));
     document.querySelector('button[aria-label="Add action"]').click(); await wait();
-    check('all actions remain available with one combined Overlay entry', document.querySelectorAll('.action-picker button').length === 25 && document.querySelector('.action-picker [aria-label="Overlay"]') && !document.querySelector('.action-picker [aria-label="Stop overlay"]') && fits());
+    check('all actions remain available with one combined Overlay entry', document.querySelectorAll('.action-picker button').length === 24 && document.querySelector('.action-picker [aria-label="Overlay"]') && !document.querySelector('.action-picker [aria-label="Stop overlay"]') && fits());
     const search = document.querySelector('[aria-label="Find action"]');
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'toggle');
     search.dispatchEvent(new Event('input', { bubbles: true })); await wait();

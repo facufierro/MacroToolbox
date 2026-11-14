@@ -1879,7 +1879,7 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, hotkeys }, [], secureTexts);
       handleDb(updated);
       setModal(null);
-    } catch (e) { reportError(`Error saving hotkey: ${e}`); }
+    } catch (e) { reportError(e, `Error saving hotkey "${hotkey.name || "Unnamed"}"; folder=${gameId}; profile=${profileId}; trigger=${JSON.stringify(hotkey.trigger)}`); }
   }
 
   async function handleEventSave(gameId: string, profileId: string, index: number | null, event: BehaviorEvent) {

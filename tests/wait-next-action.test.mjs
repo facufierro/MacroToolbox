@@ -6,7 +6,7 @@ import { removeScriptReferences } from "../src/scriptReferences.ts";
 
 test("Wait for uses the next action without adding a separate value or changing its settings",()=>{
   for(const action of [
-    {type:"mousepress",key:"rctrl LButton",onRelease:true,doubleClick:true},
+    {type:"press","compatibility":true,key:"rctrl LButton",onRelease:true,doubleClick:true},
     {type:"startoverlay",itemIds:["timer"],restart:true},
     {type:"stopoverlay",itemIds:["timer"]}, {type:"sleep",ms:"25"},
     {type:"script",scriptId:"script"}, {type:"state",stateId:"state",action:"set"},
@@ -29,7 +29,7 @@ test("a Wait for without a following action is invalid in every list scope",()=>
 
 test("following actions retain their variables and trigger requirements",()=>{
   const variables=[{id:"keys",name:"Keys",type:"keys",value:"rctrl LButton"},
-    {id:"cast",name:"Cast",type:"behavior",value:stepsToString([{type:"waitfor"},{type:"mousepress",key:{variable:"keys"},onRelease:true}])}];
+    {id:"cast",name:"Cast",type:"behavior",value:stepsToString([{type:"waitfor"},{type:"press","compatibility":true,key:{variable:"keys"},onRelease:true}])}];
   const steps=[{type:"waitfor"},{type:"behavior",variableId:"cast"}];
   assert.equal(areStepsValid(steps,variables),true);
   assert.equal(areStepsValid(steps,variables,false),false);
@@ -39,7 +39,7 @@ test("following actions retain their variables and trigger requirements",()=>{
 });
 
 test("saved input waits become plain waits followed by their input action",()=>{
-  const expected=[{type:"waitfor"},{type:"mousepress",key:"LButton"}];
+  const expected=[{type:"waitfor"},{type:"press","compatibility":true,key:"LButton"}];
   assert.deepEqual(parseSteps("waitfor(LButton)"),expected);
   assert.deepEqual(parseSteps(JSON.stringify([{type:"waitfor",key:"LButton"}])),expected);
   assert.equal(areStepsValid(expected),true);

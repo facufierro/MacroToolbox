@@ -10,6 +10,7 @@ mod triggers;
 mod secure_send;
 mod runtime;
 mod protocol;
+mod diagnostics;
 mod config;
 mod firebase;
 mod scripts;
@@ -439,22 +440,37 @@ fn reorder_folders(app: tauri::AppHandle, state: State<AppState>, ids: Vec<Strin
 #[tauri::command]
 fn upsert_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String, profile: Profile, variables: Option<Vec<config::Variable>>, secure_texts: Option<Vec<secure_send::PasswordDraft>>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
-    let profile_id = profile.id.clone();
-    let mut db = config::load_db(&state.db_path)?;
-    let previous_passwords = secure_send::database_ids(&db);
-    let password_write = secure_send::PasswordWrite::prepare(&secure_texts.unwrap_or_default(), &profile)?;
-    merge_imported_variables(&mut db, variables.unwrap_or_default())?;
-    let game = db.games.iter_mut().find(|g| g.id == game_id)
-        .ok_or_else(|| "Folder not found".to_string())?;
-    match game.profiles.iter_mut().find(|p| p.id == profile_id) {
-        Some(existing) => *existing = profile,
-        None => game.profiles.push(profile),
+    let started = std::time::Instant::now();
+    let context = format!("folder={game_id}; profile={} ({}); password drafts={}", profile.name, profile.id, secure_texts.as_ref().map_or(0, Vec::len));
+    diagnostics::record(&app, diagnostics::Level::Info, "Save", format!("Saving profile; {context}"));
+    let mut stage = "load settings";
+    let result: Result<Database, String> = (|| {
+        let profile_id = profile.id.clone();
+        let mut db = config::load_db(&state.db_path)?;
+        let previous_passwords = secure_send::database_ids(&db);
+        stage = "store passwords in Windows Credential Manager";
+        let password_write = secure_send::PasswordWrite::prepare(&secure_texts.unwrap_or_default(), &profile)?;
+        stage = "merge variables and locate folder";
+        merge_imported_variables(&mut db, variables.unwrap_or_default())?;
+        let game = db.games.iter_mut().find(|g| g.id == game_id)
+            .ok_or_else(|| "Folder not found".to_string())?;
+        match game.profiles.iter_mut().find(|p| p.id == profile_id) {
+            Some(existing) => *existing = profile,
+            None => game.profiles.push(profile),
+        }
+        stage = "persist settings";
+        save_database(&app, &state, &mut db)?;
+        password_write.commit();
+        secure_send::retire_unused(previous_passwords, &db);
+        stage = "activate input configuration (settings already saved)";
+        sync_hotkeys(&state, &db)?;
+        Ok(db)
+    })();
+    match &result {
+        Ok(_) => diagnostics::record(&app, diagnostics::Level::Info, "Save", format!("Profile saved and input configuration submitted; {context}; elapsed={}ms", started.elapsed().as_millis())),
+        Err(error) => diagnostics::record(&app, diagnostics::Level::Error, "Save", format!("Profile save failed at {stage}; {context}; elapsed={}ms; {error}", started.elapsed().as_millis())),
     }
-    save_database(&app, &state, &mut db)?;
-    password_write.commit();
-    secure_send::retire_unused(previous_passwords, &db);
-    sync_hotkeys(&state, &db)?;
-    Ok(db)
+    result
 }
 
 #[tauri::command]
@@ -946,7 +962,7 @@ fn runtime_action(app: &tauri::AppHandle, scope: &runtime::ExecutionScope, kind:
             let db = config::load_db(&state.db_path)?;
             state.runtime.lock().unwrap().enqueue(&db, scope, value)?;
         }
-        "error" => { app.emit("runtime-error", value).map_err(|e| e.to_string())?; }
+        "error" => diagnostics::record(app, diagnostics::Level::Error, "Runtime", format!("profile={profile}: {value}")),
         _ => state.runtime.lock().unwrap().action(profile, kind, id, value, runtime::now_ms())?,
     }
     publish_runtime(app);
@@ -997,7 +1013,12 @@ fn start_overlay_listener(handle: tauri::AppHandle) {
                     let request = match protocol::read_request(&mut stream).await { Ok(request) => request, Err(_) => return };
                     let action = request.path.as_str();
                     let route = action.split('?').next().unwrap_or(action);
-                    let (status, body) = if route == "/runtime" && !request.body.is_empty() {
+                    let (status, body) = if route == "/diagnostics" {
+                        match serde_json::from_slice::<Vec<diagnostics::Entry>>(&request.body) {
+                            Ok(entries) => { diagnostics::receive(&handle, entries); ("200 OK", Vec::new()) }
+                            Err(_) => ("400 Bad Request", b"Invalid diagnostic entries".to_vec()),
+                        }
+                    } else if route == "/runtime" && !request.body.is_empty() {
                         match serde_json::from_slice::<protocol::RuntimeAction>(&request.body) {
                             Ok(command) => match runtime_action(&handle, &command.scope, &command.kind, &command.id, &command.value) {
                                 Ok(()) => ("200 OK", Vec::new()), Err(error) => ("422 Unprocessable Entity", error.into_bytes()),
@@ -2002,6 +2023,7 @@ pub fn run() {
             let scripts_dir = data_dir.join("scripts");
             std::fs::create_dir_all(&scripts_dir)
                 .expect("failed to create scripts dir");
+            app.manage(diagnostics::Diagnostics::new(&data_dir));
 
             let db_path = data_dir.join("db.json");
             if !db_path.exists() {
@@ -2141,6 +2163,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_database,
+            diagnostics::get_console_entries,
             get_disabled_profiles,
             debug_overlay_log,
             get_overlay_config,

@@ -17,9 +17,13 @@ OnExit behaviorRuntime.Stop.Bind(behaviorRuntime)
 OnExit ReleaseSyntheticHeld
 OnExit ReleaseCopilotHeld
 OnExit RestoreBehaviorClipboard
+OnExit RuntimeDiagnostics.Flush.Bind(RuntimeDiagnostics, true)
 OnError HandleInputFailure
 ReleaseStaleCopilotModifiers()
+RuntimeDiagnostics.Add("info", "Input", "Input host started; pid=" ProcessExist() "; elevated=" A_IsAdmin "; screenDpi=" A_ScreenDPI "; nativeCopilot=" copilotState.native)
 SetTimer TickRuntimeHost, 100
+; Keep diagnostics alive when error recovery suspends the input host timers.
+SetTimer RuntimeDiagnostics.Flush.Bind(RuntimeDiagnostics), 100
 TickRuntimeHost()
 
 TickRuntimeHost(*) {

@@ -66,8 +66,8 @@ async function scenario() {
     row('Cast').querySelector('[aria-label="Edit variable"]').click(); await wait();
     check('editing a used behavior keeps its type locked and preserves its actions', get('[aria-label="Variable type"]').disabled && document.querySelectorAll('form.modal .step-row').length === 4);
     await set('form.modal [aria-label="Activation"]', 'press');
-    await set('form.modal [aria-label="Keys source"]', 'value');
-    await set('form.modal input[placeholder="Keys"]', 'rctrl 2');
+    await set('form.modal [aria-label="Input source"]', 'value');
+    await set('form.modal input[placeholder="Input"]', 'rctrl 2');
     await add('Behavior variable');
     const selectors = document.querySelectorAll('form.modal [aria-label="Behavior variable"]');
     check('a definition cannot directly select itself', ![...selectors[0].options].some(option => option.value === castId));
