@@ -358,6 +358,7 @@ fn save_database(app: &tauri::AppHandle, state: &AppState, db: &mut Database) ->
     config::normalize_overlays(db);
     for game in &db.games {
         game.validate_subfolders()?;
+        game.validate_overlay_bars()?;
         for profile in game.profiles.iter().filter(|profile| profile.armed) {
             for hotkey in profile.hotkeys.iter().filter(|_| !profile.hotkeys_disabled) {
                 let triggers = hotkey.trigger.resolve(&db.variables)?;
@@ -481,6 +482,7 @@ fn delete_profile(app: tauri::AppHandle, state: State<AppState>, game_id: String
     let game = db.games.iter_mut().find(|g| g.id == game_id)
         .ok_or_else(|| "Folder not found".to_string())?;
     game.profiles.retain(|p| p.id != profile_id);
+    game.remove_unavailable_bar_members();
     save_database(&app, &state, &mut db)?;
     secure_send::retire_unused(previous_passwords, &db);
     sync_hotkeys(&state, &db)?;

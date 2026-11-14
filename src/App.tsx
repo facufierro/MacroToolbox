@@ -250,6 +250,7 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
       : `${scope.name} (${isGlobalExe(group.exe) ? "Any app" : group.exe || "No app"})`,
     exe: group.exe,
     profiles: group.profiles,
+    overlay_bars: (scope.overlay_bars ?? []).map(bar => ({ ...bar, id: uid(), group_ids: bar.group_ids.map(id => groupIds.get(id) ?? id) })),
     subfolders: (scope.subfolders ?? []).map(folder => ({ ...folder, id: subfolderIds.get(folder.id)! })),
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));

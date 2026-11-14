@@ -9,12 +9,14 @@ import type { OverlayGroup, OverlayItem } from "./types";
 const PART_ICONS = { timer: "clock", icon: "image", bar: "chart-simple", text: "font" } as const;
 const PART_LABELS = { timer: "Timer", icon: "Icon", bar: "Bar", text: "Text" } as const;
 
-export function OverlayGroupPanel({ group, timers, gameExe, children, partsEditable = true, onChange, onEnabledChange, onDuplicate, onDelete, onAdd }: {
+export function OverlayGroupPanel({ group, timers, gameExe, children, partsEditable = true, barControls, positioned = true, onChange, onEnabledChange, onDuplicate, onDelete, onAdd }: {
   group: OverlayGroup;
   timers: OverlayItem[];
   gameExe: string;
   children: ReactNode;
   partsEditable?: boolean;
+  barControls?: ReactNode;
+  positioned?: boolean;
   onChange: (group: OverlayGroup) => void;
   onEnabledChange: (enabled: boolean) => Promise<void>;
   onDuplicate?: () => Promise<void>;
@@ -52,10 +54,11 @@ export function OverlayGroupPanel({ group, timers, gameExe, children, partsEdita
           <option value="row">Horizontal</option><option value="column">Vertical</option><option value="free">Individual</option>
         </select>
         <CompactNumber label="Gap (px)" prefix="Gap" unit="px" min={0} disabled={!flow} value={draft.gap ?? 8} onChange={value => change({ gap: Number(value) })} />
-        <div className="overlay-group__position">
+        {barControls}
+        {positioned && <div className="overlay-group__position">
           <GotoInput x={String(draft.x ?? 0)} y={String(draft.y ?? 0)} gameExe={gameExe}
             onChange={(x, y) => change({ x: Number(x), y: Number(y) })} />
-        </div>
+        </div>}
     </fieldset>
     {addingPart && <div className="overlay-group__add" aria-label="Part types">
       {(["timer", "icon", "bar", "text"] as const).map(type => <IconButton showLabel icon={PART_ICONS[type]} label={PART_LABELS[type]} key={type} className="btn btn--ghost btn--sm" disabled={!partsEditable} onClick={() => { setAddingPart(false); onAdd(type); }} />)}

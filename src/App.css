@@ -636,6 +636,13 @@ textarea { resize: vertical; }
 .behavior-overlay-editor { border: 0; padding: 0; min-width: 0; }
 .behavior-overlay-editor > .modal__actions { margin-top: 8px; }
 .behavior-overlay-editor > select { margin-bottom: 6px; }
+.overlay-bar-controls { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.overlay-bar-controls label { display: flex; flex-direction: row; align-items: center; gap: 5px; margin: 0; font-size: 0.82rem; min-width: 0; }
+.overlay-bar-controls select { width: 96px; max-width: 100%; min-width: 0; height: 30px; padding: 4px 6px; font-size: 0.82rem; }
+.overlay-bar-editor { margin: 6px 0; }
+.overlay-bar-editor > select { max-width: 100%; margin-top: 6px; }
+.overlay-bar-member { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.overlay-bar-member > span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82rem; }
 .overlay-targets { position: relative; flex: 1; min-width: 0; }
 .overlay-targets > summary { display: flex; align-items: center; gap: 8px; height: 30px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); cursor: pointer; font-size: 0.85rem; list-style: none; }
 .overlay-targets > summary::-webkit-details-marker { display: none; }

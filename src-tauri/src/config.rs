@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v14 unifies Press and makes legacy mouse delivery explicitly compatible.
-pub const CURRENT_DB_VERSION: u32 = 14;
+/// older files. v15 adds folder-owned overlay bars without changing existing positions.
+pub const CURRENT_DB_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -107,6 +107,7 @@ impl Database {
         if let Some(group) = group { target.overlay_groups.push(group); }
         target.overlay_items.extend(items);
         destination.merge_profile_dependencies(dependencies);
+        for game in &mut self.games { game.remove_unavailable_bar_members(); }
         Ok(())
     }
 
@@ -144,6 +145,19 @@ pub struct Game {
     pub states_disabled: bool,
     #[serde(default)]
     pub subfolders: Vec<Subfolder>,
+    #[serde(default)]
+    pub overlay_bars: Vec<OverlayBar>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OverlayBar {
+    pub id: String,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub layout: String,
+    pub gap: u32,
+    pub group_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +173,29 @@ pub struct Subfolder {
 fn default_subfolder_enabled() -> bool { true }
 
 impl Game {
+    pub fn validate_overlay_bars(&self) -> Result<(), String> {
+        let mut bars = HashSet::new();
+        let mut members = HashSet::new();
+        for bar in &self.overlay_bars {
+            if bar.id.trim().is_empty() || bar.name.trim().is_empty() || !bars.insert(&bar.id)
+                || !bar.x.is_finite() || !bar.y.is_finite() || !matches!(bar.layout.as_str(), "row" | "column") {
+                return Err("Invalid or duplicate overlay bar.".into());
+            }
+            for id in &bar.group_ids {
+                if !self.profiles.iter().any(|profile| profile.overlay_groups.iter().any(|group| &group.id == id)) {
+                    return Err("Overlay bar member not found.".into());
+                }
+                if !members.insert(id) { return Err("An overlay can belong to only one bar.".into()); }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn remove_unavailable_bar_members(&mut self) {
+        let groups: HashSet<_> = self.profiles.iter().flat_map(|profile| profile.overlay_groups.iter().map(|group| group.id.as_str())).collect();
+        for bar in &mut self.overlay_bars { bar.group_ids.retain(|id| groups.contains(id.as_str())); }
+    }
+
     fn merge_profile_dependencies(&mut self, mut dependencies: Profile) {
         append_missing(&mut self.states, dependencies.states, |state| state.id.clone());
         // Definitions already available in the destination folder keep their current owner.
@@ -317,6 +354,8 @@ pub struct OverlayConfig {
     pub items: Vec<OverlayItem>,
     #[serde(default)]
     pub groups: Vec<OverlayGroup>,
+    #[serde(default)]
+    pub bars: Vec<OverlayBar>,
     #[serde(default)]
     pub disabled_items: Vec<String>,
     #[serde(default)]
@@ -577,6 +616,7 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
 
     if indices.is_empty() {
         db.games.push(Game {
+            overlay_bars: Vec::new(),
             states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
             id: GLOBAL_FOLDER_ID.to_string(),
             name: "Global".to_string(),
@@ -599,9 +639,11 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
     let merged: Vec<Profile> = indices.iter().flat_map(|&i| db.games[i].profiles.clone()).collect();
     let merged_states = indices.iter().flat_map(|&i| db.games[i].states.clone()).collect();
     let merged_subfolders = indices.iter().flat_map(|&i| db.games[i].subfolders.clone()).collect();
+    let merged_bars = indices.iter().flat_map(|&i| db.games[i].overlay_bars.clone()).collect();
     db.games[keep].profiles = merged;
     db.games[keep].states = merged_states;
     db.games[keep].subfolders = merged_subfolders;
+    db.games[keep].overlay_bars = merged_bars;
     db.games[keep].exe = "*".to_string();
     for &i in indices.iter().skip(1).rev() {
         db.games.remove(i);
@@ -627,7 +669,7 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
         }
         // These versions share the folder-owned profile shape. Defaults, typed
         // variable deserialization, and normalization below upgrade their fields.
-        3..=13 => {
+        3..=14 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             db.version = CURRENT_DB_VERSION;
             (db, true)
@@ -654,7 +696,7 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
     let added_global = ensure_global_folder(&mut db);
     let moved_states = normalize_states(&mut db);
     let grouped_overlays = normalize_overlays(&mut db);
-    for game in &db.games { game.validate_subfolders()?; }
+    for game in &db.games { game.validate_subfolders()?; game.validate_overlay_bars()?; }
     if migrated || upgraded_behaviors || added_global || moved_states || grouped_overlays {
         save_db(path, &db)?;
     }
@@ -796,6 +838,7 @@ mod legacy_v2 {
                     .map(|index| groups.remove(index).1)
                     .unwrap_or_default();
                 games.push(NewGame {
+                    overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id.clone(),
                     name: game.name.clone(),
@@ -805,6 +848,7 @@ mod legacy_v2 {
                 });
                 for (index, (exe, profiles)) in groups.into_iter().enumerate() {
                     games.push(NewGame {
+                        overlay_bars: Vec::new(),
                         states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                         id: split_id(&game.id, index + 2, &reserved, &mut allocated),
                         name: format!("{} ({})", game.name, target_label(&exe)),
@@ -819,6 +863,7 @@ mod legacy_v2 {
             if groups.is_empty() {
                 allocated.insert(game.id.clone());
                 games.push(NewGame {
+                    overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id,
                     name: game.name,
@@ -843,6 +888,7 @@ mod legacy_v2 {
                     game.name.clone()
                 };
                 games.push(NewGame {
+                    overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id,
                     name,
@@ -930,7 +976,7 @@ mod legacy_v1 {
                         p
                     })
                     .collect();
-                super::Game { states: Vec::new(), states_disabled: false, subfolders: Vec::new(), id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
+                super::Game { overlay_bars: Vec::new(), states: Vec::new(), states_disabled: false, subfolders: Vec::new(), id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
             })
             .collect();
         NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
@@ -1014,7 +1060,7 @@ pub fn save_db(path: &Path, db: &Database) -> Result<(), String> {
     normalize_behaviors(&mut db)?;
     normalize_states(&mut db);
     normalize_overlays(&mut db);
-    for game in &db.games { game.validate_subfolders()?; }
+    for game in &db.games { game.validate_subfolders()?; game.validate_overlay_bars()?; }
     db.version = CURRENT_DB_VERSION;
     let content = serde_json::to_string_pretty(&db).map_err(|e| e.to_string())?;
     // Write to a temp file then rename, so an interrupted write can't corrupt db.json.
@@ -1138,6 +1184,76 @@ pub fn profile_has_overlay(profiles: &[Profile], profile: &Profile) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{legacy_v2, load_db, resolve_profile_events, Hotkey, Profile};
+
+    #[test]
+    fn overlay_bars_upgrade_without_moving_existing_overlays_and_reopen_once() {
+        for version in [3, 7, 13, 14] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-bars-{version}-{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let source = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe"},"scopes":[
+                {"id":"game","name":"Game","exe":"game.exe","profiles":[{"id":"p","name":"Spells","armed":true,
+                    "hotkeys":[{"name":"Spell","trigger":"f1","behavior":"startoverlay(g)"}],
+                    "overlay_groups":[{"id":"g","name":"Spell","x":31.5,"y":42,"layout":"column","gap":3}],
+                    "overlay_items":[{"id":"i","type":"icon","group_id":"g","x":2,"y":3,"w":32,"h":32,"src":"fixture"}]}]}]}).to_string();
+            std::fs::write(&path,&source).unwrap();
+            let mut db = load_db(&path).unwrap();
+            assert_eq!(db.version,super::CURRENT_DB_VERSION);
+            assert!(db.games.iter().all(|game| game.overlay_bars.is_empty()));
+            let group = &db.games[0].profiles[0].overlay_groups[0];
+            assert_eq!((group.x,group.y,group.gap),(31.5,42.0,3));
+            assert_eq!(group.layout,"column");
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            db.games[0].overlay_bars.push(super::OverlayBar {id:"bar".into(),name:"Buffs".into(),x:15.0,y:70.0,layout:"row".into(),gap:37,group_ids:vec!["g".into()]});
+            super::save_db(&path,&db).unwrap();
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let reopened = load_db(&path).unwrap();
+            assert_eq!(reopened.games[0].overlay_bars,db.games[0].overlay_bars);
+            assert_eq!(std::fs::read(&path).unwrap(),saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            assert_eq!(reopened.games[0].profiles[0].hotkeys[0].behavior,db.games[0].profiles[0].hotkeys[0].behavior);
+            std::fs::remove_file(path).unwrap(); std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn overlay_bar_migration_write_failure_keeps_original_and_backup() {
+        let directory = std::env::temp_dir().join(format!("macrotoolbox-bar-failure-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("db.json");
+        let source = r#"{"version":14,"settings":{"ahk_exe":""},"scopes":[]}"#;
+        std::fs::write(&path,source).unwrap();
+        std::fs::create_dir(directory.join("db.json.tmp")).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+        assert_eq!(std::fs::read_to_string(directory.join("db.json.v14.bak")).unwrap(),source);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn overlay_bars_reject_ambiguous_membership_and_preserve_order() {
+        let mut game: super::Game = serde_json::from_value(serde_json::json!({"id":"g","name":"Game","profiles":[
+            {"id":"p","name":"Spells","overlay_groups":[{"id":"a","name":"A"},{"id":"b","name":"B"}]}],
+            "overlay_bars":[{"id":"bar","name":"Buffs","x":1,"y":2,"layout":"column","gap":0,"group_ids":["b","a"]}]})).unwrap();
+        assert!(game.validate_overlay_bars().is_ok());
+        assert_eq!(game.overlay_bars[0].group_ids,["b","a"]);
+        for ids in [vec!["a","a"],vec!["missing"]] {
+            game.overlay_bars[0].group_ids = ids.into_iter().map(str::to_string).collect();
+            assert!(game.validate_overlay_bars().is_err());
+        }
+        game.overlay_bars[0].group_ids = vec!["a".into()];
+        let mut second = game.overlay_bars[0].clone(); second.id = "other".into();
+        game.overlay_bars.push(second);
+        assert!(game.validate_overlay_bars().is_err());
+        game.overlay_bars.pop();
+        game.overlay_bars[0].layout = "diagonal".into();
+        assert!(game.validate_overlay_bars().is_err());
+        game.overlay_bars[0].layout = "row".into();
+        game.profiles.clear(); game.remove_unavailable_bar_members();
+        assert!(game.overlay_bars[0].group_ids.is_empty());
+        assert!(game.validate_overlay_bars().is_ok());
+    }
 
     #[test]
     fn press_migration_preserves_methods_references_and_configuration_across_skipped_versions() {

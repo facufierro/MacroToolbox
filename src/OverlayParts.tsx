@@ -1,12 +1,39 @@
 import "./overlayParts.css";
-import { Children, type CSSProperties, type ReactNode } from "react";
-import type { OverlayGroup, OverlayItem } from "./types";
+import { Children, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import type { OverlayBar, OverlayGroup, OverlayItem } from "./types";
 import { getOverlayItemPosition } from "./overlayPosition";
+import { getOverlayBarOffsets, type OverlayExtent } from "./overlayBars";
 
-export function OverlayGroupView({ group, origin, children }: { group: OverlayGroup; origin: [number, number, number, number]; children: ReactNode }) {
+export function OverlayBarView({ bar, origin, groups }: { bar: OverlayBar; origin: [number, number, number, number]; groups: Array<{ id: string; view: ReactNode }> }) {
+  const slots = useRef(new Map<string, HTMLDivElement>());
+  const [offsets, setOffsets] = useState<Record<string, number>>({});
+  // Absolute parts and centered timers can overflow their group. Space their full visible bounds.
+  useLayoutEffect(() => {
+    const extents: OverlayExtent[] = [];
+    for (const { id } of groups) {
+      const slot = slots.current.get(id);
+      if (!slot) continue;
+      const anchor = slot.getBoundingClientRect();
+      const parts = [...slot.querySelectorAll<HTMLElement>("[data-overlay-part]")].map(part => part.getBoundingClientRect())
+        .filter(rect => rect.width > 0 && rect.height > 0);
+      if (parts.length) extents.push({ id, left: Math.min(...parts.map(rect => rect.left)) - anchor.left,
+        top: Math.min(...parts.map(rect => rect.top)) - anchor.top,
+        right: Math.max(...parts.map(rect => rect.right)) - anchor.left,
+        bottom: Math.max(...parts.map(rect => rect.bottom)) - anchor.top });
+    }
+    const next = getOverlayBarOffsets(extents, bar.layout, bar.gap);
+    setOffsets(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+  });
+  return <div className="ov-overlay-bar" style={{ position: "absolute", ...getOverlayItemPosition(bar, origin) }}>
+    {groups.map(({ id, view }) => <div key={id} className="ov-bar-slot" ref={element => { if (element) slots.current.set(id, element); else slots.current.delete(id); }}
+      style={{ position: "absolute", left: bar.layout === "row" ? offsets[id] ?? 0 : 0, top: bar.layout === "column" ? offsets[id] ?? 0 : 0 }}>{view}</div>)}
+  </div>;
+}
+
+export function OverlayGroupView({ group, origin, children, inBar = false }: { group: OverlayGroup; origin: [number, number, number, number]; children: ReactNode; inBar?: boolean }) {
   const flow = group.layout === "row" || group.layout === "column";
-  return <div style={{ position: "absolute",
-    ...getOverlayItemPosition({ x: group.x ?? 0, y: group.y ?? 0 }, origin),
+  return <div style={{ ...(inBar ? { position: "relative", width: "max-content" } : { position: "absolute",
+    ...getOverlayItemPosition({ x: group.x ?? 0, y: group.y ?? 0 }, origin) }),
     ...(flow ? { display: "flex", flexDirection: group.layout as "row" | "column", alignItems: "center", gap: group.gap ?? 8 } : {}) }}>
     {flow ? Children.map(children, (child, index) => index === 0 ? child :
       <div className={`ov-flow-slot ov-flow-slot--${group.layout}`}>{child}</div>) : children}
@@ -24,10 +51,10 @@ export function OverlayItemView({ item, origin, remainingMs, value, flow, onMoun
     }),
   };
   switch (item.type) {
-    case "timer": return <div ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;
-    case "icon":  return <div ref={onMount} style={pos}><IconView  item={item} style={{}} /></div>;
-    case "bar":   return <div ref={onMount} style={pos}><BarView   item={item} style={{}} value={value} /></div>;
-    case "text":  return <div ref={onMount} style={pos}><TextView  item={item} style={{}} /></div>;
+    case "timer": return <div data-overlay-part={item.id} ref={onMount} style={pos}><TimerView item={item} style={{}} remainingMs={remainingMs ?? item.duration_ms} /></div>;
+    case "icon":  return <div data-overlay-part={item.id} ref={onMount} style={pos}><IconView  item={item} style={{}} /></div>;
+    case "bar":   return <div data-overlay-part={item.id} ref={onMount} style={pos}><BarView   item={item} style={{}} value={value} /></div>;
+    case "text":  return <div data-overlay-part={item.id} ref={onMount} style={pos}><TextView  item={item} style={{}} /></div>;
   }
 }
 

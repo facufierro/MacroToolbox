@@ -103,6 +103,7 @@ impl Runtime {
             let folder = self.folders.entry(game.id.clone()).or_default();
             let previous = folder.snapshot.config.clone();
             let mut config = OverlayConfig { profile_id: Some(game.id.clone()), ..Default::default() };
+            config.bars = game.overlay_bars.clone();
             folder.profiles.clear();
             config.states = game.states.clone();
             config.states_disabled = game.states_disabled;
@@ -347,6 +348,20 @@ mod tests {
                 {"type":"timer","id":"timer","x":0,"y":0,"duration_ms":500,"timer_state_id":"buff"},
                 {"type":"bar","id":"health","x":0,"y":0,"w":100,"h":10,"color":"#fff","max_value":100}
             ]}]}],"settings":{"ahk_exe":"","python_exe":""}})).unwrap()
+    }
+
+    #[test]
+    fn overlay_snapshot_keeps_bar_order_gap_and_disabled_member_identity() {
+        let mut db = database();
+        db.games[0].profiles[1].overlay_groups = serde_json::from_value(serde_json::json!([
+            {"id":"first","name":"First"},{"id":"second","name":"Second"}])).unwrap();
+        db.games[0].overlay_bars = vec![crate::config::OverlayBar { id:"bar".into(),name:"Buffs".into(),x:25.0,y:75.0,
+            layout:"row".into(),gap:42,group_ids:vec!["second".into(),"first".into()] }];
+        let mut runtime = Runtime::default(); runtime.reconcile(&db,0);
+        assert_eq!(runtime.folders["game"].snapshot.config.bars,db.games[0].overlay_bars);
+        runtime.set_enabled(&db,"overlay",false,1).unwrap();
+        assert_eq!(runtime.folders["game"].snapshot.config.bars[0].group_ids,["second","first"]);
+        assert_eq!(runtime.folders["game"].snapshot.config.bars[0].gap,42);
     }
     #[test]
     fn shared_profile_status_is_atomic_and_cancels_queued_work() {
