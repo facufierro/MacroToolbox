@@ -52,7 +52,7 @@ async function scenario() {
     await add('Sequence');
     await add('Secure send',get('.step-row--group .steps-section'));
     await set('.step-row--group [aria-label="Password"]','nested-fixture');
-    await set('.step-row--group input[placeholder="Keys"]','Tab');
+    await set('.step-row--group input[placeholder="Input"]','Tab');
     await click('[aria-label="Save"]');
     const nested=JSON.parse(saved().behavior)[2].steps[1];
     check('nested sequences share the password draft owner and reopen using references',window.savedPasswords.get(nested.credentialId)==='nested-fixture' && !saved().behavior.includes('nested-fixture') && get('.step-row--group [aria-label="Password"]').value==='');

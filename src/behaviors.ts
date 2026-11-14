@@ -4,8 +4,7 @@ import { isReference, isMatchedTrigger, resolveValue, isCredentialId, isPassword
 export type Step =
   | { type: "hold" | "toggle"; key: BehaviorValue }
   | { type: "waitfor" }
-  | { type: "press"; key: BehaviorValue; onRelease?: boolean }
-  | { type: "mousepress"; key: BehaviorValue; doubleClick?: boolean; onRelease?: boolean }
+  | { type: "press"; key: BehaviorValue; compatibility?: boolean; doubleClick?: boolean; onRelease?: boolean }
   | { type: "repeat"; key: BehaviorValue; interval: BehaviorValue; hold: BehaviorValue }
   | { type: "sequence" | "parallel"; steps: Step[] }
   | { type: "goto"; x: BehaviorValue; y: BehaviorValue }
@@ -50,9 +49,9 @@ export function parseSteps(behavior: string): Step[] {
     const [, command, argument] = match;
     switch (command.toLowerCase()) {
       case "waitfor": return legacyInputWait(argument);
-      case "press": case "hold": case "toggle": case "mousepress":
+      case "press": case "hold": case "toggle":
         return { type: command.toLowerCase(), key: argument } as Step;
-      case "pressalt": return { type: "mousepress", key: argument };
+      case "mousepress": case "pressalt": return { type: "press", key: argument, compatibility: true };
       case "repeat": {
         const [key, interval = "", hold = "6"] = argument.split(",").map(value => value.trim());
         return { type: "repeat", key, interval, hold };
@@ -77,8 +76,7 @@ export function parseSteps(behavior: string): Step[] {
 }
 
 function legacyInputWait(key: BehaviorValue): Step[] {
-  const type = typeof key === "string" && mouse.test(key.trim()) ? "mousepress" : "press";
-  return [{ type: "waitfor" }, { type, key }];
+  return [{ type: "waitfor" }, { type: "press", key, ...(typeof key === "string" && mouse.test(key.trim()) ? { compatibility: true } : {}) }];
 }
 
 function readStructuredSteps(value: unknown): Step[] {
@@ -93,6 +91,10 @@ function structuredStep(value: unknown): Step {
   const unknown = (): Step => ({ type: "unknown", source: JSON.stringify(value) });
   if (!value || typeof value !== "object" || !("type" in value)) return unknown();
   const step = value as Record<string, unknown>;
+  if (step.type === "mousepress") {
+    return "compatibility" in step ? unknown() : structuredStep({ ...step, type: "press", compatibility: true });
+  }
+  if (step.type === "press" && !Object.keys(step).every(field => ["type", "key", "compatibility", "doubleClick", "onRelease"].includes(field))) return unknown();
   if (step.type === "sequence" || step.type === "parallel") {
     return Array.isArray(step.steps) ? { type: step.type, steps: step.steps.flatMap(readStructuredSteps) } : unknown();
   }
@@ -107,7 +109,7 @@ function structuredStep(value: unknown): Step {
       ? step as Step : unknown();
   }
   const fields: Record<string, string[]> = {
-    press: ["key"], hold: ["key"], toggle: ["key"], mousepress: ["key"],
+    press: ["key"], hold: ["key"], toggle: ["key"],
     repeat: ["key", "interval", "hold"], goto: ["x", "y"], resolution: ["width", "height"],
     state: ["stateId"], bar: ["itemId", "value"],
     script: ["scriptId"], sleep: ["ms"], send: ["text"], securesend: ["credentialId"], behavior: ["variableId"], unknown: ["source"],
@@ -141,12 +143,17 @@ export function expandBehavior(behavior: string, variables: Variable[], visiting
 
 export const keyInputPattern = /^(?:(?:[lr]?(?:ctrl|shift|alt|win))\s+)*(?:[^\s,]+)(?:[\s,]+[^\s,]+)*$/i;
 const mouse = /^(?:(?:[lr]?(?:ctrl|shift|alt|win))\s+)*(?:[lrm]button|xbutton[12]|m[12])$/i;
+export function isMousePressInput(key: BehaviorValue, variables: Variable[] = []): boolean {
+  try { return mouse.test(resolveValue(key, "keys", variables).trim()); }
+  catch { return false; }
+}
+
 const integer = (value: string, minimum: number) => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= minimum && Number(value) <= 0xffffffff;
 
 export function mapStepValues(step: Step, map: (value: BehaviorValue, type: ValueType, field: string) => BehaviorValue): Step {
   switch (step.type) {
     case "sleep": return { ...step, ms: map(step.ms, "number", "ms") };
-    case "press": case "hold": case "toggle": case "mousepress": return { ...step, key: map(step.key, "keys", "key") };
+    case "press": case "hold": case "toggle": return { ...step, key: map(step.key, "keys", "key") };
     case "send": return { ...step, text: map(step.text, "text", "text") };
     case "repeat": return { ...step, key: map(step.key, "keys", "key"), interval: map(step.interval, "number", "interval"), hold: map(step.hold, "number", "hold") };
     case "goto": return { ...step, x: map(step.x, "number", "x"), y: map(step.y, "number", "y") };
@@ -180,8 +187,10 @@ export function areStepsValid(steps: Step[], variables: Variable[] = [], hasTrig
       case "waitfor": return index + 1 < steps.length;
       case "hold": return keyInputPattern.test(String(step.key).trim());
       case "toggle": return hasTrigger && keyInputPattern.test(String(step.key).trim());
-      case "press": return (isMatchedTrigger(step.key) ? hasTrigger : keyInputPattern.test(String(step.key).trim())) && validActivation(step.onRelease, hasTrigger);
-      case "mousepress": return mouse.test(String(step.key).trim()) && (step.doubleClick === undefined || typeof step.doubleClick === "boolean") && validActivation(step.onRelease, hasTrigger);
+      case "press": return (step.compatibility === undefined || typeof step.compatibility === "boolean")
+        && (step.doubleClick === undefined || typeof step.doubleClick === "boolean")
+        && (step.compatibility || step.doubleClick ? mouse.test(String(step.key).trim()) : isMatchedTrigger(step.key) ? hasTrigger : keyInputPattern.test(String(step.key).trim()))
+        && validActivation(step.onRelease, hasTrigger);
       case "repeat": return keyInputPattern.test(String(step.key).trim()) && integer(String(step.interval), 1) && integer(String(step.hold), 0);
       case "sleep": return integer(String(step.ms), 0);
       case "resolution": return integer(String(step.width), 1) && integer(String(step.height), 1);
@@ -229,8 +238,7 @@ export function describeBehavior(behavior: string, stateName: (id: string) => st
       case "parallel": case "sequence": return `${step.type}(${describe(step.steps)})`;
       case "waitfor": return "waitfor(next action)";
       case "hold": case "toggle": case "repeat": return `${step.type}(${step.key})`;
-      case "press": return `press(${step.key}${step.onRelease ? ", on release" : ""})`;
-      case "mousepress": return `${step.type}(${step.key}${step.doubleClick ? ", double" : ""}${step.onRelease ? ", on release" : ""})`;
+      case "press": return `press(${step.key}${step.doubleClick ? ", double" : ""}${step.compatibility ? ", compatibility" : ""}${step.onRelease ? ", on release" : ""})`;
       case "state": return `${step.action === "set" ? "enter" : step.action === "clear" ? "leave" : "state"}(${stateName(step.stateId)})`;
       case "startoverlay": return `${step.restart ? "restartoverlay" : "startoverlay"}(${step.itemIds.map(itemName).join(", ")})`;
       case "stopoverlay": return `stopoverlay(${step.itemIds.map(itemName).join(", ")})`;

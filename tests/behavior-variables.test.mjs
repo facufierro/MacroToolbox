@@ -11,7 +11,7 @@ const keys = { id: "keys", name: "Cast keys", type: "keys", value: "rctrl shift 
 const behavior = (id, steps) => ({ id, name: id, type: "behavior", value: stepsToString(steps) });
 const call = variableId => ({ type: "behavior", variableId });
 const cast = behavior("cast", [{ type: "press", key: { variable: "keys" }, onRelease: true },
-  { type: "sleep", ms: { variable: "timer" } }, { type: "mousepress", key: "LButton", doubleClick: true }]);
+  { type: "sleep", ms: { variable: "timer" } }, { type: "press","compatibility":true, key: "LButton", doubleClick: true }]);
 const chain = behavior("chain", [call("cast"), { type: "press", key: "e" }]);
 const variables = [chain, cast, number, keys];
 const profile = source => ({ id: "profile", hotkeys: [{ trigger: "f1", behavior: source }], events: [], states: [], scripts: [], overlay_items: [], overlay_groups: [] });
@@ -53,7 +53,7 @@ test("shared behavior validation rejects circular, missing, incompatible, empty 
 test("nested shared definitions inherit the caller's trigger requirements", () => {
   const credentialId = "b8483943-e86c-41aa-a593-7388833369cd";
   for (const step of [{ type: "securesend", credentialId }, { type: "press", key: { source: "trigger" } },
-    { type: "mousepress", key: "LButton", onRelease: true }]) {
+    { type: "press","compatibility":true, key: "LButton", onRelease: true }]) {
     const values = [behavior("outer", [call("inner")]), behavior("inner", [step])];
     assert.equal(validateVariableBehaviors(values), true);
     assert.equal(areStepsValid([call("outer")], values, true), true);
@@ -78,7 +78,7 @@ test("exports and deletion protection include transitive dependencies and unused
 test("imports reuse definitions after mapping their dependencies and preserve local conflicts", () => {
   const original = profile(stepsToString([call("cast")]));
   const localKeys = { ...keys, id: "local-keys" }, localNumber = { ...number, id: "local-timer" };
-  const localCast = behavior("local-cast", parseSteps(cast.value).map(step => step.type === "press" ? { ...step, key: { variable: localKeys.id } }
+  const localCast = behavior("local-cast", parseSteps(cast.value).map(step => step.type === "press" && !step.compatibility ? { ...step, key: { variable: localKeys.id } }
     : step.type === "sleep" ? { ...step, ms: { variable: localNumber.id } } : step));
   localCast.name = cast.name;
   const reused = importVariables([original], [cast, keys, number], [localKeys, localNumber, localCast]);

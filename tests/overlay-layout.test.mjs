@@ -10,6 +10,7 @@ import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { getOverlayItemPosition } from "../src/overlayPosition.ts";
+import { getOverlayBarOffsets } from "../src/overlayBars.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const browser = [
@@ -25,6 +26,7 @@ runInNewContext(ts.transpileModule(readFileSync(join(root, "src/OverlayParts.tsx
 }).outputText, { exports, require(specifier) {
   if (specifier.endsWith(".css")) return {};
   if (specifier === "./overlayPosition") return { getOverlayItemPosition };
+  if (specifier === "./overlayBars") return { getOverlayBarOffsets };
   return require(specifier);
 } });
 const { OverlayGroupView, OverlayItemView } = exports;

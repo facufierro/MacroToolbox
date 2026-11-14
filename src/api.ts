@@ -56,7 +56,7 @@ export const api = {
   upsertProfile: async (gameId: string, profile: Profile, variables: Variable[] = [], secureTexts: SecureTextDraft[] = []) => {
     try { return await invoke<Database>("upsert_profile", { gameId, profile, variables, secureTexts }); }
     catch (error) {
-      if (secureTexts.length) throw new Error("Could not save the hotkey's password.");
+      if (secureTexts.length) throw new Error("Could not save the hotkey's password. See the Save entries in Console for details.");
       throw error;
     }
   },

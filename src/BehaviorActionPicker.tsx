@@ -3,7 +3,7 @@ import { IconButton, type IconName } from "./Icon";
 import type { Step } from "./behaviors";
 
 const GROUPS: { name: string; actions: [Step["type"], string, IconName][] }[] = [
-  { name: "Input", actions: [["press", "Press keys", "keyboard"], ["hold", "Hold keys", "hand"], ["toggle", "Toggle keys", "toggle-on"], ["mousepress", "Mouse press", "computer-mouse"], ["repeat", "Repeat keys", "repeat"], ["send", "Type text", "font"], ["securesend", "Secure send", "lock"], ["waitfor", "Wait for", "hourglass-half"]] },
+  { name: "Input", actions: [["press", "Press", "keyboard"], ["hold", "Hold keys", "hand"], ["toggle", "Toggle keys", "toggle-on"], ["repeat", "Repeat keys", "repeat"], ["send", "Type text", "font"], ["securesend", "Secure send", "lock"], ["waitfor", "Wait for", "hourglass-half"]] },
   { name: "Flow", actions: [["sleep", "Sleep", "clock"], ["sequence", "Sequence", "list-ol"], ["parallel", "Simultaneous", "code-fork"]] },
   { name: "Overlays", actions: [["startoverlay", "Overlay", "layer-group"], ["bar", "Set bar", "gauge"], ["state", "State", "toggle-on"]] },
   { name: "Window", actions: [["borderless", "Borderless", "expand"], ["fit", "Fit window", "compress"], ["stretch", "Stretch window", "arrows-up-down-left-right"], ["resolution", "Resolution", "display"], ["goto", "Move cursor", "crosshairs"], ["lock", "Lock cursor", "lock"], ["savecursor", "Save cursor", "floppy-disk"], ["restorecursor", "Restore cursor", "rotate-left"], ["killprocess", "End process", "stop"]] },
@@ -18,7 +18,7 @@ export function BehaviorActionPicker({ hasTrigger, canSecureSend, onSelect, onCl
 }) {
   const [query, setQuery] = useState("");
   const disabled = (type: Step["type"]) => (type === "toggle" && !hasTrigger) || (type === "securesend" && (!hasTrigger || !canSecureSend));
-  const groups = GROUPS.map(group => ({ ...group, actions: group.actions.filter(([type, label]) => `${label} ${type}${type === "startoverlay" ? " start stop restart" : ""}`.toLowerCase().includes(query.trim().toLowerCase())) })).filter(group => group.actions.length);
+  const groups = GROUPS.map(group => ({ ...group, actions: group.actions.filter(([type, label]) => `${label} ${type}${type === "press" ? " keys keyboard mouse click mousepress" : type === "startoverlay" ? " start stop restart" : ""}`.toLowerCase().includes(query.trim().toLowerCase())) })).filter(group => group.actions.length);
   return <div className="action-picker" aria-label="Actions" onKeyDown={event => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
     if (event.key === "Enter" && event.target instanceof HTMLInputElement) {

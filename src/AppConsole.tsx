@@ -1,7 +1,8 @@
 import { Icon, IconButton } from "./Icon";
 import { Component, createContext, useCallback, useContext, useEffect, useReducer, useRef, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { captureWindowErrors, consoleReducer, consoleText, EMPTY_CONSOLE, errorMessage } from "./consoleLog";
+import { invoke } from "@tauri-apps/api/core";
+import { captureWindowErrors, consoleReducer, consoleText, consoleTime, EMPTY_CONSOLE, errorMessage, type DiagnosticEntry } from "./consoleLog";
 import type { CloudStatus } from "./types";
 import "./console.css";
 
@@ -22,13 +23,14 @@ class ConsoleBoundary extends Component<{ children: ReactNode; report: ReportErr
 export function useErrorReporter(source = "App") {
   const report = useContext(ErrorReporter);
   if (!report) throw new Error("Error reporting requires AppConsole.");
-  return useCallback((error: unknown) => report(error, source), [report, source]);
+  return useCallback((error: unknown, context?: string) => report(context ? `${context}: ${errorMessage(error)}` : error, source), [report, source]);
 }
 
 export function AppConsole({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(consoleReducer, EMPTY_CONSOLE);
   const output = useRef<HTMLOListElement>(null);
   const follow = useRef(true);
+  const received = useRef(new Set<number>());
   const report = useCallback<ReportError>((error, source) => {
     dispatch({ type: "error", message: errorMessage(error), source, at: Date.now() });
   }, []);
@@ -37,13 +39,23 @@ export function AppConsole({ children }: { children: ReactNode }) {
     const stopCapturing = captureWindowErrors(window, error => report(error, "App"));
     let disposed = false;
     const removers: Array<() => void> = [];
+    const receiveEntry = (entry: DiagnosticEntry) => {
+      if (disposed || received.current.has(entry.id)) return;
+      received.current.add(entry.id);
+      dispatch({ type: "log", source: entry.source, message: entry.message, at: entry.at, level: entry.level });
+    };
     const subscribe = async <T,>(name: string, receive: (value: T) => void) => {
       try {
         const remove = await listen<T>(name, event => receive(event.payload));
         if (disposed) remove(); else removers.push(remove);
       } catch (error) { if (!disposed) report(error, "Console"); }
     };
-    void subscribe<string>("runtime-error", message => report(message, "Runtime"));
+    // Subscribe before replaying history so startup and in-flight events cannot be lost.
+    void (async () => {
+      await subscribe<DiagnosticEntry>("console-entry", receiveEntry);
+      try { (await invoke<DiagnosticEntry[]>("get_console_entries")).forEach(receiveEntry); }
+      catch (error) { if (!disposed) report(error, "Console"); }
+    })();
     void subscribe<string>("console-error", message => report(message, "Overlay"));
     void subscribe<CloudStatus>("firebase-status", status => {
       if (status.phase === "error") report(status.message, "Cloud");
@@ -72,8 +84,9 @@ export function AppConsole({ children }: { children: ReactNode }) {
         </div>
         {state.expanded && <ol id="console-output" className="app-console__output" role="log" aria-live="polite" ref={output}
           onScroll={event => { const el = event.currentTarget; follow.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 1; }}>
-          {state.entries.map(entry => <li key={entry.id} className="app-console__entry">
-            <time dateTime={new Date(entry.lastAt).toISOString()}>{new Date(entry.lastAt).toLocaleTimeString()}</time>
+          {state.entries.map(entry => <li key={entry.id} className={`app-console__entry app-console__entry--${entry.level}`}>
+            <time dateTime={new Date(entry.lastAt).toISOString()} title={new Date(entry.lastAt).toISOString()}>{consoleTime(entry.lastAt)}</time>
+            <span className="app-console__level">{entry.level.toUpperCase()}</span>
             <span className="app-console__source">{entry.source}</span>
             <pre>{entry.message}{entry.count > 1 && <span className="app-console__repeat"> ×{entry.count}</span>}</pre>
           </li>)}

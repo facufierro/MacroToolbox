@@ -8,6 +8,25 @@ global suspendDuringText := false
 global literalOnPacket := 0
 global testOnProfilesEnabled := 0
 global testOnRuntimeAction := 0
+RunRuntimeTest("diagnostics correlate steps and cursor state without logging typed text", TestRuntimeDiagnostics)
+RunRuntimeTest("failed steps retain their identity and cancellation cleanup in diagnostics", TestRuntimeDiagnosticFailure)
+RunRuntimeTest("diagnostic transport retains an unfinished batch without blocking", TestRuntimeDiagnosticPending)
+RunRuntimeTest("a single release click is not replayed during its following sleep or cleanup", TestSingleClickSleep)
+RunRuntimeTest("foreground single clicks use one owned mouse input stream", TestForegroundSingleClick)
+RunRuntimeTest("Compatibility clicks preserve their caller's input delays", TestForegroundClickDelays)
+RunRuntimeTest("focus loss releases a foreground mouse click", TestForegroundClickCancel.Bind(true))
+RunRuntimeTest("cancellation releases a foreground mouse click", TestForegroundClickCancel.Bind(false))
+RunRuntimeTest("failed foreground mouse downs release their output", TestForegroundClickFailure)
+RunRuntimeTest("foreground mouse release preserves a new physical owner", TestForegroundClickHandoff.Bind(true))
+RunRuntimeTest("foreground mouse release preserves a new behavior owner", TestForegroundClickHandoff.Bind(false))
+RunRuntimeTest("foreground mouse clicks reject focus loss before delivery", TestForegroundClickFocusRace)
+RunRuntimeTest("foreground Alt and Win clicks keep targeted delivery", TestForegroundClickModifiers)
+RunRuntimeTest("normal double clicks send two distinct presses through one input method", TestNormalDoubleClick.Bind(false))
+RunRuntimeTest("normal double clicks respect On release without restarting its wait", TestNormalDoubleClick.Bind(true))
+RunRuntimeTest("normal double clicks preserve an already held physical button", TestNormalDoubleHeld.Bind(true))
+RunRuntimeTest("normal double clicks preserve another behavior's held button", TestNormalDoubleHeld.Bind(false))
+RunRuntimeTest("cancelling a normal double click releases its active press", TestNormalDoubleCancel)
+RunRuntimeTest("sleep after slow input starts when that input finishes", TestSleepAfterSlowInput)
 RunRuntimeTest("Wait for awaits its next mouse action including On release", TestNextWaitMouse.Bind(false))
 RunRuntimeTest("Wait for retains the next mouse action's double click", TestNextWaitMouse.Bind(true))
 RunRuntimeTest("Wait for observes the next mouse press without replaying it", TestNextWaitPress)
@@ -182,8 +201,260 @@ RunRuntimeTest("failed behavior starts do not cancel an existing list", TestCanc
 RunRuntimeTest("an event activation cancels an opted-in list", TestCancelOnOtherSection.Bind("events"))
 RunRuntimeTest("a script API activation cancels an opted-in list", TestCancelOnOtherSection.Bind("scripts"))
 RunRuntimeTest("a newer activation during cancellation cleanup remains active", TestCancelOnOtherReentrant)
-FileAppend("All 174 structured runtime tests passed.`n", "*")
+FileAppend("All 193 structured runtime tests passed.`n", "*")
 ExitApp 0
+
+TestRuntimeDiagnostics() {
+    global testHeldKeys
+    testHeldKeys := Map("LButton", true)
+    privateText := "diagnostic fixture text must stay private"
+    StartBehaviorRun("diagnostic-run", [Action("lock"), Action("goto", "x", "20", "y", "20"), Action("mousepress", "key", "LButton"), Action("send", "text", privateText), Action("restorecursor")], "", "Game.exe")
+    AwaitRuns()
+    source := "[" StrJoinDiagnosticEntries(RuntimeDiagnostics.pending) "]"
+    entries := JsonReader.Parse(source)
+    Assert(entries.Length > 10, "runtime trace omitted its steps")
+    Assert(!InStr(source, privateText), "diagnostics exposed text input")
+    for value in ["run=", "owner=diagnostic-run", "target=Game.exe", "Step node:", "elapsed=", "viewport=", "requested=", "actual=", "foregroundExe=", "LButton:P1", "clip=", "MouseMove lock requested", "MouseMove lock released", "Mouse press prepared", "reason=completed"]
+        Assert(InStr(source, value), "missing runtime diagnostic: " value)
+    Assert(entries[1]["at"] > 1700000000000, "trace did not capture epoch milliseconds at the producer")
+}
+
+TestRuntimeDiagnosticFailure() {
+    StartBehaviorRun("diagnostic-failure", [Action("lock"), Action("invalid")])
+    source := StrJoinDiagnosticEntries(RuntimeDiagnostics.pending)
+    Assert(InStr(source, "reason=step failed") && InStr(source, "(invalid)") && InStr(source, "line="), "failure lost its step or source line")
+    Assert(InStr(source, "MouseMove lock released"), "failure omitted lock cleanup")
+}
+
+TestRuntimeDiagnosticPending() {
+    request := PendingDiagnosticRequest()
+    RuntimeDiagnostics.inFlight := "fixture batch"
+    RuntimeDiagnostics.request := request
+    try {
+        RuntimeDiagnostics.Flush()
+        Assert(request.timeout = 0 && RuntimeDiagnostics.inFlight = "fixture batch", "polling waited or discarded the unfinished batch")
+        request.ready := true
+        RuntimeDiagnostics.Flush()
+        Assert(RuntimeDiagnostics.inFlight = "" && !RuntimeDiagnostics.request, "delivered batch was not acknowledged")
+    } finally {
+        RuntimeDiagnostics.inFlight := ""
+        RuntimeDiagnostics.request := 0
+    }
+}
+
+class PendingDiagnosticRequest {
+    ready := false
+    Status := 200
+    WaitForResponse(timeout) {
+        this.timeout := timeout
+        return this.ready
+    }
+}
+
+TestSingleClickSleep() {
+    global testWindowId, testNativeTarget, testNativeMessages, testHeldKeys
+    window := Gui("+ToolWindow -Caption")
+    try {
+        window.Show("Hide w400 h300")
+        testWindowId := window.Hwnd, testNativeTarget := window.Hwnd, testNativeMessages := []
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, RecordNativeClick
+        testHeldKeys := Map("q", true)
+        execution := StartBehaviorRun("single-click-sleep", [Action("mousepress", "key", "LButton", "onRelease", true), Action("sleep", "ms", "300")], "", "Test.exe", "", "q")
+        Assert(!testNativeMessages.Length, "On release clicked before trigger release")
+        testHeldKeys["q"] := false
+        BindingHost().Release("q")
+        AwaitRuns()
+        Sleep 60
+        Assert(testNativeMessages.Length = 2 && testNativeMessages[1].message = 0x201 && testNativeMessages[2].message = 0x202, "single mouse press was repeated after its sleep")
+        operation := execution.task.children[1].mouse.click
+        operation.Close()
+        operation.Advance()
+        Sleep 30
+        Assert(testNativeMessages.Length = 2 && !operation.onTrace, "cleanup replayed a completed click or retained its run")
+        transitions := []
+        for entry in RuntimeDiagnostics.pending {
+            message := JsonReader.Parse(entry)["message"]
+            if InStr(message, "Mouse transition queued")
+                transitions.Push(message)
+        }
+        Assert(transitions.Length = 2 && InStr(transitions[1], "phase=1; transition=down") && InStr(transitions[2], "phase=2; transition=up"), "diagnostics omitted or duplicated an actual click transition")
+    } finally {
+        behaviorRuntime.Stop()
+        for message in [0x201, 0x202, 0x203]
+            OnMessage message, RecordNativeClick, 0
+        testNativeTarget := 0
+        window.Destroy()
+    }
+}
+
+TestForegroundSingleClick() {
+    global testFocusActive, testHeldKeys
+    testFocusActive := testWindowId
+    testHeldKeys := Map("q", true, "RShift", true)
+    StartBehaviorRun("foreground-single", [Action("lock"), Action("press", "key", "LButton", "onRelease", true), Action("sleep", "ms", "80")], "+", "Game.exe", "", "q")
+    Assert(!testEvents.Length, "foreground click ignored On release")
+    testHeldKeys["q"] := false
+    BindingHost().Release("q")
+    AwaitRuns()
+    Sleep 40
+    AssertKeys(["{blind+}{lbutton downr}", "{blind+}{lbutton up}"])
+    Assert(!testClicks.Length && !nativePosts.Length, "foreground single click also posted window clicks")
+    Assert(testHeldKeys["RShift"] && !heldOutputCounts.Count, "foreground click changed physical Shift or retained button ownership")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "foreground click left the cursor locked")
+}
+
+TestForegroundClickCancel(loseFocus) {
+    global testFocusActive
+    testFocusActive := testWindowId
+    StartBehaviorRun("foreground-cancel", [Action("lock"), Action("press", "key", "LButton"), Action("sleep", "ms", "300")], "", "Game.exe")
+    Assert(testEvents.Length = 1 && heldOutputCounts.Get("lbutton", 0) = 1, "foreground down did not acquire output ownership")
+    if loseFocus {
+        testFocusActive := false
+        behaviorRuntime.Tick()
+    } else
+        behaviorRuntime.Cancel("foreground-cancel")
+    AssertKeys(["{blind}{lbutton downr}", "{blind}{lbutton up}"])
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count && !syntheticDown.Count, "foreground cancellation retained mouse input")
+    Assert(testBlockModes[testBlockModes.Length] = "MouseMoveOff", "foreground cancellation left the cursor locked")
+}
+
+TestForegroundClickDelays() {
+    global testFocusActive
+    testFocusActive := testWindowId
+    previousKeyDelay := A_KeyDelay, previousKeyDuration := A_KeyDuration, previousMouseDelay := A_MouseDelay
+    operation := DoMousePress("LButton", "Game.exe", 0, false, true)
+    try {
+        SetKeyDelay 13, 7
+        SetMouseDelay 17
+        operation.Advance()
+        Assert(A_KeyDelay = 13 && A_KeyDuration = 7 && A_MouseDelay = 17, "foreground down changed its caller's input delays")
+        Sleep 35
+        operation.Advance()
+        Assert(A_KeyDelay = 13 && A_KeyDuration = 7 && A_MouseDelay = 17, "foreground up changed its caller's input delays")
+        Assert(!testEvents.Length && testClicks.Length = 2, "Compatibility click changed to normal input")
+    } finally {
+        operation.Close()
+        SetKeyDelay previousKeyDelay, previousKeyDuration
+        SetMouseDelay previousMouseDelay
+    }
+}
+
+TestForegroundClickFailure() {
+    global testFocusActive, testOnSend
+    testFocusActive := testWindowId
+    testOnSend := FailForegroundMouseDown
+    StartBehaviorRun("foreground-failure", [Action("lock"), Action("press", "key", "LButton"), Action("send", "text", "must not run")], "", "Game.exe")
+    AssertKeys(["{blind}{lbutton downr}", "{blind}{lbutton up}"])
+    Assert(runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "foreground failure was hidden or allowed following output")
+    Assert(!behaviorRuntime.runs.Count && !heldOutputCounts.Count && !syntheticDown.Count, "failed foreground click retained mouse input")
+    testOnSend := 0
+}
+
+FailForegroundMouseDown(keys) {
+    if InStr(keys, "{lbutton downr}")
+        throw Error("fixture mouse down failure")
+}
+
+TestForegroundClickHandoff(physical) {
+    global testFocusActive, testHeldKeys
+    testFocusActive := testWindowId
+    StartBehaviorRun("foreground-handoff", [Action("press", "key", "LButton")], "", "Game.exe")
+    Assert(testEvents.Length = 1 && heldOutputCounts.Get("lbutton", 0) = 1, "foreground click did not establish its own hold")
+    if physical
+        testHeldKeys["lbutton"] := true
+    else
+        HoldChordDown("other-mouse-owner", "LButton", "")
+    AwaitRuns()
+    Assert(testEvents.Length = 1, "foreground click released another mouse owner")
+    if physical
+        testHeldKeys["lbutton"] := false
+    else {
+        Assert(heldOutputCounts["lbutton"] = 1, "foreground release lost the remaining behavior owner")
+        HoldChordUp("other-mouse-owner")
+        AssertKeys(["{blind}{lbutton downr}", "{blind}{lbutton up}"])
+    }
+}
+
+TestForegroundClickFocusRace() {
+    global testFocusActive
+    testFocusActive := false
+    StartBehaviorRun("unfocused-press", [Action("press", "key", "LButton")], "", "Game.exe")
+    Assert(!behaviorRuntime.runs.Count && !testEvents.Length && !testClicks.Length, "normal mouse press reached a different app after focus changed")
+}
+
+TestForegroundClickModifiers() {
+    global testFocusActive, testHeldKeys, testClicks
+    testFocusActive := testWindowId
+    for key in ["Alt", "LWin", "RWin"] {
+        testHeldKeys := Map(key, true), testClicks := []
+        StartBehaviorRun("foreground-modifier", [Action("mousepress", "key", "LButton")], "", "Game.exe")
+        AwaitRuns()
+        Assert(!testEvents.Length && testClicks.Length = 2, "foreground click changed unrelated Alt or Win delivery")
+        Assert(testHeldKeys[key], "foreground click released an independent modifier")
+    }
+}
+
+TestNormalDoubleClick(onRelease) {
+    global testHeldKeys
+    testHeldKeys := Map("q", true, "RCtrl", true)
+    StartBehaviorRun("normal-double", [Action("press", "key", "LButton", "doubleClick", true, "onRelease", onRelease)], "+", "Game.exe", "", "q")
+    if onRelease {
+        Assert(!testEvents.Length, "normal double click ran before trigger release")
+        testHeldKeys["q"] := false
+        BindingHost().Release("q")
+    }
+    AwaitRuns()
+    AssertKeys(["{blind+}{lbutton downr}", "{blind+}{lbutton up}", "{blind+}{lbutton downr}", "{blind+}{lbutton up}"])
+    Assert(!testClicks.Length && !nativePosts.Length && testHeldKeys["RCtrl"], "normal double click used Compatibility or changed another modifier")
+    Assert(testEvents[3]["time"] - testEvents[2]["time"] >= 30, "normal double click omitted its release interval")
+    testHeldKeys["q"] := false
+}
+
+TestNormalDoubleHeld(physical) {
+    global testHeldKeys
+    if physical
+        testHeldKeys["lbutton"] := true
+    else
+        HoldChordDown("existing-mouse-owner", "LButton", "")
+    before := testEvents.Length
+    StartBehaviorRun("held-double", [Action("press", "key", "LButton", "doubleClick", true), Action("send", "text", "must not run")], "", "Game.exe")
+    Assert(testEvents.Length = before && !testClicks.Length && !nativePosts.Length, "normal double click interrupted another owner or silently changed input methods")
+    Assert(runtimeActions.Length = 1 && InStr(runtimeActions[1].value, "Enable Compatibility"), "unavailable normal double click did not explain how to retain the hold")
+    if physical {
+        Assert(testHeldKeys["lbutton"], "normal double click released a physical button")
+        testHeldKeys["lbutton"] := false
+    } else {
+        Assert(heldOutputCounts["lbutton"] = 1, "normal double click lost another behavior's ownership")
+        HoldChordUp("existing-mouse-owner")
+    }
+}
+
+TestNormalDoubleCancel() {
+    StartBehaviorRun("cancel-normal-double", [Action("press", "key", "LButton", "doubleClick", true)], "", "Game.exe")
+    Assert(testEvents.Length = 1, "normal double click did not expose its initial press")
+    behaviorRuntime.Cancel("cancel-normal-double")
+    Sleep 80
+    AssertKeys(["{blind}{lbutton downr}", "{blind}{lbutton up}"])
+    Assert(!heldOutputCounts.Count && !syntheticDown.Count, "cancelled normal double click retained button ownership")
+}
+
+TestSleepAfterSlowInput() {
+    global testOnSend, testReleaseTime
+    testReleaseTime := 0, testOnSend := SlowInputFixture
+    StartBehaviorRun("slow-input-sleep", [Action("send", "text", "fixture"), Action("sleep", "ms", "80"), Action("press", "key", "x")])
+    AwaitRuns()
+    Assert(testEvents.Length = 3 && testEvents[2]["time"] - testReleaseTime >= 80, "previous input delivery consumed the following sleep")
+    testOnSend := 0
+}
+
+SlowInputFixture(keys) {
+    global testReleaseTime
+    if InStr(keys, "{text}") {
+        Sleep 120
+        testReleaseTime := A_TickCount
+    }
+}
 
 TestCancelOnOtherBehavior(acrossProfiles) {
     global behaviorRuntime, testWaitQueue, testHeldKeys
@@ -1530,6 +1801,7 @@ TestSecureMissing() {
     StartBehaviorRun("secure-missing", [Action("securesend", "credentialId", SecureFixtureId()), Action("send", "text", "must not run")], "", "*", "", "q")
     Assert(!testEvents.Length && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "missing password did not fail safely")
     Assert(InStr(runtimeActions[1].value, "Secure send failed"), "missing password reported an unrelated error")
+    Assert(InStr(runtimeActions[1].value, "CredReadW") && InStr(runtimeActions[1].value, "Windows error=1168"), "missing password omitted the failing API and Windows code")
     testHeldKeys["q"] := false
     AwaitRuns()
 }
@@ -1542,6 +1814,7 @@ TestSecureFailureRedaction() {
     StartBehaviorRun("secure-failure", [Action("securesend", "credentialId", credential.id), Action("send", "text", "must not run")], "", "*", "", "q")
     Assert(testEvents.Length = 1 && runtimeActions.Length = 1 && runtimeActions[1].kind = "error", "secure failure continued its sequence")
     Assert(!InStr(runtimeActions[1].value, secret) && InStr(runtimeActions[1].value, "Secure send failed"), "password leaked through an input API error")
+    Assert(!InStr(StrJoinDiagnosticEntries(RuntimeDiagnostics.pending), secret), "password leaked through the persistent diagnostic trace")
     testHeldKeys["q"] := false
     AwaitRuns()
 }
@@ -1573,6 +1846,7 @@ RunRuntimeTest(name, test) {
     testInputSuspended := false
     testOnProfilesEnabled := 0
     testOnRuntimeAction := 0
+    RuntimeDiagnostics.pending := []
     RunTest(name, test)
     Assert(behaviorRuntime.runs.Count = 0, name " left a running behavior")
     behaviorRuntime.Stop()
@@ -1580,7 +1854,10 @@ RunRuntimeTest(name, test) {
 }
 
 Action(type, fields*) {
-    result := Map("type", type)
+    ; Legacy mouse fixtures exercise the canonical Compatibility action produced by Rust.
+    result := Map("type", type = "mousepress" ? "press" : type)
+    if type = "mousepress"
+        result["compatibility"] := true
     loop fields.Length // 2
         result[fields[A_Index * 2 - 1]] := fields[A_Index * 2]
     return result

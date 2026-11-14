@@ -17,7 +17,7 @@ async function scenario(){
   try{
     await wait();
     check('Wait for has no input mode value fields or recorder even when opening old settings',!waitRow().querySelector('.step-row__params').querySelector('input,select,button'));
-    check('old input conditions move into the following mouse action automatically',rows()[1].querySelector('.step-row__type').textContent==='mousepress'&&rows()[1].querySelector('input').value==='LButton');
+    check('old input conditions move into the following mouse action automatically',rows()[1].querySelector('.step-row__type').textContent==='press'&&rows()[1].querySelector('input').value==='LButton');
     await click('[aria-label="Save"]');
     check('saving upgrades the old wait without keeping hidden fields',JSON.stringify(JSON.parse(window.saved.behavior))===JSON.stringify(window.expected));
     const saved=JSON.parse(window.saved.behavior);
@@ -45,8 +45,8 @@ async function scenario(){
 test('Wait for defaults to the next action and preserves existing waits through save reorder and reopen',{skip:!browser&&'Chrome or Edge is required'},async t=>{
   const mocks=['./api','./AppConsole','./App.css','./CloudSettings','@tauri-apps/api/event','@tauri-apps/plugin-dialog','@tauri-apps/plugin-opener','@tauri-apps/plugin-notification'];
   const bundle=browserModules(['App.tsx'],{mocks,expose:{[join(root,'src/App.tsx')]:['HotkeyModal']}});
-  const original=[{type:'waitfor',key:'LButton'},{type:'mousepress',key:'rctrl LButton',onRelease:true,doubleClick:true},{type:'startoverlay',itemId:'timer',restart:true}];
-  const expected=[{type:'waitfor'},{type:'mousepress',key:'LButton'},original[1],{type:'startoverlay',restart:true,itemIds:['timer']}];
+  const original=[{type:'waitfor',key:'LButton'},{type:'press','compatibility':true,key:'rctrl LButton',onRelease:true,doubleClick:true},{type:'startoverlay',itemId:'timer',restart:true}];
+  const expected=[{type:'waitfor'},{type:'press',key:'LButton',compatibility:true},original[1],{type:'startoverlay',restart:true,itemIds:['timer']}];
   const harness=`const modules={${bundle.declarations}},cache={};window.original=${JSON.stringify(original)};window.expected=${JSON.stringify(expected)};
 window.reportError=error=>{throw error;};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;

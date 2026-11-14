@@ -27,7 +27,7 @@ import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step }
 import { allowsExtraModifiers } from "./hotkeyModifiers";
 import { usedSecureTexts } from "./secureText";
 import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
-import { resolveOverlayItems, availableOverlayTargets, resolveOverlayGroups, remapOverlayReferences, mapOverlayActions, withReferencedOverlayParts, carryReferencedOverlayParts } from "./overlayItems";
+import { resolveOverlayItems, availableOverlayTargets, resolveOverlayGroups, remapOverlayReferences, mapOverlayActions, withReferencedOverlayParts, carryReferencedOverlayParts, duplicateBehaviorOverlays } from "./overlayItems";
 import type {
   Database,
   Scope,
@@ -250,6 +250,7 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
       : `${scope.name} (${isGlobalExe(group.exe) ? "Any app" : group.exe || "No app"})`,
     exe: group.exe,
     profiles: group.profiles,
+    overlay_bars: (scope.overlay_bars ?? []).map(bar => ({ ...bar, id: uid(), group_ids: bar.group_ids.map(id => groupIds.get(id) ?? id) })),
     subfolders: (scope.subfolders ?? []).map(folder => ({ ...folder, id: subfolderIds.get(folder.id)! })),
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));
@@ -1842,13 +1843,19 @@ export default function App() {
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
     try {
+      const source = db!.scopes.find(candidate => candidate.id === sourceGameId)!;
+      const sourceProfile = source.profiles.find(candidate => candidate.id === sourceProfileId)!;
       const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
+      const overlays = duplicateBehaviorOverlays(hotkey.behavior, sourceProfile, source.profiles, uid);
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
         ? { ...hotkey, name: copyName(hotkey.name, triggerLabel(hotkey.trigger, db!.variables) || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
         : { ...hotkey };
-      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] }));
+      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile,
+        overlay_groups: [...profile.overlay_groups, ...overlays.overlay_groups], overlay_items: [...profile.overlay_items, ...overlays.overlay_items],
+        hotkeys: [...profile.hotkeys, { ...copy, behavior: overlays.behavior }],
+      }));
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error copying hotkey: ${e}`); }
@@ -1879,7 +1886,7 @@ export default function App() {
       const updated = await api.upsertProfile(gameId, { ...profile, hotkeys }, [], secureTexts);
       handleDb(updated);
       setModal(null);
-    } catch (e) { reportError(`Error saving hotkey: ${e}`); }
+    } catch (e) { reportError(e, `Error saving hotkey "${hotkey.name || "Unnamed"}"; folder=${gameId}; profile=${profileId}; trigger=${JSON.stringify(hotkey.trigger)}`); }
   }
 
   async function handleEventSave(gameId: string, profileId: string, index: number | null, event: BehaviorEvent) {
