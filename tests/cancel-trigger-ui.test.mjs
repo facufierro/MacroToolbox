@@ -100,7 +100,7 @@ async function scenario() {
 test('hotkeys add record reorder save reopen and remove alternative cancel triggers', { skip: !browser && 'Chrome or Edge is required' }, async t => {
   const mocks = ['./api', './AppConsole', './App.css', './CloudSettings', '@tauri-apps/api/event', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-opener', '@tauri-apps/plugin-notification'];
   const bundle = browserModules(['App.tsx'], { mocks, expose: { [join(root, 'src/App.tsx')]: ['HotkeyModal'] } });
-  const harness = `const modules={${bundle.declarations}},cache={};window.steps=[{type:'waitfor'},{type:'mousepress',key:'LButton'},{type:'send',text:'done'}];
+  const harness = `const modules={${bundle.declarations}},cache={};window.steps=[{type:'waitfor'},{type:'press',key:'LButton',compatibility:true},{type:'send',text:'done'}];
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>{throw error;}};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}

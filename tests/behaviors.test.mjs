@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { readVariable } from "../src/variables.ts";
-import { parseSteps, stepsToString, areStepsValid, mapBehavior, describeBehavior } from "../src/behaviors.ts";
+import { parseSteps, stepsToString, areStepsValid, mapBehavior, describeBehavior, isMousePressInput } from "../src/behaviors.ts";
 
 test("editor and backend share the same behavior compatibility fixtures", () => {
   const fixtures = JSON.parse(readFileSync(new URL("./fixtures/behaviors.json", import.meta.url), "utf8"));
@@ -23,20 +23,20 @@ test("structured behavior groups and text round-trip without interpreting separa
 
 test("legacy mousepress aliases and text are preserved when opening behaviors", () => {
   assert.deepEqual(parseSteps("pressalt(rctrl LButton);send(a;b);press(x)"), [
-    { type: "mousepress", key: "rctrl LButton" }, { type: "send", text: "a;b" }, { type: "press", key: "x" },
+    { type: "press","compatibility":true, key: "rctrl LButton" }, { type: "send", text: "a;b" }, { type: "press", key: "x" },
   ]);
 });
 
 test("mousepress retains its click type and distinguishes double clicks in summaries", () => {
   for (const doubleClick of [undefined, false, true]) {
-    const step = { type: "mousepress", key: "rctrl shift LButton", ...(doubleClick === undefined ? {} : { doubleClick }) };
+    const step = { type: "press","compatibility":true, key: "rctrl shift LButton", ...(doubleClick === undefined ? {} : { doubleClick }) };
     const source = stepsToString([step]);
     assert.deepEqual(parseSteps(source), [step]);
     assert.equal(areStepsValid(parseSteps(source)), true);
-    assert.equal(describeBehavior(source, id => id, id => id), `mousepress(rctrl shift LButton${doubleClick ? ", double" : ""})`);
+    assert.equal(describeBehavior(source, id => id, id => id), `press(rctrl shift LButton${doubleClick ? ", double" : ""}, compatibility)`);
   }
   for (const doubleClick of ["true", 2, null]) {
-    assert.equal(areStepsValid(parseSteps(JSON.stringify([{ type: "mousepress", key: "LButton", doubleClick }]))), false);
+    assert.equal(areStepsValid(parseSteps(JSON.stringify([{ type: "press","compatibility":true, key: "LButton", doubleClick }]))), false);
   }
 });
 
@@ -46,10 +46,10 @@ test("unknown commands remain visible and cannot silently disappear on save", ()
   assert.equal(areStepsValid(steps), false);
 });
 
-test("Press and Mouse press preserve activation choices and require a hotkey for On release", () => {
-  for (const type of ["press", "mousepress"]) {
+test("both Press delivery methods preserve activation choices and require a hotkey for On release", () => {
+  for (const compatibility of [false, true]) {
     for (const onRelease of [undefined, false, true]) {
-      const step = { type, key: type === "press" ? "rctrl x" : "rctrl LButton", ...(onRelease === undefined ? {} : { onRelease }) };
+      const step = { type: "press", compatibility, key: compatibility ? "rctrl LButton" : "rctrl x", ...(onRelease === undefined ? {} : { onRelease }) };
       const source = stepsToString([step]);
       assert.deepEqual(parseSteps(source), [step]);
       assert.equal(areStepsValid([step]), true);
@@ -57,19 +57,47 @@ test("Press and Mouse press preserve activation choices and require a hotkey for
       assert.equal(describeBehavior(source, id => id, id => id).includes("on release"), onRelease === true);
     }
     for (const onRelease of ["true", 1, null]) {
-      assert.equal(areStepsValid(parseSteps(JSON.stringify([{ type, key: type === "press" ? "x" : "LButton", onRelease }]))), false);
+      assert.equal(areStepsValid(parseSteps(JSON.stringify([{ type: "press", compatibility, key: compatibility ? "LButton" : "x", onRelease }]))), false);
     }
   }
+});
+
+test("Press defaults to normal input and restricts mouse options to actual mouse inputs", () => {
+  for (const key of ["x", "rctrl x", "LButton", "rctrl XButton2", "w LButton"]) assert.equal(areStepsValid([{type:"press",key}]), true);
+  for (const key of ["LButton", "rctrl shift XButton2", "m1"]) {
+    for (const compatibility of [false,true]) assert.equal(areStepsValid([{type:"press",key,compatibility,doubleClick:true}]),true);
+  }
+  for (const key of ["x", "rctrl x", "w LButton", "LButton RButton"]) {
+    assert.equal(areStepsValid([{type:"press",key,compatibility:true}]),false);
+    assert.equal(areStepsValid([{type:"press",key,doubleClick:true}]),false);
+  }
+  for (const compatibility of ["true",1,null]) assert.equal(areStepsValid([{type:"press",key:"LButton",compatibility}]),false);
+  assert.deepEqual(parseSteps('press(LButton)'),[{type:"press",key:"LButton"}]);
+  for (const source of ['mousepress(LButton)','pressalt(LButton)','[{"type":"mousepress","key":"LButton"}]']) {
+    assert.deepEqual(parseSteps(source),[{type:"press",key:"LButton",compatibility:true}]);
+  }
+});
+
+test("mouse-only options follow resolved input types without changing the selected method", () => {
+  const variables = [{id:"mouse",name:"Mouse",type:"keys",value:"rctrl LButton"},{id:"key",name:"Key",type:"keys",value:"rctrl x"}];
+  const step = {type:"press",key:"LButton",compatibility:true,doubleClick:true,onRelease:true};
+  assert.equal(isMousePressInput({variable:"mouse"},variables),true);
+  assert.equal(isMousePressInput({variable:"key"},variables),false);
+  assert.equal(areStepsValid([{...step,key:{variable:"mouse"}}],variables),true);
+  assert.equal(areStepsValid([{...step,key:{variable:"key"}}],variables),false);
+  assert.equal(areStepsValid([{...step,key:{source:"trigger"}}],variables),false);
+  const draft = {...step,key:"LButto"};
+  assert.deepEqual(parseSteps(stepsToString([draft])),[draft]);
 });
 
 test("invalid nested actions and timing parameters prevent saving", () => {
   for (const steps of [
     [{ type: "parallel", steps: [] }], [{ type: "hold", key: "" }],
-    [{ type: "mousepress", key: "a LButton" }], [{ type: "mousepress", key: "ctrl a" }],
+    [{ type: "press","compatibility":true, key: "a LButton" }], [{ type: "press","compatibility":true, key: "ctrl a" }],
     [{ type: "repeat", key: "a", interval: "0", hold: "6" }],
     [{ type: "sequence", steps: [{ type: "sleep", ms: "-1" }] }],
   ]) assert.equal(areStepsValid(steps), false);
-  assert.equal(areStepsValid([{ type: "mousepress", key: "rctrl shift XButton2" }]), true);
+  assert.equal(areStepsValid([{ type: "press","compatibility":true, key: "rctrl shift XButton2" }]), true);
 });
 
 test("Toggle keys round-trips through shared definitions and retains the caller's trigger requirement", async () => {

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { captureWindowErrors, consoleReducer, consoleText, EMPTY_CONSOLE, errorMessage } from "../src/consoleLog.ts";
+import { captureWindowErrors, consoleReducer, consoleText, consoleTime, EMPTY_CONSOLE, errorMessage } from "../src/consoleLog.ts";
 
 const failure = (message = "Overlay part is unavailable.", source = "Runtime", at = 1000) => ({ type: "error", message, source, at });
 
 test("a new error opens the console and retains the time and source", () => {
   const state = consoleReducer(EMPTY_CONSOLE, failure());
   assert.equal(state.expanded, true);
-  assert.deepEqual(state.entries, [{ id: 1, source: "Runtime", message: failure().message, firstAt: 1000, lastAt: 1000, count: 1 }]);
+  assert.deepEqual(state.entries, [{ id: 1, source: "Runtime", message: failure().message, firstAt: 1000, lastAt: 1000, count: 1, level: "error" }]);
   assert.deepEqual(EMPTY_CONSOLE.entries, []);
 });
 
@@ -44,7 +44,23 @@ test("clear empties the copied log and a subsequent failure is reported normally
 
 test("copy includes messages, source, timestamps and repetition details", () => {
   const state = consoleReducer(consoleReducer(EMPTY_CONSOLE, failure()), failure(undefined, undefined, 2000));
-  assert.equal(consoleText(state.entries), "[1970-01-01T00:00:01.000Z] Runtime: Overlay part is unavailable. (2 times; last 1970-01-01T00:00:02.000Z)");
+  assert.equal(consoleText(state.entries), "[1970-01-01T00:00:01.000Z] ERROR Runtime: Overlay part is unavailable. (2 times; last 1970-01-01T00:00:02.000Z)");
+});
+
+test("informational traces stay collapsed, retain producer times and copy their severity", () => {
+  const state = consoleReducer(EMPTY_CONSOLE, { type: "log", level: "info", source: "Input", message: "Run started", at: 1234 });
+  assert.equal(state.expanded, false);
+  assert.equal(consoleText(state.entries), "[1970-01-01T00:00:01.234Z] INFO Input: Run started");
+  assert.match(consoleTime(1234), /01[.,]234$/);
+  const warned = consoleReducer(state, { type: "log", level: "warn", source: "Runtime", message: "Cursor did not reach requested position", at: 1250 });
+  assert.equal(warned.expanded, true);
+});
+
+test("late runtime batches are ordered by event time and different severities remain separate", () => {
+  let state = consoleReducer(EMPTY_CONSOLE, failure("Run failed", "Runtime", 3000));
+  state = consoleReducer(state, { type: "log", level: "info", source: "Runtime", message: "Run started", at: 1000 });
+  state = consoleReducer(state, { type: "log", level: "warn", source: "Runtime", message: "Run failed", at: 3000 });
+  assert.deepEqual(state.entries.map(entry => [entry.firstAt, entry.level]), [[1000, "info"], [3000, "error"], [3000, "warn"]]);
 });
 
 test("error formatting preserves stacks, backend strings and structured rejections", () => {

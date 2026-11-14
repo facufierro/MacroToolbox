@@ -377,6 +377,7 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
             if let Some(state_id) = &hotkey.state_id { steps.push(behavior::Action::State { state_id: state_id.clone(), action: behavior::StateAction::Toggle }); }
             let extra_modifiers = hotkey.allow_extra_modifiers.or_else(|| matches!(&hotkey.trigger, crate::triggers::Trigger::Variable(_)).then_some(false));
             let mut binding = runtime_binding(&trigger, steps, false, extra_modifiers, "hotkeys");
+            binding["name"] = json!(hotkey.name);
             binding["cancelTriggers"] = json!(hotkey.cancel_triggers);
             binding["cancelOnOtherBehavior"] = json!(hotkey.cancel_on_other_behavior);
             bindings.push(binding);
@@ -394,13 +395,20 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
             if profile.armed { behavior::validate(&steps, false)?; }
             events.insert(event.event.clone(), serde_json::to_value(steps).map_err(|error| error.to_string())?);
         }
-        let mut data = json!({"id":profile.id, "target":ap.exe.trim(), "armed":profile.armed,
+        let mut data = json!({"id":profile.id, "name":profile.name, "target":ap.exe.trim(), "armed":profile.armed,
             "overlay":config::profile_has_overlay(ap.siblings, profile), "bindings":bindings, "events":events,
             "sections":{"hotkeys":!profile.hotkeys_disabled,"events":!profile.events_disabled,"scripts":!profile.scripts_disabled},
             "launchScripts":profile.scripts.iter().filter(|script| !profile.scripts_disabled && script.enabled && script.trigger == "launch").map(|script| script.id.clone()).collect::<Vec<_>>()});
         let mut revisions = serde_json::Map::new();
         for section in ["hotkeys", "events", "scripts"] {
-            let inputs: Vec<_> = data["bindings"].as_array().unwrap().iter().filter(|binding| binding["section"].as_str() == Some(section)).collect();
+            let inputs: Vec<_> = data["bindings"].as_array().unwrap().iter()
+                .filter(|binding| binding["section"].as_str() == Some(section))
+                .map(|binding| {
+                    let mut input = binding.clone();
+                    // Diagnostic labels must not cancel a running behavior when renamed.
+                    input.as_object_mut().unwrap().remove("name");
+                    input
+                }).collect();
             let definition = json!({"armed":profile.armed,"target":ap.exe.trim(),"enabled":profile.section_enabled(section),
                 "bindings":inputs,"events":if section == "events" { Some(&data["events"]) } else { None },
                 "scripts":if section == "scripts" { Some(&profile.scripts) } else { None }});
@@ -1118,6 +1126,7 @@ class WindowMousePress {
         this.borrowed := GetKeyState(keyName, "P") || heldOutputCounts.Has(keyName)
         this.phase := this.borrowed ? 0 : 1
         this.due := 0, this.down := false, this.closed := false
+        this.onTrace := 0
         this.cleanup := this.Close.Bind(this)
         OnExit this.cleanup
     }
@@ -1147,9 +1156,18 @@ class WindowMousePress {
         previousDelay := A_ControlDelay
         SetControlDelay -1
         flags := flags ?? this.flags
-        try WindowClick(position = "" ? this.position : position, this.target, this.button, down ? "NA Pos D" : "NA Pos U",
-            flags, secondDown, this.doubleClick || flags)
+        position := position = "" ? this.position : position
+        try {
+            WindowClick(position, this.target, this.button, down ? "NA Pos D" : "NA Pos U",
+                flags, secondDown, this.doubleClick || flags)
+            this.Trace("Mouse transition queued; phase=" this.phase "; transition=" (down ? "down" : "up") "; secondDown=" secondDown "; hwnd=" this.target "; client=" position "; button=" this.keyName "; flags=" flags)
+        }
         finally SetControlDelay previousDelay
+    }
+
+    Trace(message) {
+        if IsObject(this.onTrace)
+            try this.onTrace.Call(message)
     }
 
     ResumeHold(physicalOwner := 0, flags := 0) {
@@ -1170,6 +1188,7 @@ class WindowMousePress {
     }
 
     Close(exitReason := "", *) {
+        global heldOutputCounts
         if this.closed
             return
         this.closed := true
@@ -1179,8 +1198,13 @@ class WindowMousePress {
             if this.down
                 this.Send(false)
         } finally {
-            if this.borrowed
-                FinishMousePress(this.position, this.target, this.button, this.keyName, exitReason, this.flags)
+            try {
+                if this.borrowed {
+                    this.Trace("Mouse hold cleanup; hwnd=" this.target "; client=" this.position "; button=" this.keyName "; sharedHold=" heldOutputCounts.Has(this.keyName))
+                    FinishMousePress(this.position, this.target, this.button, this.keyName, exitReason, this.flags)
+                }
+                this.Trace("Mouse press closed; hwnd=" this.target "; client=" this.position "; button=" this.keyName)
+            } finally this.onTrace := 0
         }
     }
 }
@@ -1232,23 +1256,30 @@ WindowClick(position, target, button, options, flags := 0, secondDown := false, 
 ; Passwords remain outside binding data and are read only at the moment of delivery.
 SendSecureText(credentialId, target := "", profile := "") {
     credential := 0, blob := 0, size := 0, password := ""
+    local stage := "validate reference", osError := 0
     try {
         if !RegExMatch(credentialId, "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
             throw ValueError("Invalid credential reference.")
-        if !DllCall("Advapi32\CredReadW", "WStr", "MacroToolbox/SecureSend/" credentialId, "UInt", 1, "UInt", 0, "Ptr*", &credential)
+        stage := "CredReadW"
+        if !DllCall("Advapi32\CredReadW", "WStr", "MacroToolbox/SecureSend/" credentialId, "UInt", 1, "UInt", 0, "Ptr*", &credential) {
+            osError := A_LastError
             throw Error("Password unavailable.")
+        }
+        stage := "validate credential data"
         size := NumGet(credential, A_PtrSize = 8 ? 32 : 24, "UInt")
         blob := NumGet(credential, A_PtrSize = 8 ? 40 : 28, "Ptr")
         if !blob || !size || Mod(size, 2) || size > 2560
             throw Error("Invalid credential data.")
+        stage := "check target focus"
         if !BehaviorContextActive(target, profile)
             throw TargetError("Target unavailable.")
         password := StrGet(blob, size // 2, "UTF-16")
         ; Never use the ordinary text action's application-specific clipboard fallback.
+        stage := "deliver literal text"
         SendLiteralText(password)
     } catch Error {
         ; Input APIs may include their arguments in errors. Do not forward those errors.
-        throw Error("Secure send failed. Enter the password again or check the target app.")
+        throw Error("Secure send failed at " stage "; credential=" credentialId "; Windows error=" osError ". Enter the password again or check the target app.")
     } finally {
         if password != ""
             DllCall("msvcrt\memset", "Ptr", StrPtr(password), "Int", 0, "UPtr", StrLen(password) * 2, "CDecl Ptr")
@@ -1789,7 +1820,7 @@ mod tests {
         assert_eq!(binding["subfolder"], "combat");
         assert_eq!(binding["folder"], "game");
         assert_eq!(binding["toggle"], true);
-        assert_eq!(binding["key"], "$*>^+n");
+        assert_eq!(binding["key"], "$*>^+SC031");
         assert!(binding["steps"].as_array().unwrap().is_empty());
         game.set_subfolder_enabled("combat", true).unwrap();
         assert_ne!(subfolder_controls(&game)[0]["revision"], controls[0]["revision"]);
@@ -1957,6 +1988,21 @@ mod tests {
             let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
             assert_eq!(data[0]["overlay"], false);
         }
+    }
+
+    #[test]
+    fn diagnostic_labels_do_not_change_behavior_section_revisions() {
+        let mut profile = profile("press(x)");
+        let configuration = |profile: &Profile| -> serde_json::Value {
+            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }], &[]).unwrap()).unwrap()
+        };
+        let before = configuration(&profile);
+        profile.name = "Renamed profile".into();
+        profile.hotkeys[0].name = "Renamed login".into();
+        let after = configuration(&profile);
+        assert_eq!(after[0]["name"], "Renamed profile");
+        assert_eq!(after[0]["bindings"][0]["name"], "Renamed login");
+        assert_eq!(before[0]["sectionRevisions"], after[0]["sectionRevisions"]);
     }
 
     #[test]

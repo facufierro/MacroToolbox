@@ -23,8 +23,8 @@ async function scenario() {
   const listRow = () => [...document.querySelectorAll('.variable-row')].find(row => row.querySelector('.variable-row__type').textContent === 'Trigger list');
   try {
     await wait();
-    await set('[aria-label="Keys source"]', 'trigger');
-    check('Press offers Matched trigger before a list is created', get('[aria-label="Keys source"]').value === 'trigger');
+    await set('[aria-label="Input source"]', 'trigger');
+    check('Press offers Matched trigger before a list is created', get('[aria-label="Input source"]').value === 'trigger');
     await set('[aria-label="Trigger source"]', 'variable');
     check('creating a trigger variable opens a fixed Trigger list form', get('[aria-label="Variable type"]').value === 'triggers' && get('[aria-label="Variable type"]').disabled);
     await set('[aria-label="Variable name"]', 'Cast shortcuts');
@@ -63,17 +63,17 @@ async function scenario() {
     check('the Trigger selector excludes ordinary Keys variables', ![...get('[aria-label="Trigger variable"]').options].some(option => option.textContent === 'Output keys'));
     await set('[aria-label="Activation"]', 'release');
     await click('.step-add-btns > button[aria-label="Add action"]');
-    await click('.action-picker button[aria-label="Press keys"]');
-    await set('.steps-list > .sortable-item:last-child input[placeholder="Keys"]', 'e');
+    await click('.action-picker button[aria-label="Press"]');
+    await set('.steps-list > .sortable-item:last-child input[placeholder="Input"]', 'e');
     await click('button[aria-label="Save"]');
     const saved = window.snapshot.db.scopes[0].profiles[0].hotkeys[0];
     check('one saved definition retains its list reference, matched input, release choice, and common E step', saved.trigger.variable === id && JSON.stringify(JSON.parse(saved.behavior)) === JSON.stringify([{type:'press',key:{source:'trigger'},onRelease:true},{type:'press',key:'e'}]));
-    check('reopening selects Matched trigger and the original list', get('[aria-label="Trigger variable"]').value === id && get('[aria-label="Keys source"]').value === 'trigger');
+    check('reopening selects Matched trigger and the original list', get('[aria-label="Trigger variable"]').value === id && get('[aria-label="Input source"]').value === 'trigger');
     const row = get('.step-row'), controls = [...row.querySelectorAll('.step-row__params select')];
     const centers = controls.map(control => {const rect=control.getBoundingClientRect();return rect.top+rect.height/2;});
     check('Matched trigger and activation stay compact on one line', Math.max(...centers)-Math.min(...centers)<2 && row.getBoundingClientRect().height<64 && controls[0].getBoundingClientRect().width>=160);
-    await set('.steps-list > .sortable-item:last-child [aria-label="Keys source"]', 'variable');
-    check('Press only offers ordinary Keys variables', ![...get('[aria-label="Keys variable"]').options].some(option => option.value === id) && get('[aria-label="Keys variable"]').selectedOptions[0].textContent === 'Output keys');
+    await set('.steps-list > .sortable-item:last-child [aria-label="Input source"]', 'variable');
+    check('Press only offers ordinary Keys variables', ![...get('[aria-label="Input variable"]').options].some(option => option.value === id) && get('[aria-label="Input variable"]').selectedOptions[0].textContent === 'Output keys');
     await click('#manage');
     check('a saved trigger reference prevents deleting the list', listRow().querySelector('[aria-label="Delete variable"]').disabled);
     listRow().querySelector('[aria-label="Edit variable"]').click(); await wait();
@@ -86,10 +86,10 @@ async function scenario() {
     const frame = get('.modal--wide').getBoundingClientRect();
     check('all hotkey controls fit within the available editor width', frame.left>=0 && frame.right<=innerWidth && [...document.querySelectorAll('.modal--wide input,.modal--wide select,.modal--wide button,.modal--wide output')].every(element => {const rect=element.getBoundingClientRect();return rect.left>=frame.left && rect.right<=frame.right && rect.width>15;}));
     await click('#event');
-    check('events cannot save Matched trigger and can switch back to literal keys', get('button[aria-label="Save"]').disabled && get('[aria-label="Keys source"] option[value="trigger"]').disabled);
-    await set('[aria-label="Keys source"]', 'value');
-    await set('input[placeholder="Keys"]', 'e');
-    check('switching an invalid event source to Value restores normal editing', !get('button[aria-label="Save"]').disabled && !document.querySelector('[aria-label="Keys source"] option[value="trigger"]'));
+    check('events cannot save Matched trigger and can switch back to literal keys', get('button[aria-label="Save"]').disabled && get('[aria-label="Input source"] option[value="trigger"]').disabled);
+    await set('[aria-label="Input source"]', 'value');
+    await set('input[placeholder="Input"]', 'e');
+    check('switching an invalid event source to Value restores normal editing', !get('button[aria-label="Save"]').disabled && !document.querySelector('[aria-label="Input source"] option[value="trigger"]'));
     await click('#hotkey');
     if (innerWidth >= 1000) { await click('#manage'); listRow().querySelector('[aria-label="Edit variable"]').click(); await wait(); }
     document.getElementById('results').textContent = JSON.stringify({results});

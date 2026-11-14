@@ -9,7 +9,7 @@ import { OverlayTargetsInput } from "./OverlayTargetsInput";
 import { BehaviorOverlayEditor, type OverlayEditingChange } from "./BehaviorOverlayEditor";
 import { SortableList } from "./SortableList";
 import { moveItem } from "./listOrder";
-import { areStepsValid, parseSteps, stepsToString, type Step } from "./behaviors";
+import { areStepsValid, isMousePressInput, parseSteps, stepsToString, type Step } from "./behaviors";
 import { mapOverlayActions } from "./overlayItems";
 import type { Database, Variable, OverlayTarget, ProfileState, Script, SecureTextDraft } from "./types";
 
@@ -17,7 +17,6 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
   switch (type) {
     case "press": case "hold": case "toggle": return { type, key: "" };
     case "waitfor": return { type };
-    case "mousepress": return { type, key: "LButton" };
     case "repeat": return { type, key: "", interval: "100", hold: "6" };
     case "sequence": case "parallel": return { type, steps: [{ type: "press", key: "" }] };
     case "state": return { type, stateId: states[0]?.id ?? "", action: "toggle" };
@@ -82,21 +81,23 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => setEditingBehavior("new")}>New variable</button>
         </>}
         {(step.type === "press" || step.type === "hold" || step.type === "toggle") && (
-          <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys" allowMatchedTrigger={step.type === "press" && hasTrigger}
+          <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label={step.type === "press" ? "Input" : "Keys"} allowMatchedTrigger={step.type === "press" && hasTrigger}
             onChange={key => onChange({ ...step, key })} />
         )}
-        {step.type === "mousepress" && (
+        {step.type === "press" && (isMousePressInput(step.key, variables) || step.compatibility || step.doubleClick) && (
           <>
-            <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Mouse button" allowChord={false}
-              onChange={key => onChange({ ...step, key })} />
             <select value={step.doubleClick ? "double" : "single"} aria-label="Click type" title="Single or double mouse click"
               onChange={e => onChange({ ...step, doubleClick: e.target.value === "double" })}>
               <option value="single">Single click</option>
               <option value="double">Double click</option>
             </select>
+            <label className="checkbox-row step-row__compatibility" title="Send clicks directly to the target window. Leave unchecked for normal mouse input.">
+              <input type="checkbox" checked={step.compatibility ?? false} onChange={event => onChange({ ...step, compatibility: event.target.checked })} />
+              Compatibility
+            </label>
           </>
         )}
-        {(step.type === "press" || step.type === "mousepress") && (hasTrigger || step.onRelease) && (
+        {step.type === "press" && (hasTrigger || step.onRelease) && (
           <select value={step.onRelease ? "release" : "press"} aria-label="Activation" title="Run when the hotkey is pressed or released"
             onChange={event => onChange({ ...step, onRelease: event.target.value === "release" })}>
             <option value="press">On press</option>

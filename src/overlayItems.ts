@@ -103,6 +103,23 @@ export function duplicateOverlayGroup(profile: Profile, group: OverlayGroup, ite
   };
 }
 
+export function duplicateBehaviorOverlays(behavior: string, profile: Profile, profiles: Profile[], createId: () => string) {
+  const effective = { ...profile, overlay_groups: resolveOverlayGroups(profiles, profile),
+    overlay_items: resolveOverlayItems(profiles, profile).map(({ source }) => source) };
+  // Explicit Behavior variables remain shared. Only inline overlay actions own copies.
+  const direct = mapBehavior(behavior, step => step.type === "behavior" ? null : step);
+  const portable = withReferencedOverlayParts({ ...effective, overlay_groups: [], overlay_items: [], events: [],
+    hotkeys: [{ name: "", trigger: "", behavior: direct, state_id: null }],
+  }, [effective, ...profiles.filter(candidate => candidate.id !== profile.id)]);
+  const ids = new Map([...portable.overlay_groups.map(group => group.id), ...portable.overlay_items.map(item => item.id)]
+    .map(id => [id, createId()]));
+  const mapId = (id: string) => ids.get(id) ?? id;
+  const copy = remapOverlayReferences(portable, mapId);
+  const groups = copy.overlay_groups.map(group => ({ ...group, name: `${group.name.trim() || "Overlay"} (copy)` }));
+  return { behavior: mapOverlayActions(behavior, mapId), overlay_groups: groups,
+    overlay_items: nameOverlayParts(copy.overlay_items, groups) };
+}
+
 export function moveOverlayPart(profile: Profile, itemId: string, direction: -1 | 1): Profile {
   const source = profile.overlay_items.find(item => item.id === itemId);
   if (!source) return profile;
@@ -202,6 +219,7 @@ function removeUnavailableTarget(scope: Scope, itemId: string): Scope {
   const removeAction = (behavior: string) => mapOverlayActions(behavior, id => id === itemId ? null : id);
   return {
     ...scope,
+    overlay_bars: scope.overlay_bars?.map(bar => ({ ...bar, group_ids: bar.group_ids.filter(id => id !== itemId) })),
     profiles: profiles.map(profile => ({
       ...profile,
       overlay_items: profile.overlay_items.map(item => item.visible_while_timer_id === itemId ? { ...item, visible_while_timer_id: null } : item),

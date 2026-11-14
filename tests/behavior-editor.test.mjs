@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
-import { areStepsValid, parseSteps, stepsToString } from "../src/behaviors.ts";
+import { areStepsValid, isMousePressInput, parseSteps, stepsToString } from "../src/behaviors.ts";
 
 const require = createRequire(import.meta.url);
 const valueInputs = { ValueInput() {} };
@@ -14,7 +14,7 @@ const compiled = ts.transpileModule(readFileSync(new URL("../src/BehaviorEditor.
 const exports = {};
 runInNewContext(compiled, { exports, require(name) {
   if (name === "react") return { ...require("react"), useState: initial => [typeof initial === "function" ? initial() : initial, () => {}], useRef: value => ({ current: value }), useId: () => "overlay-editor", useEffect() {} };
-  if (name === "./behaviors") return { areStepsValid };
+  if (name === "./behaviors") return { areStepsValid, isMousePressInput };
   if (name === "./ValueInput") return valueInputs;
   if (name.startsWith(".")) return {};
   return require(name);
@@ -33,14 +33,14 @@ test("Toggle keys exposes the standard variable-capable key input", () => {
   assert.deepEqual(parseSteps(stepsToString(steps)), [{ type: "toggle", key: { variable: "keys" } }]);
 });
 
-test("mousepress editor saves and reopens click type without losing its key combination", () => {
+test("Press saves click type and explicit Compatibility without losing its key combination", () => {
   for (const doubleClick of [undefined, false, true]) {
-    let steps = [{ type: "mousepress", key: "rctrl shift LButton", ...(doubleClick === undefined ? {} : { doubleClick }) }];
+    let steps = [{ type: "press","compatibility":true, key: "rctrl shift LButton", ...(doubleClick === undefined ? {} : { doubleClick }) }];
     function controls() {
       const editor = exports.BehaviorStepsEditor({ steps, states: [], overlays: [], scripts: [], gameExe: "", onChange: next => { steps = next; } });
       const row = editor.props.children[0].props.children(steps[0], 0);
       const params = row.type(row.props).props.children[1].props.children;
-      return params.find(element => element?.type === Symbol.for("react.fragment")).props.children;
+      return [params.find(element => element?.type === valueInputs.ValueInput), ...params.find(element => element?.type === Symbol.for("react.fragment")).props.children];
     }
     let [keyInput, selector] = controls();
     assert.equal(selector.props.value, doubleClick ? "double" : "single");
@@ -55,6 +55,14 @@ test("mousepress editor saves and reopens click type without losing its key comb
     selector.props.onChange({ target: { value: "single" } });
     assert.equal(steps[0].doubleClick, false);
     assert.equal(steps[0].key, "ralt RButton");
+    const compatibility = controls()[2].props.children[0];
+    assert.equal(compatibility.props.checked, true);
+    keyInput.props.onChange("LButto");
+    assert.equal(controls()[2].props.children[0].props.checked, true);
+    controls()[0].props.onChange("ralt RButton");
+    compatibility.props.onChange({ target: { checked: false } });
+    assert.equal(steps[0].compatibility, false);
+    assert.equal(controls()[2].props.children[0].props.checked, false);
   }
 });
 

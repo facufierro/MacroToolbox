@@ -18,12 +18,16 @@ $tauriConfig = Get-Content $tauriConfigPath -Raw | ConvertFrom-Json
 $gitTag = if ($Version) { $Version.Trim() } else { $env:HKM_RELEASE_VERSION }
 if (-not $gitTag) {
     # Pick the target version from changelog/vX.Y.Z.md. Prefer the highest changelog that
-    # has NOT been released yet (no git tag or committed release archive). Local rebuilds
+    # is newer than the highest release (git tag or committed release archive). Local rebuilds
     # stay on that development version. A minor/major bump in the changelog
     # is honored. If every changelog is already released, fall back to the highest existing
     # one and rebuild it, so pressing Build always produces a build instead of failing.
     $releasedTags = @(& git tag 2>$null | ForEach-Object { $_.Trim() })
     $releasedArchives = @(& git ls-tree --name-only HEAD:releases 2>$null | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' })
+    $highestReleased = @($releasedTags + $releasedArchives) |
+        Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+        ForEach-Object { [version]$_.Substring(1) } |
+        Sort-Object -Descending | Select-Object -First 1
     $changelogs = @(
         Get-ChildItem -Path (Join-Path $repoRoot "changelog") -Filter "v*.md" -File -ErrorAction SilentlyContinue |
         ForEach-Object {
@@ -41,7 +45,8 @@ if (-not $gitTag) {
     if (-not $changelogs) {
         throw "No changelog found in changelog\. Create changelog\v<next>.md first (see AGENTS.md)."
     }
-    $unreleased = @($changelogs | Where-Object { -not $_.IsReleased } | Sort-Object Version -Descending)
+    # Historical changelogs can outlive a removed tag/archive; they are not new releases.
+    $unreleased = @($changelogs | Where-Object { -not $_.IsReleased -and (-not $highestReleased -or $_.Version -gt $highestReleased) } | Sort-Object Version -Descending)
     if ($unreleased.Count) {
         $gitTag = $unreleased[0].Tag
     } else {

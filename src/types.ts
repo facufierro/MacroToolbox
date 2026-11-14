@@ -43,6 +43,7 @@ export interface OverlayConfig {
   profile_id: string | null;
   items: OverlayItem[];
   groups?: OverlayGroup[];
+  bars?: OverlayBar[];
   disabled_items?: string[];
   states_disabled?: boolean;
   states: ProfileState[];
@@ -81,6 +82,16 @@ export interface OverlayGroup {
   layout?: "free" | "row" | "column";
   gap?: number;
   visible_while_timer_id?: string | null;
+}
+
+export interface OverlayBar {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  layout: "row" | "column";
+  gap: number;
+  group_ids: string[];
 }
 
 export type OverlayTarget = OverlayItem | (OverlayGroup & { type: "group" });
@@ -135,6 +146,7 @@ export interface Subfolder {
 
 /** A folder owns the application target shared by its profiles. */
 export interface Scope {
+  overlay_bars?: OverlayBar[];
   states: ProfileState[];
   states_disabled?: boolean;
   id: string;

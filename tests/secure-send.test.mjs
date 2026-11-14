@@ -56,7 +56,7 @@ test("sensitive transport errors are replaced before the app console can receive
   }});
   const profile = {hotkeys:[{trigger:'f1',behavior:stepsToString(steps)}],events:[]};
   await assert.rejects(exports.api.upsertProfile('game',profile,[],[{credentialId:id,password:secret}]), error=>{
-    assert.equal(error.message,"Could not save the hotkey's password.");
+    assert.equal(error.message,"Could not save the hotkey's password. See the Save entries in Console for details.");
     assert.ok(!String(error.stack).includes(secret));
     return true;
   });

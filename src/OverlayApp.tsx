@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { OverlayConfig } from "./types";
 import { acceptOverlayOrigin, acceptOverlaySnapshot, getOverlayItemPosition, toLogicalOverlayBounds, type OverlayBounds, type OverlayPresentation } from "./overlayPosition";
 import { EMPTY_RUNTIME, getTimerRemaining, isItemVisible, type OverlaySnapshot } from "./overlayRuntime";
-import { OverlayGroupView, OverlayItemView } from "./OverlayParts";
+import { OverlayBarView, OverlayGroupView, OverlayItemView } from "./OverlayParts";
 import { captureWindowErrors, errorMessage } from "./consoleLog";
 import "./overlay.css";
 
@@ -121,6 +121,18 @@ export default function OverlayApp() {
   }, [config, logicalOrigin, origin, runtime, scale, visibleItems]);
 
   if (!logicalOrigin) return null;
+  const grouped = new Set((config.bars ?? []).flatMap(bar => bar.group_ids));
+  function renderGroup(group: NonNullable<OverlayConfig["groups"]>[number], inBar = false) {
+    const members = visibleItems.filter(item => item.group_id === group.id);
+    if (!members.length) return null;
+    const flow = group.layout === "row" || group.layout === "column";
+    return <OverlayGroupView key={group.id} group={group} origin={logicalOrigin!} inBar={inBar}>
+      {members.map(item => <OverlayItemView key={item.id} item={item} flow={flow}
+        origin={[0, 0, logicalOrigin![2], logicalOrigin![3]]}
+        remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} value={runtime.values?.[item.id]}
+        onMount={el => { if (el) itemEls.current.set(item.id, el); else itemEls.current.delete(item.id); }} />)}
+    </OverlayGroupView>;
+  }
   return (
     <div className="overlay-root">
       {visibleItems.filter(item => !config.groups?.some(group => group.id === item.group_id)).map(item => (
@@ -128,17 +140,13 @@ export default function OverlayApp() {
           remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} value={runtime.values?.[item.id]}
           onMount={el => { if (el) itemEls.current.set(item.id, el); else itemEls.current.delete(item.id); }} />
       ))}
-      {(config.groups ?? []).map(group => {
-        const members = visibleItems.filter(item => item.group_id === group.id);
-        if (!members.length) return null;
-        const flow = group.layout === "row" || group.layout === "column";
-        return <OverlayGroupView key={group.id} group={group} origin={logicalOrigin}>
-          {members.map(item => <OverlayItemView key={item.id} item={item} flow={flow}
-            origin={[0, 0, logicalOrigin[2], logicalOrigin[3]]}
-            remainingMs={item.type === "timer" ? getTimerRemaining(config, item, runtime, now) : null} value={runtime.values?.[item.id]}
-            onMount={el => { if (el) itemEls.current.set(item.id, el); else itemEls.current.delete(item.id); }} />)}
-        </OverlayGroupView>;
-      })}
+      {(config.groups ?? []).filter(group => !grouped.has(group.id)).map(group => renderGroup(group))}
+      {(config.bars ?? []).map(bar => <OverlayBarView key={bar.id} bar={bar} origin={logicalOrigin}
+        groups={bar.group_ids.flatMap(id => {
+          const group = config.groups?.find(group => group.id === id);
+          const view = group && renderGroup(group, true);
+          return view ? [{ id, view }] : [];
+        })} />)}
     </div>
   );
 }

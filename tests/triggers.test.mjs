@@ -60,7 +60,7 @@ test("each matched shortcut resolves independently while shared steps and saved 
 
 test("matched input is only accepted by Press in a hotkey", () => {
   for (const step of [{ type: "hold", key: matched }, { type: "waitfor", key: matched },
-    { type: "mousepress", key: matched }, { type: "repeat", key: matched, interval: "100", hold: "6" },
+    { type: "press","compatibility":true, key: matched }, { type: "repeat", key: matched, interval: "100", hold: "6" },
     { type: "send", text: matched }, { type: "sleep", ms: matched }]) {
     assert.equal(areStepsValid([step], [], true), false);
     assert.equal(areStepsValid(parseSteps(stepsToString([step])), [], true), false);

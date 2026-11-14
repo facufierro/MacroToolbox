@@ -72,8 +72,9 @@ impl PasswordWrite {
                 return Err("Enter a password of at most 1280 UTF-16 characters without null characters.".into());
             }
             // Edits receive a new ID; the previous credential is never overwritten by a draft.
-            if native::exists(&draft.credential_id)? { return Err("Secure send credential already exists. Reopen the editor and enter the password again.".into()); }
-            native::write(&draft.credential_id, &draft.password)?;
+            let context = |error| format!("Secure send credential={}: {error}", draft.credential_id);
+            if native::exists(&draft.credential_id).map_err(context)? { return Err("Secure send credential already exists. Reopen the editor and enter the password again.".into()); }
+            native::write(&draft.credential_id, &draft.password).map_err(context)?;
             pending.created.push(draft.credential_id.clone());
         }
         Ok(pending)
@@ -122,6 +123,10 @@ mod native {
 
     fn target(id: &str) -> Vec<u16> { format!("{PREFIX}{id}\0").encode_utf16().collect() }
 
+    fn failure(operation: &str, error: std::io::Error) -> String {
+        format!("Windows Credential Manager {operation} failed (Windows error {}: {error}).", error.raw_os_error().unwrap_or(0))
+    }
+
     struct ReadCredential(*mut Credential);
     impl Drop for ReadCredential {
         fn drop(&mut self) {
@@ -138,8 +143,9 @@ mod native {
     pub fn exists(id: &str) -> Result<bool, String> {
         let mut credential = ptr::null_mut();
         if unsafe { CredReadW(target(id).as_ptr(), 1, 0, &mut credential) } == 0 {
-            return if std::io::Error::last_os_error().raw_os_error() == Some(1168) { Ok(false) }
-                else { Err("Windows Credential Manager is unavailable.".into()) };
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(1168) { Ok(false) }
+                else { Err(failure("CredReadW (checking existing credential)", error)) };
         }
         let _credential = ReadCredential(credential);
         Ok(true)
@@ -153,13 +159,17 @@ mod native {
             written: FileTime { low: 0, high: 0 }, size: (blob.len() * 2) as u32, blob: blob.as_mut_ptr().cast(),
             persist: 2, attribute_count: 0, attributes: ptr::null_mut(), alias: ptr::null_mut(), username: username.as_mut_ptr() };
         let saved = unsafe { CredWriteW(&credential, 0) } != 0;
+        // Capture GetLastError before wiping temporary memory or calling another API.
+        let error = (!saved).then(std::io::Error::last_os_error);
         super::wipe(unsafe { std::slice::from_raw_parts_mut(blob.as_mut_ptr().cast(), blob.len() * 2) });
-        if saved { Ok(()) } else { Err("Could not save the password in Windows Credential Manager.".into()) }
+        match error { None => Ok(()), Some(error) => Err(failure("CredWriteW (saving password)", error)) }
     }
 
     pub fn delete(id: &str) -> Result<(), String> {
-        if unsafe { CredDeleteW(target(id).as_ptr(), 1, 0) } != 0 || std::io::Error::last_os_error().raw_os_error() == Some(1168) { Ok(()) }
-        else { Err("Could not remove the Windows credential.".into()) }
+        if unsafe { CredDeleteW(target(id).as_ptr(), 1, 0) } != 0 { return Ok(()); }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(1168) { Ok(()) }
+        else { Err(failure("CredDeleteW", error)) }
     }
 }
 

@@ -13,6 +13,7 @@ class BindingHost {
         this.targets := Map()
         this.focus := ""
         this.visible := false
+        this.lastFailure := ""
     }
 
     Reload() {
@@ -25,6 +26,7 @@ class BindingHost {
             this.source := source
             this.rejected := ""
             this.pendingRevision := document["revision"]
+            RuntimeDiagnostics.Add("info", "Input", "Configuration loaded; revision=" this.pendingRevision "; profiles=" this.profiles.Length)
         } catch Error as failure {
             this.rejected := source
             ReportBehaviorError("", failure.Message)
@@ -125,6 +127,8 @@ class BindingHost {
                 throw ValueError("Wait for requires a following action.")
             if kind = "parallel" || kind = "sequence"
                 this.ValidatePlan(node["steps"])
+            if kind = "press" && (node.Get("compatibility", false) || node.Get("doubleClick", false))
+                MousePressInput(node["key"])
             if kind = "press" || kind = "hold" || kind = "toggle" || kind = "repeat" || (kind = "waitfor" && node.Has("key")) {
                 for key in HoldKeyList(RegExReplace(node["key"], "[,\s]+", " "))
                     if !GetKeyVK(key) && !GetKeySC(key)
@@ -275,6 +279,7 @@ class BindingHost {
             this.ToggleProfiles(binding)
             return
         }
+        RuntimeDiagnostics.Add("info", "Input", "Hotkey activated; profile=" profile.Get("name", "") " (" profile["id"] "); name=" binding.Get("name", "") "; trigger=" binding["trigger"] "; target=" profile["target"])
         StartBehaviorRun(profile["id"] ":" binding["trigger"], binding["steps"], binding["modifiers"],
             profile["target"], profile["id"], binding["chord"], false, binding.Get("section", "hotkeys"), "", binding.Get("cancelTriggers", []), binding.Get("cancelOnOtherBehavior", false))
     }
@@ -337,8 +342,14 @@ class BindingHost {
                 for profile in this.profiles
                     if profile["id"] = request["profile"] && profile["armed"] && enabled.Get(profile["id"], false) && profile.Get("sections", Map()).Get(request.Get("section", "scripts"), true)
                         StartBehaviorRun(request["owner"], request["steps"], "", request["target"], request["profile"], "", false, request.Get("section", "scripts"), request.Get("script_owner", ""))
+            this.lastFailure := ""
         } catch Error as failure {
-            OutputDebug "MacroToolbox runtime: " failure.Message
+            ; Do not include API arguments or stacks, which can contain input text.
+            message := "Input host tick failed; line=" failure.Line "; " failure.Message
+            if this.lastFailure != message {
+                this.lastFailure := message
+                ReportBehaviorError("", message)
+            }
         }
     }
 

@@ -66,8 +66,8 @@ async function scenario() {
     row('Cast').querySelector('[aria-label="Edit variable"]').click(); await wait();
     check('editing a used behavior keeps its type locked and preserves its actions', get('[aria-label="Variable type"]').disabled && document.querySelectorAll('form.modal .step-row').length === 4);
     await set('form.modal [aria-label="Activation"]', 'press');
-    await set('form.modal [aria-label="Keys source"]', 'value');
-    await set('form.modal input[placeholder="Keys"]', 'rctrl 2');
+    await set('form.modal [aria-label="Input source"]', 'value');
+    await set('form.modal input[placeholder="Input"]', 'rctrl 2');
     await add('Behavior variable');
     const selectors = document.querySelectorAll('form.modal [aria-label="Behavior variable"]');
     check('a definition cannot directly select itself', ![...selectors[0].options].some(option => option.value === castId));
@@ -108,11 +108,13 @@ async function scenario() {
     check('profile import remaps targets inside shared definitions with the imported entities', importedSteps.find(step=>step.type==='state').stateId === imported.profile.states[0].id && importedSteps.find(step=>step.type==='script').scriptId === imported.profile.scripts[0].id && importedSteps.find(step=>step.type==='startoverlay').itemIds[0] === imported.profile.overlay_groups[0].id && imported.profile.states[0].id !== 'state-old');
     check('profile import remaps every selected overlay target', importedSteps.find(step=>step.type==='startoverlay').itemIds.length === 2 && importedSteps.find(step=>step.type==='startoverlay').itemIds[1] === imported.profile.overlay_items[0].id);
     window.importData = {type:'scope',data:window.snapshot.db.scopes[0],variables:window.snapshot.db.variables};
+    window.importData.data = {...window.importData.data,overlay_bars:[{id:'bar-old',name:'Buffs',x:15,y:70,layout:'row',gap:37,group_ids:['group-old']}]};
     const folderImport = await window.importFolder();
     const importedScope = folderImport.scopes[0], importedOwner = importedScope.profiles.find(profile=>profile.name==='Caller');
     const folderSteps = flat(JSON.parse(window.expanded(importedOwner.hotkeys[0].behavior, folderImport.variables)));
     check('folder import remaps nested shared targets without losing caller references', folderSteps.find(step=>step.type==='state').stateId === importedScope.states[0].id && folderSteps.find(step=>step.type==='script').scriptId === importedScope.profiles.flatMap(profile=>profile.scripts)[0].id && folderSteps.find(step=>step.type==='startoverlay').itemIds[0] === importedScope.profiles.flatMap(profile=>profile.overlay_groups)[0].id);
     check('folder import remaps every selected overlay target', folderSteps.find(step=>step.type==='startoverlay').itemIds.length === 2 && folderSteps.find(step=>step.type==='startoverlay').itemIds[1] === importedScope.profiles.flatMap(profile=>profile.overlay_items)[0].id);
+    check('folder import preserves bar layout and remaps membership with its overlays', importedScope.overlay_bars[0].id !== 'bar-old' && importedScope.overlay_bars[0].group_ids[0] === importedScope.profiles.flatMap(profile=>profile.overlay_groups)[0].id && importedScope.overlay_bars[0].gap === 37 && importedScope.overlay_bars[0].layout === 'row');
     await click('#manage');
     row('Cast').querySelector('[aria-label="Edit variable"]').click(); await wait();
     const frame = get('form.modal').getBoundingClientRect();

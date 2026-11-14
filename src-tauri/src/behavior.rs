@@ -28,10 +28,12 @@ impl Parameter {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Action {
-    Press { key: Parameter, #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
+    Press { key: Parameter,
+        #[serde(default, skip_serializing_if = "is_false")] compatibility: bool,
+        #[serde(default, rename = "doubleClick", skip_serializing_if = "is_false")] double_click: bool,
+        #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
     Hold { key: Parameter },
     Toggle { key: Parameter },
-    Mousepress { key: Parameter, #[serde(default, rename = "doubleClick", skip_serializing_if = "is_false")] double_click: bool, #[serde(default, rename = "onRelease", skip_serializing_if = "is_false")] on_release: bool },
     // The key is accepted only at the legacy read boundary; parse moves it to the next action.
     Waitfor { #[serde(default, skip_serializing_if = "Option::is_none")] key: Option<Parameter> },
     Repeat { key: Parameter, interval: Parameter, hold: Parameter },
@@ -81,7 +83,7 @@ fn read_actions(source: &str) -> Result<(Vec<Action>, bool), String> {
     if source.trim().is_empty() { return Ok((Vec::new(), false)); }
     if source.trim_start().starts_with('[') {
         let mut value = serde_json::from_str(source).map_err(|error| format!("Invalid behavior: {error}"))?;
-        let upgraded = normalize_overlay_targets(&mut value);
+        let upgraded = normalize_action_fields(&mut value);
         let mut actions: Vec<Action> = serde_json::from_value(value).map_err(|error| format!("Invalid behavior: {error}"))?;
         normalize_legacy_references(&mut actions)?;
         return Ok((actions, upgraded));
@@ -99,19 +101,24 @@ fn read_actions(source: &str) -> Result<(Vec<Action>, bool), String> {
     }
     tokens.push(&source[start..]);
     let mut actions = tokens.into_iter().map(str::trim).filter(|token| !token.is_empty()).map(parse_legacy).collect::<Vec<_>>();
-    let upgraded = actions.iter().any(|action| matches!(action, Action::Startoverlay { .. } | Action::Stopoverlay { .. }));
+    let upgraded = actions.iter().any(|action| matches!(action, Action::Startoverlay { .. } | Action::Stopoverlay { .. } | Action::Press { compatibility: true, .. }));
     normalize_legacy_references(&mut actions)?;
     Ok((actions, upgraded))
 }
 
-fn normalize_overlay_targets(value: &mut serde_json::Value) -> bool {
+fn normalize_action_fields(value: &mut serde_json::Value) -> bool {
     let Some(actions) = value.as_array_mut() else { return false; };
     let mut changed = false;
     for action in actions {
         let Some(action) = action.as_object_mut() else { continue; };
         match action.get("type").and_then(|kind| kind.as_str()) {
             Some("sequence" | "parallel") => {
-                if let Some(steps) = action.get_mut("steps") { changed |= normalize_overlay_targets(steps); }
+                if let Some(steps) = action.get_mut("steps") { changed |= normalize_action_fields(steps); }
+            }
+            Some("mousepress") if !action.contains_key("compatibility") => {
+                action.insert("type".into(), serde_json::json!("press"));
+                action.insert("compatibility".into(), serde_json::json!(true));
+                changed = true;
             }
             Some("startoverlay" | "stopoverlay") if !action.contains_key("itemIds") => {
                 if action.get("itemId").is_some_and(serde_json::Value::is_string) {
@@ -139,8 +146,8 @@ fn normalize_input_waits(actions: &mut Vec<Action>) -> bool {
         } else if let Action::Waitfor { key: Some(key) } = action {
             normalized.push(Action::Waitfor { key: None });
             normalized.push(if matches!(&key, Parameter::Literal(value) if valid_mouse_input(value)) {
-                Action::Mousepress { key, double_click: false, on_release: false }
-            } else { Action::Press { key, on_release: false } });
+                Action::Press { key, compatibility: true, double_click: false, on_release: false }
+            } else { Action::Press { key, compatibility: false, double_click: false, on_release: false } });
             changed = true;
         } else { normalized.push(action); }
     }
@@ -150,10 +157,10 @@ fn normalize_input_waits(actions: &mut Vec<Action>) -> bool {
 
 pub fn upgrade_legacy_actions(source: &str) -> Result<Option<String>, String> {
     let lower = source.to_ascii_lowercase();
-    if !["waitfor", "startoverlay", "stopoverlay", "restartoverlay"].iter().any(|kind| lower.contains(*kind)) { return Ok(None); }
-    let (mut actions, upgraded_overlays) = read_actions(source)?;
+    if !["waitfor", "startoverlay", "stopoverlay", "restartoverlay", "mousepress", "pressalt"].iter().any(|kind| lower.contains(*kind)) { return Ok(None); }
+    let (mut actions, upgraded_fields) = read_actions(source)?;
     let upgraded_waits = normalize_input_waits(&mut actions);
-    if !upgraded_overlays && !upgraded_waits { return Ok(None); }
+    if !upgraded_fields && !upgraded_waits { return Ok(None); }
     serde_json::to_string(&actions).map(Some).map_err(|error| error.to_string())
 }
 
@@ -169,10 +176,10 @@ fn parse_legacy(source: &str) -> Action {
     let Some(argument) = tail.strip_suffix(')') else { return Action::Unknown { source: source.into() }; };
     let parts: Vec<_> = argument.split(',').map(str::trim).collect();
     match name.to_ascii_lowercase().as_str() {
-        "press" => Action::Press { key: argument.into(), on_release: false },
+        "press" => Action::Press { key: argument.into(), compatibility: false, double_click: false, on_release: false },
         "hold" => Action::Hold { key: argument.into() },
         "toggle" => Action::Toggle { key: argument.into() },
-        "mousepress" | "pressalt" => Action::Mousepress { key: argument.into(), double_click: false, on_release: false },
+        "mousepress" | "pressalt" => Action::Press { key: argument.into(), compatibility: true, double_click: false, on_release: false },
         "waitfor" => Action::Waitfor { key: Some(argument.into()) },
         "repeat" if parts.len() == 2 || parts.len() == 3 => Action::Repeat {
             key: parts[0].into(), interval: parts[1].into(), hold: parts.get(2).unwrap_or(&"6").to_string().into(),
@@ -197,16 +204,16 @@ fn valid_mouse_input(key: &str) -> bool {
 pub fn validate(actions: &[Action], has_trigger: bool) -> Result<(), String> {
     fn number(value: &str, minimum: u32) -> bool { !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u32>().map(|n| n >= minimum).unwrap_or(false) }
     for (index, action) in actions.iter().enumerate() {
-        if !has_trigger && matches!(action, Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. }) {
+        if !has_trigger && matches!(action, Action::Press { on_release: true, .. }) {
             return Err("On release requires a hotkey trigger.".into());
         }
         let valid = match action {
             Action::Sequence { steps } | Action::Parallel { steps } => { validate(steps, has_trigger)?; !steps.is_empty() }
-            Action::Press { key: Parameter::Matched(_), .. } => has_trigger,
+            Action::Press { key: Parameter::Matched(_), compatibility, double_click, .. } => has_trigger && !*compatibility && !*double_click,
+            Action::Press { key, compatibility, double_click, .. } => if *compatibility || *double_click { valid_mouse_input(key.literal()?) } else { !key.literal()?.trim().is_empty() },
             Action::Waitfor { key: None } => index + 1 < actions.len(),
-            Action::Waitfor { key: Some(key) } | Action::Press { key, .. } | Action::Hold { key } => !key.literal()?.trim().is_empty(),
+            Action::Waitfor { key: Some(key) } | Action::Hold { key } => !key.literal()?.trim().is_empty(),
             Action::Toggle { key } => has_trigger && !key.literal()?.trim().is_empty(),
-            Action::Mousepress { key, .. } => valid_mouse_input(key.literal()?),
             Action::Repeat { key, interval, hold } => !key.literal()?.trim().is_empty() && number(interval.literal()?, 1) && number(hold.literal()?, 0),
             Action::Sleep { ms } => number(ms.literal()?, 0),
             Action::Goto { x, y } => [x.literal()?, y.literal()?].iter().all(|value| value.parse::<f64>().map(f64::is_finite).unwrap_or(false)),
@@ -234,9 +241,8 @@ fn visit_values(actions: &mut [Action], visit: &mut impl FnMut(&mut Parameter, V
     for action in actions {
         match action {
             Action::Sequence { steps } | Action::Parallel { steps } => visit_values(steps, visit)?,
-            Action::Press { key, .. } => visit(key, ValueKind::Press)?,
+            Action::Press { key, compatibility, double_click, .. } => visit(key, if *compatibility || *double_click { ValueKind::Mouse } else { ValueKind::Press })?,
             Action::Hold { key } | Action::Toggle { key } | Action::Waitfor { key: Some(key) } => visit(key, ValueKind::Keys)?,
-            Action::Mousepress { key, .. } => visit(key, ValueKind::Mouse)?,
             Action::Send { text } => visit(text, ValueKind::Text)?,
             Action::Sleep { ms } => visit(ms, ValueKind::Number(Some(0)))?,
             Action::Repeat { key, interval, hold } => { visit(key, ValueKind::Keys)?; visit(interval, ValueKind::Number(Some(1)))?; visit(hold, ValueKind::Number(Some(0)))?; }
@@ -282,7 +288,7 @@ pub fn resolve_template(source: &str, variables: &[crate::variables::Variable]) 
 
 fn requires_trigger(actions: &[Action]) -> bool {
     actions.iter().any(|action| match action {
-        Action::Toggle { .. } | Action::Securesend { .. } | Action::Press { on_release: true, .. } | Action::Mousepress { on_release: true, .. } => true,
+        Action::Toggle { .. } | Action::Securesend { .. } | Action::Press { on_release: true, .. } => true,
         Action::Sequence { steps } | Action::Parallel { steps } => requires_trigger(steps),
         _ => false,
     })
@@ -388,7 +394,7 @@ mod tests {
     #[test]
     fn next_action_waits_preserve_the_following_action_and_reject_missing_siblings() {
         for source in [
-            r#"[{"type":"waitfor"},{"type":"mousepress","key":"rctrl LButton","onRelease":true,"doubleClick":true}]"#,
+            r#"[{"type":"waitfor"},{"type":"press","compatibility":true,"key":"rctrl LButton","onRelease":true,"doubleClick":true}]"#,
             r#"[{"type":"waitfor"},{"type":"startoverlay","itemIds":["timer"],"restart":true}]"#,
             r#"[{"type":"waitfor"},{"type":"parallel","steps":[{"type":"sleep","ms":"25"},{"type":"press","key":"x"}]}]"#,
         ] {
@@ -406,7 +412,7 @@ mod tests {
         assert!(resolve(release,&[],None).is_err());
         assert!(validate(&resolve_template(release,&[]).unwrap(),true).is_ok());
         let legacy = parse("waitfor(LButton)").unwrap();
-        assert_eq!(serde_json::to_value(&legacy).unwrap(),serde_json::json!([{"type":"waitfor"},{"type":"mousepress","key":"LButton"}]));
+        assert_eq!(serde_json::to_value(&legacy).unwrap(),serde_json::json!([{"type":"waitfor"},{"type":"press","key":"LButton","compatibility":true}]));
         assert!(validate(&legacy,false).is_ok());
     }
 
@@ -432,7 +438,7 @@ mod tests {
             assert_eq!(serde_json::to_value(actions).unwrap(), serde_json::json!([
                 {"type":"parallel","steps":[{"type":"sequence","steps":[{"type":"sequence","steps":[
                     {"type":"press","key":trigger,"onRelease":true},{"type":"sleep","ms":"150"},
-                    {"type":"mousepress","key":"LButton","doubleClick":true}
+                    {"type":"press","key":"LButton","compatibility":true,"doubleClick":true}
                 ]},{"type":"press","key":"e"}]},{"type":"hold","key":"x"}]}
             ]));
         }
@@ -576,7 +582,7 @@ mod tests {
     }
     #[test]
     fn legacy_text_keeps_separators_and_unknown_actions_are_preserved() {
-        assert_eq!(parse("send(a;b);press(x)").unwrap(), vec![Action::Send { text: "a;b".into() }, Action::Press { key: "x".into(), on_release: false }]);
+        assert_eq!(parse("send(a;b);press(x)").unwrap(), vec![Action::Send { text: "a;b".into() }, Action::Press { key: "x".into(), compatibility: false, double_click: false, on_release: false }]);
         let unknown = parse("future(x)").unwrap();
         assert!(matches!(&unknown[0], Action::Unknown { source } if source == "future(x)"));
         assert!(validate(&unknown, true).is_err());
@@ -625,18 +631,44 @@ mod tests {
 
     #[test]
     fn mousepress_defaults_to_single_and_accepts_only_boolean_double_click() {
-        let single = vec![Action::Mousepress { key: "LButton".into(), double_click: false, on_release: false }];
+        let single = vec![Action::Press { key: "LButton".into(), compatibility: true, double_click: false, on_release: false }];
         for source in ["mousepress(LButton)", "pressalt(LButton)",
             r#"[{"type":"mousepress","key":"LButton"}]"#,
             r#"[{"type":"mousepress","key":"LButton","doubleClick":false}]"#] {
             assert_eq!(parse(source).unwrap(), single);
         }
         let double = parse(r#"[{"type":"mousepress","key":"rctrl LButton","doubleClick":true}]"#).unwrap();
-        assert!(matches!(&double[0], Action::Mousepress { double_click: true, .. }));
+        assert!(matches!(&double[0], Action::Press { compatibility: true, double_click: true, .. }));
         assert!(validate(&double, true).is_ok());
         assert_eq!(parse(&serde_json::to_string(&double).unwrap()).unwrap(), double);
         for value in ["null", "2", r#""true""#] {
             assert!(parse(&format!(r#"[{{"type":"mousepress","key":"LButton","doubleClick":{value}}}]"#)).is_err());
+        }
+    }
+
+    #[test]
+    fn unified_press_defaults_to_normal_and_validates_explicit_mouse_options() {
+        for source in ["press(LButton)", r#"[{"type":"press","key":"LButton"}]"#] {
+            assert!(matches!(&parse(source).unwrap()[0], Action::Press { compatibility: false, double_click: false, .. }));
+        }
+        for key in ["LButton", "rctrl shift XButton2"] {
+            for compatibility in [false, true] {
+                let source = serde_json::json!([{"type":"press","key":key,"compatibility":compatibility,"doubleClick":true}]).to_string();
+                let actions = resolve(&source, &[], Some("f8")).unwrap();
+                assert!(validate(&actions, true).is_ok());
+                assert_eq!(parse(&serde_json::to_string(&actions).unwrap()).unwrap(), actions);
+            }
+        }
+        for key in ["x", "rctrl x", "w LButton", "LButton RButton"] {
+            for option in ["compatibility", "doubleClick"] {
+                let mut action = serde_json::json!({"type":"press","key":key});
+                action[option] = serde_json::json!(true);
+                let actions = parse(&serde_json::json!([action]).to_string()).unwrap();
+                assert!(validate(&actions, true).is_err());
+            }
+        }
+        for value in [serde_json::json!("true"), serde_json::json!(1), serde_json::Value::Null] {
+            assert!(parse(&serde_json::json!([{"type":"press","key":"LButton","compatibility":value}]).to_string()).is_err());
         }
     }
 }
