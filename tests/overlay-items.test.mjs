@@ -1,7 +1,7 @@
 import { parseSteps } from "../src/behaviors.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, removeOverlayGroup, moveOverlayPart, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, mapOverlayActions, removeOverlayItem } from "../src/overlayItems.ts";
+import { nameOverlayParts, availableOverlayItems, availableOverlayTargets, resolveOverlayGroups, saveOverlayGroup, duplicateOverlayGroup, duplicateBehaviorOverlays, removeOverlayGroup, moveOverlayPart, remapOverlayReferences, withReferencedOverlayParts, carryReferencedOverlayParts, mapOverlayActions, removeOverlayItem } from "../src/overlayItems.ts";
 
 const timer = { type: "timer", id: "timer", name: "Timer", x: 0, y: 0, duration_ms: 10000, color: "#fff", font_size: 22, state_id: null, timer_state_id: null, start_with_overlay: true };
 const profile = (id, overrides = {}) => ({ id, name: id, kind: "overlay", parent_id: null, states: [], hotkeys: [], events: [], overlay_items: [], overlay_groups: [], ...overrides });
@@ -121,6 +121,59 @@ test("duplicating an inherited overlay materializes its effective parts in the c
   assert.equal(result.overlay_items[2].visible_while_timer_id, "copy-2");
   assert.equal(base.overlay_items[0].duration_ms, 10000);
   assert.deepEqual(child.overlay_items, [overriddenTimer]);
+});
+
+test("copying a behavior isolates every referenced overlay and its internal timer links", () => {
+  const parts = [{ ...timer, group_id: group.id }, icon,
+    { ...timer, id: "external", group_id: "external-group" },
+    { id: "bar", type: "bar", group_id: group.id, visible_while_timer_id: "external", max_value: 100 },
+    { ...timer, id: "unrelated", group_id: "unrelated-group" }];
+  const source = profile("source", { overlay_groups: [group, { id: "external-group", name: "External" }, { id: "unrelated-group", name: "Unrelated" }], overlay_items: parts });
+  const behavior = JSON.stringify([{ type: "parallel", steps: [
+    { type: "sequence", steps: [{ type: "startoverlay", itemIds: [group.id], restart: true }, { type: "stopoverlay", itemIds: [group.id, "icon"] }] },
+    { type: "bar", itemId: "bar", value: { variable: "amount" } },
+    { type: "securesend", credentialId: "private-reference" }, { type: "send", text: "group timer icon bar external" },
+    { type: "press", key: { source: "trigger" }, onRelease: true },
+  ] }]);
+  const before = structuredClone(source);
+  let next = 0;
+  const copied = duplicateBehaviorOverlays(behavior, source, [source], () => `copy-${++next}`);
+  assert.deepEqual(new Set(copied.overlay_groups.map(group => group.name)), new Set(["Buff (copy)", "External (copy)"]));
+  assert.equal(copied.overlay_items.length, 4);
+  assert.ok(copied.overlay_groups.every(group => !source.overlay_groups.some(original => original.id === group.id)));
+  assert.ok(copied.overlay_items.every(item => !source.overlay_items.some(original => original.id === item.id)));
+  const copiedGroup = copied.overlay_groups.find(group => group.name === "Buff (copy)");
+  const copiedTimer = copied.overlay_items.find(item => item.id === copiedGroup.visible_while_timer_id);
+  const copiedIcon = copied.overlay_items.find(item => item.type === "icon");
+  const copiedBar = copied.overlay_items.find(item => item.type === "bar");
+  assert.equal(copiedIcon.visible_while_timer_id, copiedTimer.id);
+  assert.equal(copiedTimer.group_id, copiedGroup.id);
+  assert.ok(copied.overlay_items.some(item => item.id === copiedBar.visible_while_timer_id));
+  const steps = parseSteps(copied.behavior)[0].steps;
+  assert.deepEqual(steps[0].steps.map(step => step.itemIds), [[copiedGroup.id], [copiedGroup.id, copiedIcon.id]]);
+  assert.equal(steps[1].itemId, copiedBar.id);
+  assert.deepEqual(steps.slice(2), parseSteps(behavior)[0].steps.slice(2));
+  copiedTimer.duration_ms = 1234;
+  copiedGroup.name = "Edited copy";
+  assert.deepEqual(source, before);
+  const again = duplicateBehaviorOverlays(behavior, source, [source], () => `copy-${++next}`);
+  assert.ok(again.overlay_items.every(item => !copied.overlay_items.some(previous => previous.id === item.id)));
+});
+
+test("behavior copies use inherited overrides and preserve explicit shared behavior references", () => {
+  const parent = profile("base", { overlay_groups: [group], overlay_items: [{ ...timer, group_id: group.id }, icon] });
+  const child = profile("child", { parent_id: parent.id, overlay_items: [{ ...timer, group_id: group.id, duration_ms: 5000 }] });
+  const profiles = [parent, child];
+  const behavior = JSON.stringify([{ type: "startoverlay", itemIds: [group.id] }, { type: "behavior", variableId: "shared" }]);
+  let next = 0;
+  const copied = duplicateBehaviorOverlays(behavior, child, profiles, () => `id-${++next}`);
+  assert.equal(copied.overlay_items.find(item => item.type === "timer").duration_ms, 5000);
+  assert.deepEqual(parseSteps(copied.behavior)[1], { type: "behavior", variableId: "shared" });
+  assert.deepEqual(duplicateBehaviorOverlays('press(a);send(group)', child, profiles, () => { throw Error("unrelated overlay copied"); }),
+    { behavior: 'press(a);send(group)', overlay_groups: [], overlay_items: [] });
+  const shared = '[{"type":"behavior","variableId":"shared"}]';
+  assert.deepEqual(duplicateBehaviorOverlays(shared, child, profiles, () => { throw Error("shared variable detached"); }),
+    { behavior: shared, overlay_groups: [], overlay_items: [] });
 });
 
 test("empty and repeated overlay duplicates have distinct IDs and preserve external visibility", () => {

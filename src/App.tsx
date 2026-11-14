@@ -27,7 +27,7 @@ import { describeBehavior, parseSteps, stepsToString, areStepsValid, type Step }
 import { allowsExtraModifiers } from "./hotkeyModifiers";
 import { usedSecureTexts } from "./secureText";
 import { carryReferencedStates, mapStateActions, removeProfileState, withReferencedStates } from "./profileStates";
-import { resolveOverlayItems, availableOverlayTargets, resolveOverlayGroups, remapOverlayReferences, mapOverlayActions, withReferencedOverlayParts, carryReferencedOverlayParts } from "./overlayItems";
+import { resolveOverlayItems, availableOverlayTargets, resolveOverlayGroups, remapOverlayReferences, mapOverlayActions, withReferencedOverlayParts, carryReferencedOverlayParts, duplicateBehaviorOverlays } from "./overlayItems";
 import type {
   Database,
   Scope,
@@ -1842,13 +1842,19 @@ export default function App() {
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
     try {
+      const source = db!.scopes.find(candidate => candidate.id === sourceGameId)!;
+      const sourceProfile = source.profiles.find(candidate => candidate.id === sourceProfileId)!;
       const game = db!.scopes.find(candidate => candidate.id === targetGameId)!;
       const profile = game.profiles.find(candidate => candidate.id === targetProfileId)!;
+      const overlays = duplicateBehaviorOverlays(hotkey.behavior, sourceProfile, source.profiles, uid);
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
         ? { ...hotkey, name: copyName(hotkey.name, triggerLabel(hotkey.trigger, db!.variables) || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
         : { ...hotkey };
-      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile, hotkeys: [...profile.hotkeys, copy] }));
+      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile,
+        overlay_groups: [...profile.overlay_groups, ...overlays.overlay_groups], overlay_items: [...profile.overlay_items, ...overlays.overlay_items],
+        hotkeys: [...profile.hotkeys, { ...copy, behavior: overlays.behavior }],
+      }));
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error copying hotkey: ${e}`); }
