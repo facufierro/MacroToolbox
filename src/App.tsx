@@ -17,6 +17,7 @@ import { SortableList } from "./SortableList";
 import { useProfileItemDrag, profileDropKey, type ProfileItemDrag } from "./useProfileItemDrag";
 import { resolveProfileEntries } from "./profileEntries";
 import { moveItem } from "./listOrder";
+import { readOverlayBar, type LegacyOverlayBar } from "./overlayBars";
 import { exportVariables, importVariables, mapVariableBehaviors, readVariable, transferVariables } from "./variables";
 import { KeyInput } from "./KeyInput";
 import { CancelTriggersInput } from "./CancelTriggersInput";
@@ -38,6 +39,7 @@ import type {
   BehaviorEvent,
   BehaviorEventKind,
   OverlayTarget,
+  OverlayBar,
   ProfileState,
   Script,
   ProfileKind,
@@ -99,7 +101,11 @@ function blankScript(): Script { return { id: uid(), name: "", enabled: true, tr
 // ── Export / Import helpers ───────────────────────────────────────────────────
 
 type LegacyProfileExport = Profile & { exe?: string };
-type LegacyScopeExport = Omit<Scope, "exe" | "profiles"> & { exe?: string; profiles: LegacyProfileExport[] };
+type LegacyScopeExport = Omit<Scope, "exe" | "profiles" | "overlay_bars"> & {
+  exe?: string;
+  profiles: LegacyProfileExport[];
+  overlay_bars?: (OverlayBar | LegacyOverlayBar)[];
+};
 
 function remapBehaviorIds(behavior: string, states: Map<string, string>, items: Map<string, string>, scripts: Map<string, string>, groups: Map<string, string>): string {
   return mapOverlayActions(mapScriptActions(mapStateActions(behavior, id => states.get(id) ?? id), id => scripts.get(id) ?? id), id => items.get(id) ?? groups.get(id) ?? id);
@@ -254,7 +260,7 @@ async function importScope(): Promise<{ scopes: Scope[]; variables: Variable[] }
     exe: group.exe,
     profiles: group.profiles,
     variables: imported.variables,
-    overlay_bars: (scope.overlay_bars ?? []).map(bar => ({ ...bar, id: uid(), group_ids: bar.group_ids.map(id => groupIds.get(id) ?? id) })),
+    overlay_bars: (scope.overlay_bars ?? []).map(bar => ({ ...readOverlayBar(bar), id: uid(), group_ids: bar.group_ids.map(id => groupIds.get(id) ?? id) })),
     subfolders: (scope.subfolders ?? []).map(folder => ({ ...folder, id: subfolderIds.get(folder.id)! })),
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
   }));

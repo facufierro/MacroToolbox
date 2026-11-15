@@ -356,7 +356,7 @@ mod tests {
         db.games[0].profiles[1].overlay_groups = serde_json::from_value(serde_json::json!([
             {"id":"first","name":"First"},{"id":"second","name":"Second"}])).unwrap();
         db.games[0].overlay_bars = vec![crate::config::OverlayBar { id:"bar".into(),name:"Buffs".into(),x:25.0,y:75.0,
-            layout:"row".into(),gap:42,group_ids:vec!["second".into(),"first".into()] }];
+            direction:config::OverlayBarDirection::Right,gap:42,group_ids:vec!["second".into(),"first".into()] }];
         let mut runtime = Runtime::default(); runtime.reconcile(&db,0);
         assert_eq!(runtime.folders["game"].snapshot.config.bars,db.games[0].overlay_bars);
         runtime.set_enabled(&db,"overlay",false,1).unwrap();

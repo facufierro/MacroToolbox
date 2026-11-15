@@ -26,6 +26,8 @@
 .ov-timer--no-background {
   background: transparent;
   backdrop-filter: none;
+  padding: 0;
+  min-width: 0;
 }
 .ov-timer__time {
   font-weight: 700;

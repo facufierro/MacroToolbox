@@ -25,7 +25,7 @@ async function editorScenario(empty) {
     await click(button('New bar'));
     check('a new bar starts with the current whole overlay and saves with its parent', members().join() === 'Magic' && button('Save overlay').disabled && !saved().overlay_bars?.length);
     await set('Bar name', 'Buffs'); await set('Bar gap (px)', '37');
-    await set('Bar direction', 'column');
+    await set('Bar direction', 'down');
     await set('Bar gap (px)', '-1'); check('negative gaps cannot be applied', button('Apply bar').disabled);
     await set('Bar gap (px)', '37');
     await set('Add overlay to bar', 'other'); await set('Add overlay to bar', 'third');
@@ -47,11 +47,20 @@ async function editorScenario(empty) {
       check('a failed save retains the complete bar draft without partial persistence', !saved().overlay_bars?.length && get('Overlay bar').selectedOptions[0].textContent === 'Buffs' && window.errors.length === 1);
       window.failSave = false; window.errors.length = 0; await click(button('Save overlay'));
       const bar = saved().overlay_bars[0];
-      check('saving persists the chosen gap direction and member order atomically', bar.gap === 37 && bar.layout === 'column' && bar.group_ids.join() === 'magic,third,other' && window.saveCalls === 1);
+      check('saving persists the chosen gap direction and member order atomically', bar.gap === 37 && bar.direction === 'down' && bar.group_ids.join() === 'magic,third,other' && window.saveCalls === 1);
       window.reopen('other'); await wait();
       check('another overlay reopens the same shared bar', get('Overlay bar').value === bar.id);
       await click(button('Edit bar')); await set('Bar gap (px)', '0'); await click(button('Apply bar')); await click(button('Save overlay'));
       check('zero gap is preserved across save and reopen', saved().overlay_bars[0].gap === 0 && saved().overlay_bars[0].group_ids.join() === 'magic,third,other');
+      for (const direction of ['left','up','right','down']) {
+        window.reopen('other'); await wait();
+        await click(button('Edit bar')); await set('Bar direction',direction); await click(button('Apply bar')); await click(button('Save overlay'));
+        check('saving growth '+direction+' preserves the anchor, gap, and member order', saved().overlay_bars[0].direction === direction && saved().overlay_bars[0].x === 15 && saved().overlay_bars[0].y === 25 && saved().overlay_bars[0].gap === 0 && saved().overlay_bars[0].group_ids.join() === 'magic,third,other');
+        window.reopen('other'); await wait();
+        await click(button('Edit bar'));
+        check('reopening restores growth '+direction, get('Bar direction').value === direction);
+        await click(button('Cancel bar'));
+      }
       window.reopen('other'); await wait();
       await set('Overlay bar', ''); await click(button('Save overlay'));
       check('removing one overlay restores its position and leaves the other members ordered', saved().overlay_bars[0].group_ids.join() === 'magic,third' && saved().profiles[0].overlay_groups.find(group=>group.id==='other').x === 60);
@@ -64,7 +73,7 @@ async function editorScenario(empty) {
       check('replacing an unsaved overlay draft keeps its bar attached to the surviving copy', saved().overlay_bars.length === 1 && saved().overlay_bars[0].group_ids.length === 1 && saved().profiles[0].overlay_groups.some(group=>group.id===saved().overlay_bars[0].group_ids[0]));
       check('bar editing reports no unexpected errors', window.errors.length === 0);
     }
-    await click(button('New bar')); await set('Bar name','Buffs'); await set('Bar gap (px)','37'); await set('Bar direction','column');
+    await click(button('New bar')); await set('Bar name','Buffs'); await set('Bar gap (px)','37'); await set('Bar direction','left');
     if (empty) { while (button('Remove from bar')) await click(button('Remove from bar')); }
     else { await set('Add overlay to bar','third'); await set('Add overlay to bar','other'); }
     document.getElementById('results').textContent = JSON.stringify({results});
