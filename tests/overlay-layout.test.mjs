@@ -94,7 +94,7 @@ test("overlay layout anchors its first part while centering larger neighbors", {
   await t.test("timers remain centered with the configured gap and correct hitboxes", () => {
     for (const [name, gap] of [["magic", 0], ["background", 8], ["wide", 8], ["three", 8]]) {
       const clock = measured[name][".ov-timer"];
-      assert.equal(clock.left + clock.width / 2, 416, name);
+      assert.ok(Math.abs(clock.left + clock.width / 2 - 416) < 0.01, name);
       assert.equal(clock.top, 182 + gap, name);
       assert.deepEqual(clock.hitbox, { left: clock.left, top: clock.top, width: clock.width, height: clock.height }, name);
     }
@@ -115,5 +115,11 @@ test("overlay layout anchors its first part while centering larger neighbors", {
     assert.equal(measured.free.img.top, 230);
     assert.equal(measured.free[".ov-timer"].left, 400);
     assert.equal(measured.free[".ov-timer"].top, 150);
+  });
+  await t.test("backgroundless timers fit their text while background timers retain their box", () => {
+    assert.ok(measured.magic[".ov-timer"].width < 32);
+    assert.ok(measured.background[".ov-timer"].width >= 64);
+    assert.equal(measured.magic[".ov-timer"].height, 12);
+    assert.equal(measured.background[".ov-timer"].height, 20);
   });
 });

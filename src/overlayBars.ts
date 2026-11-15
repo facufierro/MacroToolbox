@@ -1,5 +1,18 @@
 import type { OverlayBar, Scope } from "./types";
 
+export type LegacyOverlayBar = Omit<OverlayBar, "direction"> & { layout: "row" | "column" };
+
+export function readOverlayBar(bar: OverlayBar | LegacyOverlayBar): OverlayBar {
+  if ("direction" in bar) return bar;
+  const { layout, ...rest } = bar;
+  if (layout !== "row" && layout !== "column") throw new Error("Invalid overlay bar direction");
+  return { ...rest, direction: layout === "row" ? "right" : "down" };
+}
+
+export function isHorizontalBar(direction: OverlayBar["direction"]): boolean {
+  return direction === "right" || direction === "left";
+}
+
 export function assignOverlayBar(bars: OverlayBar[], groupId: string, barId: string): OverlayBar[] {
   return bars.map(bar => ({ ...bar, group_ids: bar.id === barId
     ? bar.group_ids.includes(groupId) ? bar.group_ids : [...bar.group_ids, groupId]
@@ -28,15 +41,17 @@ export function updateOverlayBars(scope: Scope, original: OverlayBar[], edited: 
 
 export type OverlayExtent = { id: string; left: number; top: number; right: number; bottom: number };
 
-export function getOverlayBarOffsets(extents: OverlayExtent[], layout: OverlayBar["layout"], gap: number): Record<string, number> {
+export function getOverlayBarOffsets(extents: OverlayExtent[], direction: OverlayBar["direction"], gap: number): Record<string, number> {
   const offsets: Record<string, number> = {};
-  let previousEnd: number | undefined;
+  const horizontal = isHorizontalBar(direction);
+  const reverse = direction === "left" || direction === "up";
+  let previousEdge: number | undefined;
   for (const extent of extents) {
-    const start = layout === "row" ? extent.left : extent.top;
-    const end = layout === "row" ? extent.right : extent.bottom;
-    const offset = previousEnd === undefined ? 0 : previousEnd + gap - start;
+    const start = horizontal ? extent.left : extent.top;
+    const end = horizontal ? extent.right : extent.bottom;
+    const offset = previousEdge === undefined ? 0 : reverse ? previousEdge - gap - end : previousEdge + gap - start;
     offsets[extent.id] = offset;
-    previousEnd = offset + end;
+    previousEdge = offset + (reverse ? start : end);
   }
   return offsets;
 }

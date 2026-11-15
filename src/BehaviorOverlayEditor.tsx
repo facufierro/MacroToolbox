@@ -121,7 +121,7 @@ export function BehaviorOverlayEditor({ folderId, groupId, defaultProfileId, onD
             onChange={event => setBars(assignOverlayBar(bars, group.id, event.target.value))}>
             <option value="">None</option>{bars.map(bar => <option key={bar.id} value={bar.id}>{bar.name}</option>)}
           </select></label>
-          <IconButton icon="plus" label="New bar" className="icon-btn" disabled={!profile || !!editingBar || !!editingPart} onClick={() => setEditingBar({ id: crypto.randomUUID(), name: "Bar", x: group.x ?? 0, y: group.y ?? 0, layout: "row", gap: 8, group_ids: [group.id] })} />
+          <IconButton icon="plus" label="New bar" className="icon-btn" disabled={!profile || !!editingBar || !!editingPart} onClick={() => setEditingBar({ id: crypto.randomUUID(), name: "Bar", x: group.x ?? 0, y: group.y ?? 0, direction: "right", gap: 8, group_ids: [group.id] })} />
           {bar && <IconButton icon="pen" label="Edit bar" className="icon-btn" disabled={!!editingBar || !!editingPart} onClick={() => setEditingBar(bar)} />}
         </div>}
         onChange={setGroup} onEnabledChange={async enabled => setGroup({ ...group, disabled: !enabled })}

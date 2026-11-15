@@ -26,8 +26,9 @@ export function OverlayBarEditor({ initial, groups, bars, gameExe, onSave, onDel
       {onDelete && <IconButton icon="trash-can" label="Remove bar" className="icon-btn icon-btn--danger" onClick={onDelete} />}
     </div>
     <fieldset className="overlay-group__config" aria-label="Bar layout">
-      <select aria-label="Bar direction" value={bar.layout} onChange={event => setBar({ ...bar, layout: event.target.value as OverlayBar["layout"] })}>
-        <option value="row">Horizontal</option><option value="column">Vertical</option>
+      <select aria-label="Bar direction" title="Growth direction from the first visible overlay" value={bar.direction} onChange={event => setBar({ ...bar, direction: event.target.value as OverlayBar["direction"] })}>
+        <option value="right">Grow right</option><option value="left">Grow left</option>
+        <option value="down">Grow down</option><option value="up">Grow up</option>
       </select>
       <CompactNumber label="Bar gap (px)" prefix="Gap" unit="px" min={0} value={Number.isNaN(bar.gap) ? "" : bar.gap} onChange={value => setBar({ ...bar, gap: value === "" ? NaN : Number(value) })} />
       <GotoInput x={Number.isNaN(bar.x) ? "" : String(bar.x)} y={Number.isNaN(bar.y) ? "" : String(bar.y)} gameExe={gameExe}

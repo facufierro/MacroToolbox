@@ -2,11 +2,12 @@ import "./overlayParts.css";
 import { Children, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { OverlayBar, OverlayGroup, OverlayItem } from "./types";
 import { getOverlayItemPosition } from "./overlayPosition";
-import { getOverlayBarOffsets, type OverlayExtent } from "./overlayBars";
+import { getOverlayBarOffsets, isHorizontalBar, type OverlayExtent } from "./overlayBars";
 
 export function OverlayBarView({ bar, origin, groups }: { bar: OverlayBar; origin: [number, number, number, number]; groups: Array<{ id: string; view: ReactNode }> }) {
   const slots = useRef(new Map<string, HTMLDivElement>());
   const [offsets, setOffsets] = useState<Record<string, number>>({});
+  const horizontal = isHorizontalBar(bar.direction);
   // Absolute parts and centered timers can overflow their group. Space their full visible bounds.
   useLayoutEffect(() => {
     const extents: OverlayExtent[] = [];
@@ -21,12 +22,16 @@ export function OverlayBarView({ bar, origin, groups }: { bar: OverlayBar; origi
         right: Math.max(...parts.map(rect => rect.right)) - anchor.left,
         bottom: Math.max(...parts.map(rect => rect.bottom)) - anchor.top });
     }
-    const next = getOverlayBarOffsets(extents, bar.layout, bar.gap);
-    setOffsets(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+    const next = getOverlayBarOffsets(extents, bar.direction, bar.gap);
+    // Scaled DOM measurements can alternate by tiny rounding errors after placement.
+    // Keep positions stable when the difference is less than a thousandth of a pixel.
+    setOffsets(previous => Object.keys(previous).length === Object.keys(next).length
+      && Object.entries(next).every(([id, offset]) => id in previous && Math.abs(previous[id] - offset) < 0.001)
+      ? previous : next);
   });
   return <div className="ov-overlay-bar" style={{ position: "absolute", ...getOverlayItemPosition(bar, origin) }}>
     {groups.map(({ id, view }) => <div key={id} className="ov-bar-slot" ref={element => { if (element) slots.current.set(id, element); else slots.current.delete(id); }}
-      style={{ position: "absolute", left: bar.layout === "row" ? offsets[id] ?? 0 : 0, top: bar.layout === "column" ? offsets[id] ?? 0 : 0 }}>{view}</div>)}
+      style={{ position: "absolute", left: horizontal ? offsets[id] ?? 0 : 0, top: horizontal ? 0 : offsets[id] ?? 0 }}>{view}</div>)}
   </div>;
 }
 
