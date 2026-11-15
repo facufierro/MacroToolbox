@@ -35,7 +35,7 @@ pub fn profile_ids(profile: &Profile) -> HashSet<String> {
 }
 
 pub fn database_ids(db: &Database) -> HashSet<String> {
-    let mut ids = variable_ids(&db.variables);
+    let mut ids: HashSet<_> = db.games.iter().flat_map(|game| variable_ids(&game.variables)).collect();
     ids.extend(db.games.iter().flat_map(|game| &game.profiles).flat_map(profile_ids));
     ids
 }
@@ -228,11 +228,11 @@ mod tests {
         db.games[0].profiles.remove(0);
         retire_unused(before.clone(), &db);
         assert!(native::exists(&id).unwrap());
-        db.variables.push(variable);
+        db.games[0].variables.push(variable);
         db.games[0].profiles.clear();
         retire_unused(before.clone(), &db);
         assert!(native::exists(&id).unwrap());
-        db.variables.clear();
+        db.games[0].variables.clear();
         retire_unused(before, &db);
         assert!(!native::exists(&id).unwrap());
     }

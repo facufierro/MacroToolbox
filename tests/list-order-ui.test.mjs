@@ -9,13 +9,14 @@ import { root, browser, browserModules } from "./browserHarness.mjs";
 const profile = (id, name, extra = {}) => ({ id, name, kind: "hotkeys", armed: false, parent_id: null,
   hotkeys: [], events: [], states: [], scripts: [], overlay_items: [], overlay_groups: [], overlay_triggers: [],
   toggle_hotkeys_key: null, toggle_overlay_key: null, ...extra });
-const initial = { version: 7, settings: {}, variables: [
+const variables = [
   { id: "a", name: "Buff timer", type: "number", value: 5000 },
   { id: "b", name: "Tick timer", type: "number", value: 200 },
   { id: "c", name: "Other timer", type: "number", value: 300 },
-], scopes: [
+];
+const initial = { version: 16, settings: {}, scopes: [
   { id: "global", name: "Global", exe: "*", states: [], profiles: [] },
-  { id: "game", name: "Zeta", exe: "game.exe", states: [{ id: "on", name: "On", duration_ms: null }, { id: "off", name: "Off", duration_ms: null }], profiles: [
+  { id: "game", variables, name: "Zeta", exe: "game.exe", states: [{ id: "on", name: "On", duration_ms: null }, { id: "off", name: "Off", duration_ms: null }], profiles: [
     profile("p", "Visible Alpha", { parent_id: "parent",
       hotkeys: ["First", "Second", "Third"].map((name, index) => ({ name, trigger: String(index + 1), behavior: `press(${index + 1})`, state_id: null })),
       events: [{ event: "app_started", behavior: "press(a)" }, { event: "focus_gained", behavior: "press(b)" }],
@@ -94,13 +95,13 @@ async function scenario() {
     check("folder, profile, and hotkey order survives a fresh render without altering saved overlay parts", ids(window.snapshot.db.scopes) === "alpha,global,game" && ids(current().profiles) === "p,p3,hidden,parent" && own().hotkeys[0].trigger === "3" && ids(own().overlay_items) === "x,y,z");
     await click('#variables');
     await drag("Other timer", "Buff timer", { after: true });
-    check("variables save a drop-after order without changing IDs or values", ids(window.snapshot.db.variables) === "a,c,b" && window.snapshot.db.variables[1].value === 300);
+    check("variables save a drop-after order without changing IDs or values", ids(window.snapshot.db.scopes.find(scope=>scope.id==='game').variables) === "a,c,b" && window.snapshot.db.scopes.find(scope=>scope.id==='game').variables[1].value === 300);
     window.failSave = true;
     await drag("Tick timer", "Buff timer");
-    check("failed saves retain the original order and report the persistence error", ids(window.snapshot.db.variables) === "a,c,b" && window.errors.length === 1 && !get('.variables-list').hasAttribute('data-drop'));
+    check("failed saves retain the original order and report the persistence error", ids(window.snapshot.db.scopes.find(scope=>scope.id==='game').variables) === "a,c,b" && window.errors.length === 1 && !get('.variables-list').hasAttribute('data-drop'));
     window.failSave = false;
     handle("Tick timer").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })); await wait();
-    check("drag handles also support keyboard reordering after a failed save", ids(window.snapshot.db.variables) === "a,b,c");
+    check("drag handles also support keyboard reordering after a failed save", ids(window.snapshot.db.scopes.find(scope=>scope.id==='game').variables) === "a,b,c");
     await click('#steps');
     await drag("send step 2", "sleep step 1");
     check("behavior steps drag into execution order while retaining literal values", window.snapshot.steps[0].type === "send" && window.snapshot.steps[0].text === "message" && window.snapshot.steps[1].ms === "100");
@@ -132,7 +133,7 @@ function load(id){if(cache[id])return cache[id].exports;const module={exports:{}
 if(id==='./api'){module.exports={api:{
 upsertGame:scope=>save({...window.saved,scopes:window.saved.scopes.map(current=>current.id===scope.id?scope:current)}),
 upsertProfile:(id,profile)=>save({...window.saved,scopes:window.saved.scopes.map(scope=>scope.id===id?{...scope,profiles:scope.profiles.map(current=>current.id===profile.id?profile:current)}:scope)}),
-saveVariables:variables=>save({...window.saved,variables}),reorderFolders:ids=>save({...window.saved,scopes:ids.map(id=>window.saved.scopes.find(scope=>scope.id===id))})}};return module.exports;}
+saveVariables:(id,variables)=>save({...window.saved,scopes:window.saved.scopes.map(scope=>scope.id===id?{...scope,variables}:scope)}),reorderFolders:ids=>save({...window.saved,scopes:ids.map(id=>window.saved.scopes.find(scope=>scope.id===id))})}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
@@ -141,7 +142,7 @@ function App(){const [db,onDb]=React.useState(window.saved),[query,onQuery]=Reac
 const folder=db.scopes.find(scope=>scope.id==='game'),profile=folder.profiles.find(profile=>profile.id==='p');return React.createElement(React.Fragment,null,
 React.createElement('nav',null,...['profile','variables','steps'].map(name=>React.createElement('button',{key:name,id:name,onClick:()=>setView(name)},name)),React.createElement('button',{id:'reload',onClick:()=>{onDb(structuredClone(window.saved));setRevision(revision+1);}},'Reload')),
 React.createElement('div',{className:'layout__body',key:revision},React.createElement(Library,{db,query,onQuery,width:300,collapsed:new Set(),openExes:new Set(),selection:{kind:'profile',folderId:'game',profileId:'p'},onToggleCollapse(){},onSelect(){},onToggleArmed(){},onProfileContext(){},onFolderContext(){},onModal:modal=>window.modal=modal,onDb}),
-view==='profile'?React.createElement(ProfileEditor,{folder,profile,variables:db.variables,showStates:true,onContext(){},onModal:modal=>window.modal=modal,onDb}):React.createElement('main',{className:'test-main'},view==='variables'?React.createElement(VariablesView,{db,onDb}):React.createElement('div',{className:'modal modal--wide'},React.createElement(BehaviorStepsEditor,{steps,onChange,onDb,variables:db.variables,gameExe:'',states:[],scripts:[],overlays:[]}),React.createElement('button',{id:'save-steps',onClick:()=>onChange(JSON.parse(JSON.stringify(steps)))},'Save steps')))));}
+view==='profile'?React.createElement(ProfileEditor,{folder,profile,folderId:folder.id,variables:folder.variables,showStates:true,onContext(){},onModal:modal=>window.modal=modal,onDb}):React.createElement('main',{className:'test-main'},view==='variables'?React.createElement(VariablesView,{folder,onDb}):React.createElement('div',{className:'modal modal--wide'},React.createElement(BehaviorStepsEditor,{steps,onChange,onDb,folderId:folder.id,variables:folder.variables,gameExe:'',states:[],scripts:[],overlays:[]}),React.createElement('button',{id:'save-steps',onClick:()=>onChange(JSON.parse(JSON.stringify(steps)))},'Save steps')))));}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));(${scenario})();`;
   const logs = resolve(root, "logs"); mkdirSync(logs, { recursive: true });
   const directory = mkdtempSync(join(logs, "list-order-ui-"));

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v15 adds folder-owned overlay bars without changing existing positions.
-pub const CURRENT_DB_VERSION: u32 = 15;
+/// older files. v16 moves shared variables into their owning folders.
+pub const CURRENT_DB_VERSION: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -13,8 +13,6 @@ pub struct Database {
     #[serde(rename = "scopes", alias = "games")]
     pub games: Vec<Game>,
     pub settings: Settings,
-    #[serde(default)]
-    pub variables: Vec<Variable>,
 }
 
 pub use crate::variables::Variable;
@@ -28,6 +26,7 @@ impl Database {
     pub fn move_hotkey(
         &mut self, source_game_id: &str, source_profile_id: &str, source_index: usize,
         expected: &Hotkey, target_game_id: &str, dependencies: Profile,
+        transferred: Option<Hotkey>, variables: Vec<Variable>,
     ) -> Result<(), String> {
         if source_game_id == target_game_id && source_profile_id == dependencies.id { return Err("Choose a different profile.".into()); }
         let source = self.games.iter().find(|game| game.id == source_game_id)
@@ -35,14 +34,16 @@ impl Database {
         if source.hotkeys.get(source_index) != Some(expected) { return Err("The dragged behavior changed. Drag it again.".into()); }
         let target = self.games.iter().find(|game| game.id == target_game_id)
             .and_then(|game| game.profiles.iter().find(|profile| profile.id == dependencies.id)).ok_or("Target profile not found.")?;
-        let assigned = !matches!(&expected.trigger, crate::triggers::Trigger::Literal(value) if value.trim().is_empty());
-        if assigned && target.hotkeys.iter().any(|hotkey| hotkey.trigger == expected.trigger) {
+        let hotkey = transferred.unwrap_or_else(|| expected.clone());
+        let assigned = !matches!(&hotkey.trigger, crate::triggers::Trigger::Literal(value) if value.trim().is_empty());
+        if assigned && target.hotkeys.iter().any(|existing| existing.trigger == hotkey.trigger) {
             return Err("The target profile already has this hotkey trigger.".into());
         }
+        self.games.iter_mut().find(|game| game.id == target_game_id).unwrap().merge_variables(variables)?;
         // Both owners are validated before either changes; save_database persists the move once.
         let source = self.games.iter_mut().find(|game| game.id == source_game_id).unwrap()
             .profiles.iter_mut().find(|profile| profile.id == source_profile_id).unwrap();
-        let hotkey = source.hotkeys.remove(source_index);
+        source.hotkeys.remove(source_index);
         let game = self.games.iter_mut().find(|game| game.id == target_game_id).unwrap();
         game.profiles.iter_mut().find(|profile| profile.id == dependencies.id).unwrap().hotkeys.push(hotkey);
         game.merge_profile_dependencies(dependencies);
@@ -131,6 +132,8 @@ fn append_missing<T>(target: &mut Vec<T>, incoming: Vec<T>, key: fn(&T) -> Strin
 /// A folder owns one target executable shared by all of its profiles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Game {
+    #[serde(default)]
+    pub variables: Vec<Variable>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -173,6 +176,37 @@ pub struct Subfolder {
 fn default_subfolder_enabled() -> bool { true }
 
 impl Game {
+    pub fn set_variables(&mut self, variables: Vec<Variable>) -> Result<(), String> {
+        validate_variables(&variables)?;
+        // Even disarmed profiles must keep their references and valid numeric parameters.
+        for profile in &self.profiles {
+            for hotkey in &profile.hotkeys {
+                let triggers = hotkey.trigger.resolve(&variables)?;
+                if crate::behavior::parse(&hotkey.behavior).is_ok() {
+                    if triggers.is_empty() { crate::behavior::resolve_template(&hotkey.behavior, &variables)?; }
+                    for trigger in triggers { crate::behavior::resolve(&hotkey.behavior, &variables, Some(&trigger))?; }
+                }
+            }
+            for event in &profile.events {
+                if crate::behavior::parse(&event.behavior).is_ok() { crate::behavior::resolve(&event.behavior, &variables, None)?; }
+            }
+        }
+        self.variables = variables;
+        Ok(())
+    }
+
+    pub fn merge_variables(&mut self, variables: Vec<Variable>) -> Result<(), String> {
+        let mut merged = self.variables.clone();
+        for variable in variables {
+            if let Some(existing) = merged.iter().find(|existing| existing.id == variable.id) {
+                if existing != &variable { return Err(format!("Conflicting imported variable: {}", variable.name)); }
+            } else { merged.push(variable); }
+        }
+        validate_variables(&merged)?;
+        self.variables = merged;
+        Ok(())
+    }
+
     pub fn validate_overlay_bars(&self) -> Result<(), String> {
         let mut bars = HashSet::new();
         let mut members = HashSet::new();
@@ -616,7 +650,7 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
 
     if indices.is_empty() {
         db.games.push(Game {
-            overlay_bars: Vec::new(),
+            variables: Vec::new(), overlay_bars: Vec::new(),
             states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
             id: GLOBAL_FOLDER_ID.to_string(),
             name: "Global".to_string(),
@@ -651,6 +685,47 @@ pub fn ensure_global_folder(db: &mut Database) -> bool {
     true
 }
 
+pub fn decode_db(mut value: serde_json::Value) -> Result<Database, String> {
+    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    // Legacy globals are copied with the same IDs so every reference keeps working.
+    // Each folder owns an independent copy after migration, including unused definitions.
+    let legacy_variables: Vec<Variable> = if version < 16 {
+        serde_json::from_value(value.as_object_mut().and_then(|object| object.remove("variables"))
+            .unwrap_or_else(|| serde_json::json!([]))).map_err(|e| e.to_string())?
+    } else { Vec::new() };
+    let mut db = match version {
+        v if v > CURRENT_DB_VERSION => return Err(format!("Settings schema v{v} requires a newer MacroToolbox version.")),
+        v if v == CURRENT_DB_VERSION => {
+            serde_json::from_value(value).map_err(|e| e.to_string())?
+        }
+        // These versions share the folder-owned profile shape. Defaults, typed
+        // variable deserialization, and normalization below upgrade their fields.
+        3..=15 => {
+            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            db.version = CURRENT_DB_VERSION;
+            db
+        }
+        2 => {
+            let legacy: legacy_v2::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            legacy_v2::migrate(legacy)
+        }
+        _ => {
+            let legacy: legacy_v1::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            legacy_v1::migrate(legacy)
+        }
+    };
+
+    if !legacy_variables.is_empty() {
+        ensure_global_folder(&mut db);
+        for game in &mut db.games { game.variables = legacy_variables.clone(); }
+    }
+    Ok(db)
+}
+
+pub fn deserialize_database<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Database, D::Error> {
+    decode_db(serde_json::Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
 pub fn load_db(path: &Path) -> Result<Database, String> {
     if !path.exists() {
         let mut db = Database { version: CURRENT_DB_VERSION, ..Default::default() };
@@ -662,28 +737,9 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
     let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-    let (mut db, migrated) = match version {
-        v if v > CURRENT_DB_VERSION => return Err(format!("Settings schema v{v} requires a newer MacroToolbox version.")),
-        v if v == CURRENT_DB_VERSION => {
-            (serde_json::from_value(value).map_err(|e| e.to_string())?, false)
-        }
-        // These versions share the folder-owned profile shape. Defaults, typed
-        // variable deserialization, and normalization below upgrade their fields.
-        3..=14 => {
-            let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            db.version = CURRENT_DB_VERSION;
-            (db, true)
-        }
-        2 => {
-            let legacy: legacy_v2::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            (legacy_v2::migrate(legacy), true)
-        }
-        _ => {
-            let legacy: legacy_v1::Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            (legacy_v1::migrate(legacy), true)
-        }
-    };
-
+    let migrated = version < CURRENT_DB_VERSION;
+    let mut db = decode_db(value)?;
+    let added_global = ensure_global_folder(&mut db);
     let upgraded_behaviors = normalize_behaviors(&mut db)?;
     if migrated || upgraded_behaviors {
         let mut backup = path.as_os_str().to_owned();
@@ -693,7 +749,6 @@ pub fn load_db(path: &Path) -> Result<Database, String> {
     }
 
     // Self-heal the always-present global folder, then persist only when something changed.
-    let added_global = ensure_global_folder(&mut db);
     let moved_states = normalize_states(&mut db);
     let grouped_overlays = normalize_overlays(&mut db);
     for game in &db.games { game.validate_subfolders()?; game.validate_overlay_bars()?; }
@@ -714,9 +769,9 @@ pub fn normalize_behaviors(db: &mut Database) -> Result<bool, String> {
             for hotkey in &mut profile.hotkeys { changed |= upgrade(&mut hotkey.behavior)?; }
             for event in &mut profile.events { changed |= upgrade(&mut event.behavior)?; }
         }
-    }
-    for variable in &mut db.variables {
-        if let crate::variables::VariableValue::Behavior(source) = &mut variable.value { changed |= upgrade(source)?; }
+        for variable in &mut game.variables {
+            if let crate::variables::VariableValue::Behavior(source) = &mut variable.value { changed |= upgrade(source)?; }
+        }
     }
     Ok(changed)
 }
@@ -838,7 +893,7 @@ mod legacy_v2 {
                     .map(|index| groups.remove(index).1)
                     .unwrap_or_default();
                 games.push(NewGame {
-                    overlay_bars: Vec::new(),
+                    variables: Vec::new(), overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id.clone(),
                     name: game.name.clone(),
@@ -848,7 +903,7 @@ mod legacy_v2 {
                 });
                 for (index, (exe, profiles)) in groups.into_iter().enumerate() {
                     games.push(NewGame {
-                        overlay_bars: Vec::new(),
+                        variables: Vec::new(), overlay_bars: Vec::new(),
                         states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                         id: split_id(&game.id, index + 2, &reserved, &mut allocated),
                         name: format!("{} ({})", game.name, target_label(&exe)),
@@ -863,7 +918,7 @@ mod legacy_v2 {
             if groups.is_empty() {
                 allocated.insert(game.id.clone());
                 games.push(NewGame {
-                    overlay_bars: Vec::new(),
+                    variables: Vec::new(), overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id: game.id,
                     name: game.name,
@@ -888,7 +943,7 @@ mod legacy_v2 {
                     game.name.clone()
                 };
                 games.push(NewGame {
-                    overlay_bars: Vec::new(),
+                    variables: Vec::new(), overlay_bars: Vec::new(),
                     states: Vec::new(), states_disabled: false, subfolders: Vec::new(),
                     id,
                     name,
@@ -899,7 +954,7 @@ mod legacy_v2 {
             }
         }
 
-        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
+        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings }
     }
 }
 
@@ -976,10 +1031,10 @@ mod legacy_v1 {
                         p
                     })
                     .collect();
-                super::Game { overlay_bars: Vec::new(), states: Vec::new(), states_disabled: false, subfolders: Vec::new(), id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
+                super::Game { variables: Vec::new(), overlay_bars: Vec::new(), states: Vec::new(), states_disabled: false, subfolders: Vec::new(), id: g.id, name: g.name, exe: g.exe, image: g.image, profiles }
             })
             .collect();
-        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings, variables: Vec::new() }
+        NewDatabase { version: CURRENT_DB_VERSION, games, settings: legacy.settings }
     }
 }
 
@@ -1288,10 +1343,10 @@ mod tests {
             assert_eq!(actions[0]["steps"][2]["credentialId"], "b8483943-e86c-41aa-a593-7388833369cd");
             let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
             assert_eq!(event, serde_json::json!([{"type":"press","key":"MButton","compatibility":true}]));
-            let crate::variables::VariableValue::Behavior(shared) = &db.variables[1].value else { panic!("wrong variable type"); };
+            let crate::variables::VariableValue::Behavior(shared) = &db.games[0].variables[1].value else { panic!("wrong variable type"); };
             assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap(), serde_json::json!([
                 {"type":"press","key":"LButton"},{"type":"press","key":"RButton","compatibility":true}]));
-            let resolved = crate::behavior::resolve(&profile.hotkeys[0].behavior, &db.variables, Some("f8")).unwrap();
+            let resolved = crate::behavior::resolve(&profile.hotkeys[0].behavior, &db.games[0].variables, Some("f8")).unwrap();
             crate::behavior::validate(&resolved, true).unwrap();
             let backup = std::path::PathBuf::from(format!("{}.v{version}.bak", path.display()));
             assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
@@ -1350,7 +1405,7 @@ mod tests {
                 {"type":"startoverlay","itemIds":["first"],"restart":true},{"type":"stopoverlay","itemIds":["first","second"]}]));
             let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
             assert_eq!(event[0]["itemIds"],serde_json::json!(["first"]));
-            let crate::variables::VariableValue::Behavior(shared) = &db.variables[0].value else { panic!("wrong variable type"); };
+            let crate::variables::VariableValue::Behavior(shared) = &db.games[0].variables[0].value else { panic!("wrong variable type"); };
             let shared: serde_json::Value = serde_json::from_str(shared).unwrap();
             assert_eq!(shared[0]["itemIds"],serde_json::json!(["second"]));
             assert_eq!(shared[1]["itemIds"],serde_json::json!(["first"]));
@@ -1410,7 +1465,7 @@ mod tests {
             assert!(profile.armed); assert!(!upgraded.games[1].subfolders[0].enabled);
             let event: serde_json::Value = serde_json::from_str(&profile.events[0].behavior).unwrap();
             assert_eq!(event[1],serde_json::json!({"type":"press","key":"rctrl x"}));
-            let shared = match &upgraded.variables[1].value { crate::variables::VariableValue::Behavior(value) => value, _ => panic!("wrong variable type") };
+            let shared = match &upgraded.games[0].variables[1].value { crate::variables::VariableValue::Behavior(value) => value, _ => panic!("wrong variable type") };
             assert_eq!(serde_json::from_str::<serde_json::Value>(shared).unwrap()[1],serde_json::json!({"type":"press","key":"LButton","compatibility":true}));
             let saved = std::fs::read(&path).unwrap();
             let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1600,7 +1655,7 @@ mod tests {
             "overlay_groups":[{"id":"overlay","name":"Overlay"}],
             "overlay_items":[{"type":"timer","id":"timer","name":"Timer","group_id":"overlay","duration_ms":5000,"color":"#fff","font_size":22,"x":0,"y":0}]
         })).unwrap();
-        db.move_hotkey("source-app","source",0,&expected,"target-app",dependencies.clone()).unwrap();
+        db.move_hotkey("source-app","source",0,&expected,"target-app",dependencies.clone(), None, Vec::new()).unwrap();
         let target = &db.games[1].profiles[0];
         assert_eq!(target.name,"Keep name");
         assert!(!target.armed);
@@ -1625,7 +1680,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
 
         dependencies.id = "sibling".into();
-        db.move_hotkey("target-app","target",1,&expected,"target-app",dependencies).unwrap();
+        db.move_hotkey("target-app","target",1,&expected,"target-app",dependencies, None, Vec::new()).unwrap();
         assert_eq!(db.games[1].profiles[0].hotkeys.len(),1);
         assert_eq!(db.games[1].profiles[1].hotkeys,[expected]);
         assert_eq!(db.games[1].profiles[1].scripts.len(),1);
@@ -1647,20 +1702,20 @@ mod tests {
             ("source-app","source",0,"target-app","missing"),
         ] {
             let mut dependencies = target.clone(); dependencies.id = target_id.into();
-            assert!(db.move_hotkey(game,profile,index,&expected,target_game,dependencies).is_err());
+            assert!(db.move_hotkey(game,profile,index,&expected,target_game,dependencies, None, Vec::new()).is_err());
             assert_eq!(serde_json::to_value(&db).unwrap(),before);
         }
         let mut stale = expected.clone(); stale.behavior = "send(changed)".into();
-        assert!(db.move_hotkey("source-app","source",0,&stale,"target-app",target.clone()).is_err());
+        assert!(db.move_hotkey("source-app","source",0,&stale,"target-app",target.clone(), None, Vec::new()).is_err());
         assert_eq!(serde_json::to_value(&db).unwrap(),before);
         db.games[1].profiles[0].hotkeys.push(expected.clone());
         let before_conflict = serde_json::to_value(&db).unwrap();
-        assert!(db.move_hotkey("source-app","source",0,&expected,"target-app",target.clone()).is_err());
+        assert!(db.move_hotkey("source-app","source",0,&expected,"target-app",target.clone(), None, Vec::new()).is_err());
         assert_eq!(serde_json::to_value(&db).unwrap(),before_conflict);
         db.games[0].profiles[0].hotkeys[0].trigger = "".into();
         db.games[1].profiles[0].hotkeys[1].trigger = "".into();
         let blank = db.games[0].profiles[0].hotkeys[0].clone();
-        db.move_hotkey("source-app","source",0,&blank,"target-app",target).unwrap();
+        db.move_hotkey("source-app","source",0,&blank,"target-app",target, None, Vec::new()).unwrap();
         assert_eq!(db.games[1].profiles[0].hotkeys.iter().filter(|hotkey| hotkey.trigger == blank.trigger).count(),2);
     }
 
@@ -1752,7 +1807,7 @@ mod tests {
         assert!(db.games[0].profiles[0].subfolder_id.is_none());
         assert!(db.games[0].profile_enabled(&db.games[0].profiles[0]));
         assert_eq!(db.games[0].profiles[0].hotkeys[0].behavior, "sleep($delay);send(hello)");
-        assert_eq!(db.variables[0].id, "delay");
+        assert_eq!(db.games[0].variables[0].id, "delay");
         db.games[0].subfolders.push(super::Subfolder { id:"combat".into(),name:"Combat".into(),enabled:true,toggle_key:Some("rctrl f2".into()) });
         db.games[0].profiles[0].subfolder_id = Some("combat".into());
         let armed = db.games[0].profiles.iter().map(|profile| profile.armed).collect::<Vec<_>>();
@@ -1783,10 +1838,10 @@ mod tests {
         std::fs::write(&path, r#"{"version":5,"scopes":[],"settings":{"ahk_exe":""}}"#).unwrap();
         let mut db = load_db(&path).unwrap();
         assert_eq!(db.version, super::CURRENT_DB_VERSION);
-        assert!(db.variables.is_empty());
-        db.variables.push(super::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() });
+        assert!(db.games[0].variables.is_empty());
+        db.games[0].variables.push(super::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() });
         super::save_db(&path, &db).unwrap();
-        assert_eq!(load_db(&path).unwrap().variables, db.variables);
+        assert_eq!(load_db(&path).unwrap().games[0].variables, db.games[0].variables);
         std::fs::remove_file(path.with_extension("json.v5.bak")).unwrap();
         std::fs::remove_file(&path).unwrap();
     }
@@ -1798,12 +1853,85 @@ mod tests {
         std::fs::write(&path, source).unwrap();
         let migrated = load_db(&path).unwrap();
         assert_eq!(migrated.version, super::CURRENT_DB_VERSION);
-        assert_eq!(migrated.variables[0].value, crate::variables::VariableValue::Number(100.0));
-        assert_eq!(serde_json::to_value(&migrated).unwrap()["variables"][0]["type"], "number");
+        assert_eq!(migrated.games[0].variables[0].value, crate::variables::VariableValue::Number(100.0));
+        assert_eq!(serde_json::to_value(&migrated).unwrap()["scopes"][0]["variables"][0]["type"], "number");
         let backup = std::path::PathBuf::from(format!("{}.v6.bak", path.display()));
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), source);
-        assert_eq!(load_db(&path).unwrap().variables, migrated.variables);
+        assert_eq!(load_db(&path).unwrap().games[0].variables, migrated.games[0].variables);
         std::fs::remove_file(&path).unwrap(); std::fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
+    fn global_variables_migrate_to_independent_folders_with_backup_and_reopen_unchanged() {
+        for version in [3, 6, 7, 15] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-folder-variables-{version}-{}.json",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let source = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe"},
+                "variables":[{"id":"delay","name":"Delay","value":100},
+                    {"id":"shared","name":"Shared","type":"behavior","value":"sleep($delay)"},
+                    {"id":"unused","name":"Unused","type":"text","value":"keep me"}],
+                "scopes":[{"id":"a","name":"A","exe":"a.exe","profiles":[{"id":"p","name":"P",
+                    "hotkeys":[{"trigger":"f1","behavior":"sleep($delay)"}]}]},
+                    {"id":"b","name":"B","exe":"b.exe"}]}).to_string();
+            std::fs::write(&path, &source).unwrap();
+            let mut db = load_db(&path).unwrap();
+            assert_eq!(db.version, super::CURRENT_DB_VERSION);
+            assert_eq!(db.games.len(), 3);
+            for game in &db.games { assert_eq!(game.variables, db.games[0].variables); }
+            assert_eq!(db.games[0].variables.len(), 3);
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            assert!(serde_json::from_slice::<serde_json::Value>(&saved).unwrap().get("variables").is_none());
+            assert_eq!(serde_json::to_value(load_db(&path).unwrap()).unwrap(),serde_json::to_value(&db).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(),saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+            assert!(!std::path::PathBuf::from(format!("{}.v16.bak",path.display())).exists());
+            let mut edited = db.games[0].variables.clone(); edited[0].value = 200.0.into();
+            db.games[0].set_variables(edited).unwrap();
+            assert_eq!(db.games[1].variables[0].value,crate::variables::VariableValue::Number(100.0));
+            assert_eq!(db.games[0].profiles[0].hotkeys[0].behavior,"sleep($delay)");
+            let before = db.games[0].variables.clone();
+            assert!(db.games[0].set_variables(vec![]).is_err());
+            assert_eq!(db.games[0].variables,before);
+            super::save_db(&path,&db).unwrap();
+            assert_eq!(serde_json::to_value(load_db(&path).unwrap()).unwrap(),serde_json::to_value(&db).unwrap());
+            std::fs::remove_file(path).unwrap(); std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_variable_migration_leaves_the_original_settings_intact() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-invalid-variables-{}.json",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = r#"{"version":15,"scopes":[],"settings":{"ahk_exe":""},"variables":[{"id":"bad","name":"Bad","type":"number","value":"invalid"}]}"#;
+        std::fs::write(&path,source).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hotkey_moves_carry_remapped_variables_atomically_and_keep_the_source_definitions() {
+        let mut db = hotkey_move_fixture();
+        let original = super::Variable { id:"delay".into(),name:"Delay".into(),value:100.0.into() };
+        db.games[0].variables = vec![original.clone()];
+        db.games[0].profiles[0].hotkeys[0].behavior = "sleep($delay)".into();
+        db.games[1].variables = vec![super::Variable { value:900.0.into(), ..original.clone() }];
+        let expected = db.games[0].profiles[0].hotkeys[0].clone();
+        let target = db.games[1].profiles[0].clone();
+        let before = serde_json::to_value(&db).unwrap();
+        assert!(db.move_hotkey("source-app","source",0,&expected,"target-app",target.clone(),None,vec![original.clone()]).is_err());
+        assert_eq!(serde_json::to_value(&db).unwrap(),before);
+        let mut transferred = expected.clone(); transferred.behavior = "sleep($imported)".into();
+        let imported = super::Variable { id:"imported".into(),name:"Delay (2)".into(),value:100.0.into() };
+        db.move_hotkey("source-app","source",0,&expected,"target-app",target,Some(transferred.clone()),vec![imported.clone()]).unwrap();
+        assert_eq!(db.games[0].variables,[original]);
+        assert_eq!(db.games[1].variables[0].value,crate::variables::VariableValue::Number(900.0));
+        assert_eq!(db.games[1].variables[1],imported);
+        assert_eq!(db.games[1].profiles[0].hotkeys.last(),Some(&transferred));
     }
 
     #[test]

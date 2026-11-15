@@ -98,16 +98,18 @@ async function scenario() {
 
 test('repeated hotkey copies can be edited, reordered, deleted, and reopened independently', {skip:!browser && 'Chrome or Edge is required'}, async t => {
   const mocks = ['./api','./AppConsole','./App.css','./CloudSettings','@tauri-apps/api/event','@tauri-apps/plugin-dialog','@tauri-apps/plugin-opener','@tauri-apps/plugin-notification'];
-  const bundle = browserModules(['App.tsx'], {mocks,expose:{[join(root,'src/App.tsx')]:['ProfileEditor','HotkeyModal','copyName','triggerLabel','allowsExtraModifiers','uid']}});
+  const bundle = browserModules(['App.tsx'], {mocks,expose:{[join(root,'src/App.tsx')]:['ProfileEditor','HotkeyModal','copyName','triggerLabel','allowsExtraModifiers','uid','blankProfile','transferVariables']}});
   const profile = {id:'profile',name:'Copies',kind:'hotkeys',armed:true,parent_id:null,hotkeys:[{name:'Original',trigger:'f1',behavior:JSON.stringify([{type:'press',key:{source:'trigger'},onRelease:true},{type:'startoverlay',itemIds:['group'],restart:true}]),state_id:null}],events:[],states:[],scripts:[],overlay_items:[{type:'timer',id:'timer',group_id:'group',name:'Timer',x:0,y:0,duration_ms:10000,color:'#ffffff',font_size:22,state_id:null,timer_state_id:null,start_with_overlay:true},{type:'icon',id:'icon',group_id:'group',visible_while_timer_id:'timer',name:'Icon',x:0,y:0,w:32,h:32,src:null,state_id:null}],overlay_groups:[{id:'group',name:'Buff',x:20,y:30,layout:'row',gap:8,visible_while_timer_id:'timer'}],overlay_triggers:[]};
   const initial = {version:14,settings:{},variables:[],scopes:[{id:'game',name:'Game',exe:'game.exe',states:[],profiles:[profile]},{id:'other-game',name:'Other',exe:'other.exe',states:[],profiles:[{...profile,id:'destination',hotkeys:[],overlay_items:[],overlay_groups:[]}]}]};
+  for (const scope of initial.scopes) scope.variables = [];
+  delete initial.variables;
   const harness = `const modules={${bundle.declarations}},cache={};window.errors=[];window.reportError=error=>window.errors.push(String(error));window.saved=${JSON.stringify(initial)};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
 if(id==='./api'){module.exports={api:{async getDatabase(){return structuredClone(window.snapshot);},async upsertGame(folder){window.saved={...window.snapshot,scopes:window.snapshot.scopes.map(scope=>scope.id===folder.id?folder:scope)};return structuredClone(window.saved);},async upsertProfile(gameId,profile){if(window.failSave)throw Error('fixture save failure');window.saved={...window.snapshot,scopes:window.snapshot.scopes.map(scope=>scope.id===gameId?{...scope,profiles:scope.profiles.map(current=>current.id===profile.id?profile:current)}:scope)};return structuredClone(window.saved);}}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
-const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{ProfileEditor,HotkeyModal,copyName,triggerLabel,allowsExtraModifiers,uid}=load(${JSON.stringify(bundle.entry)}),{api}=load('./api'),{duplicateBehaviorOverlays,availableOverlayTargets}=load(${JSON.stringify(join(root,'src/overlayItems.ts'))});
+const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{ProfileEditor,HotkeyModal,copyName,triggerLabel,allowsExtraModifiers,uid,blankProfile,transferVariables}=load(${JSON.stringify(bundle.entry)}),{api}=load('./api'),{duplicateBehaviorOverlays,availableOverlayTargets}=load(${JSON.stringify(join(root,'src/overlayItems.ts'))});
 function Fixture(){const [db,handleDb]=React.useState(window.saved),[modal,setModal]=React.useState(null),[revision,setRevision]=React.useState(0);window.snapshot=db;
 const reportError=error=>window.errors.push(String(error)),carryStates=(_sourceGameId,_sourceProfileId,_targetGameId,profile)=>profile;
 ${handlerCode}
@@ -116,7 +118,7 @@ window.copyTo=(gameId,profileId)=>handleCopyHotkey(folder.id,profile.id,profile.
 const onModal=next=>{window.modal=next;if(next.type==='copyHotkey')void handleCopyHotkey(next.sourceGameId,next.sourceProfileId,next.hotkey,folder.id,profile.id);else setModal(next);};
 return React.createElement(React.Fragment,null,React.createElement('button',{id:'reload',onClick:()=>{handleDb(structuredClone(window.saved));setRevision(revision+1);}},'Reload'),
 React.createElement(ProfileEditor,{key:revision,folder,profile,variables:[],showStates:false,onContext(){},onDb:handleDb,onModal}),
-modal?.type==='editHotkey'?React.createElement(HotkeyModal,{initial:modal.hotkey,gameExe:folder.exe,states:[],overlayProfileId:profile.id,overlays:availableOverlayTargets(folder.profiles,[]),scripts:[],variables:[],onDb:handleDb,onClose:()=>setModal(null),onSave:(hotkey,secureTexts)=>handleHotkeySave(folder.id,profile.id,modal.index,hotkey,secureTexts)}):null);}
+modal?.type==='editHotkey'?React.createElement(HotkeyModal,{folderId:folder.id,initial:modal.hotkey,gameExe:folder.exe,states:[],overlayProfileId:profile.id,overlays:availableOverlayTargets(folder.profiles,[]),scripts:[],variables:[],onDb:handleDb,onClose:()=>setModal(null),onSave:(hotkey,secureTexts)=>handleHotkeySave(folder.id,profile.id,modal.index,hotkey,secureTexts)}):null);}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Fixture));(${scenario})();`;
   const logs = join(root,'logs'); mkdirSync(logs,{recursive:true});
   const directory = mkdtempSync(join(logs,'hotkey-copy-ui-'));

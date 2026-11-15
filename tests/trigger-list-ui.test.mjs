@@ -19,7 +19,7 @@ async function scenario() {
     element.dispatchEvent(new Event(element.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
     await wait();
   }
-  const list = () => window.snapshot.db.variables.find(variable => variable.type === "triggers");
+  const list = () => window.snapshot.db.scopes[0].variables.find(variable => variable.type === "triggers");
   const listRow = () => [...document.querySelectorAll('.variable-row')].find(row => row.querySelector('.variable-row__type').textContent === 'Trigger list');
   try {
     await wait();
@@ -101,16 +101,16 @@ test('trigger lists and matched input work through the actual hotkey and variabl
   const bundle = browserModules(['App.tsx'], {mocks,expose:{[join(root,'src/App.tsx')]:['HotkeyModal','EventModal']}});
   const harness = `const modules={${bundle.declarations}},cache={};window.errors=[];
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async saveVariables(variables){if(window.failSave)throw Error('simulated save failure');return {...window.snapshot.db,variables};}}};return module.exports;}
+if(id==='./api'){module.exports={api:{async saveVariables(gameId,variables){if(window.failSave)throw Error('simulated save failure');return {...window.snapshot.db,scopes:window.snapshot.db.scopes.map(scope=>scope.id===gameId?{...scope,variables}:scope)};}}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal,EventModal}=load(${JSON.stringify(bundle.entry)}),{VariablesView}=load(${JSON.stringify(join(root,'src/VariablesView.tsx'))});
 const initial={name:'Shared cast',trigger:'',behavior:'',state_id:null,allow_extra_modifiers:false};
-function App(){const [db,onDb]=React.useState({version:7,variables:[{id:'keys',name:'Output keys',type:'keys',value:'v'}],scopes:[{profiles:[{hotkeys:[],events:[]}]}]}),[mode,setMode]=React.useState('hotkey'),[revision,setRevision]=React.useState(0);window.snapshot={db};
-const common={variables:db.variables,onDb,onClose(){},gameExe:'game.exe',states:[],overlays:[],scripts:[]};
+function App(){const [db,onDb]=React.useState({version:16,scopes:[{id:'scope',name:'Game',exe:'game.exe',states:[],variables:[{id:'keys',name:'Output keys',type:'keys',value:'v'}],profiles:[{hotkeys:[],events:[]}]}]}),[mode,setMode]=React.useState('hotkey'),[revision,setRevision]=React.useState(0);window.snapshot={db};
+const common={folderId:'scope',variables:db.scopes[0].variables,onDb,onClose(){},gameExe:'game.exe',states:[],overlays:[],scripts:[]};
 return React.createElement(React.Fragment,null,React.createElement('nav',null,...['manage','hotkey','event'].map(value=>React.createElement('button',{key:value,id:value,onClick:()=>setMode(value)},value))),
-mode==='manage'?React.createElement(VariablesView,{db,onDb}):mode==='event'?React.createElement(EventModal,{...common,initial:{event:'focus_gained',behavior:JSON.stringify([{type:'press',key:{source:'trigger'}}])},eventKinds:['focus_gained'],onSave(){}}):React.createElement(HotkeyModal,{...common,key:revision,initial:db.scopes[0].profiles[0].hotkeys[0]??initial,onSave:hotkey=>{onDb({...db,scopes:[{profiles:[{hotkeys:[hotkey],events:[]}]}]});setRevision(revision+1);}}));}
+mode==='manage'?React.createElement(VariablesView,{folder:db.scopes[0],onDb}):mode==='event'?React.createElement(EventModal,{...common,initial:{event:'focus_gained',behavior:JSON.stringify([{type:'press',key:{source:'trigger'}}])},eventKinds:['focus_gained'],onSave(){}}):React.createElement(HotkeyModal,{...common,key:revision,initial:db.scopes[0].profiles[0].hotkeys[0]??initial,onSave:hotkey=>{onDb({...db,scopes:[{...db.scopes[0],profiles:[{hotkeys:[hotkey],events:[]}]}]});setRevision(revision+1);}}));}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));(${scenario})();`;
   const logs = resolve(root,'logs'); mkdirSync(logs,{recursive:true});
   for(const width of [1000,800]) await t.test(`${width}px window`,async t=>{

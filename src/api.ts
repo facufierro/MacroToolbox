@@ -61,8 +61,8 @@ export const api = {
     }
   },
 
-  moveHotkey: (sourceGameId: string, sourceProfileId: string, sourceIndex: number, hotkey: import("./types").Hotkey, targetGameId: string, dependencies: Profile) =>
-    invoke<Database>("move_hotkey", { sourceGameId, sourceProfileId, sourceIndex, hotkey, targetGameId, dependencies }),
+  moveHotkey: (sourceGameId: string, sourceProfileId: string, sourceIndex: number, hotkey: import("./types").Hotkey, targetGameId: string, dependencies: Profile & { variables: Variable[] }) =>
+    invoke<Database>("move_hotkey", { sourceGameId, sourceProfileId, sourceIndex, hotkey, targetGameId, dependencies, transferred: dependencies.hotkeys[dependencies.hotkeys.length - 1], variables: dependencies.variables }),
 
   moveOverlay: (sourceGameId: string, sourceProfileId: string, selection: OverlaySelection, targetGameId: string, dependencies: Profile, targetGroupId: string | null) =>
     invoke<Database>("move_overlay", { sourceGameId, sourceProfileId, selection, targetGameId, dependencies, targetGroupId }),
@@ -85,8 +85,8 @@ export const api = {
   saveSettings: (settings: Settings) =>
     invoke<Database>("save_settings", { settings }),
 
-  saveVariables: async (variables: Variable[], secureTexts: SecureTextDraft[] = []) => {
-    try { return await invoke<Database>("save_variables", { variables, secureTexts }); }
+  saveVariables: async (gameId: string, variables: Variable[], secureTexts: SecureTextDraft[] = []) => {
+    try { return await invoke<Database>("save_variables", { gameId, variables, secureTexts }); }
     catch (error) {
       if (secureTexts.length) throw new Error("Could not save the behavior's password.");
       throw error;

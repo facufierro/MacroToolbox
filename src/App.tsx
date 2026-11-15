@@ -15,7 +15,7 @@ import { SortableList } from "./SortableList";
 import { useProfileItemDrag, profileDropKey, type ProfileItemDrag } from "./useProfileItemDrag";
 import { resolveProfileEntries } from "./profileEntries";
 import { moveItem } from "./listOrder";
-import { exportVariables, importVariables, mapVariableBehaviors, readVariable } from "./variables";
+import { exportVariables, importVariables, mapVariableBehaviors, readVariable, transferVariables } from "./variables";
 import { KeyInput } from "./KeyInput";
 import { CancelTriggersInput } from "./CancelTriggersInput";
 import { EnableSwitch } from "./EnableSwitch";
@@ -70,7 +70,7 @@ function uid() {
 
 /** A folder owns one app target shared by all of its profiles. */
 function blankGame(): Scope {
-  return { id: uid(), name: "", exe: "", image: null, profiles: [], states: [] };
+  return { id: uid(), name: "", exe: "", image: null, profiles: [], states: [], variables: [] };
 }
 
 /** A profile owns the behaviors that run against its folder's app target. */
@@ -146,7 +146,8 @@ function materializeProfile(profile: Profile, profiles: Profile[]): Profile {
   };
 }
 
-async function exportProfile(profile: Profile, folder: Scope, variables: Variable[]) {
+async function exportProfile(profile: Profile, folder: Scope) {
+  const variables = folder.variables;
   const profiles = folder.profiles;
   const path = await saveDialog({
     title: "Export Profile",
@@ -159,14 +160,14 @@ async function exportProfile(profile: Profile, folder: Scope, variables: Variabl
   await api.writeTextFile(path, JSON.stringify({ version: 2, type: "profile", data, variables: exportVariables([data], variables) }, null, 2));
 }
 
-async function exportScope(scope: Scope, variables: Variable[]) {
+async function exportScope(scope: Scope) {
   const path = await saveDialog({
     title: "Export Scope",
     defaultPath: `${scope.name || "scope"}.hkm-scope`,
     filters: [{ name: "HKM Scope", extensions: ["hkm-scope"] }],
   });
   if (!path) return;
-  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "scope", data: scope, variables: exportVariables(scope.profiles, variables) }, null, 2));
+  await api.writeTextFile(path, JSON.stringify({ version: 2, type: "scope", data: scope, variables: scope.variables }, null, 2));
 }
 
 async function importProfile(existing: Variable[]): Promise<{ profile: Profile; variables: Variable[] } | null> {
@@ -188,7 +189,7 @@ async function importProfile(existing: Variable[]): Promise<{ profile: Profile; 
   return { profile: imported.profiles[0], variables: imported.variables };
 }
 
-async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; variables: Variable[] } | null> {
+async function importScope(): Promise<{ scopes: Scope[]; variables: Variable[] } | null> {
   const path = await openDialog({
     title: "Import Scope",
     filters: [{ name: "HKM Scope", extensions: ["hkm-scope", "json"] }],
@@ -203,8 +204,8 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
   const itemIds = new Map(source.profiles.flatMap(profile => profile.overlay_items.map(item => [item.id, uid()] as const)));
   const scriptIds = new Map(source.profiles.flatMap(profile => (profile.scripts ?? []).map(script => [script.id, uid()] as const)));
   const groupIds = new Map(source.profiles.flatMap(profile => (profile.overlay_groups ?? []).map(group => [group.id, uid()] as const)));
-  const incoming = mapVariableBehaviors((raw.variables ?? []).map(readVariable), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
-  const imported = importVariables(source.profiles, incoming, existing);
+  const incoming = mapVariableBehaviors((source.variables ?? raw.variables ?? []).map(readVariable), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
+  const imported = importVariables(source.profiles, incoming, []);
   const scope = { ...source, profiles: imported.profiles };
   const subfolderIds = new Map((scope.subfolders ?? []).map(folder => [folder.id, uid()]));
   let entries = scope.profiles.map(profile => ({
@@ -250,6 +251,7 @@ async function importScope(existing: Variable[]): Promise<{ scopes: Scope[]; var
       : `${scope.name} (${isGlobalExe(group.exe) ? "Any app" : group.exe || "No app"})`,
     exe: group.exe,
     profiles: group.profiles,
+    variables: imported.variables,
     overlay_bars: (scope.overlay_bars ?? []).map(bar => ({ ...bar, id: uid(), group_ids: bar.group_ids.map(id => groupIds.get(id) ?? id) })),
     subfolders: (scope.subfolders ?? []).map(folder => ({ ...folder, id: subfolderIds.get(folder.id)! })),
     states: (scope.states ?? []).map(state => ({ ...state, id: stateIds.get(state.id)! })),
@@ -309,7 +311,7 @@ function Placeholder({ label }: { label?: string }) {
 type Selection =
   | { kind: "profile"; folderId: string; profileId: string }
   | { kind: "settings" }
-  | { kind: "variables" }
+  | { kind: "variables"; folderId: string }
   | { kind: "empty" };
 
 /** Whether an armed profile's folder app is present (so its hotkeys can fire). "*" is always present. */
@@ -448,8 +450,10 @@ function ProfileRow({ profile, enabled, folderId, folderExe, openExes, selected,
   );
 }
 
-function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfileId, visibleProfiles, itemDrag, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
+function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfileId, variablesSelected, onSelectVariables, visibleProfiles, itemDrag, onToggle, onSelectProfile, onToggleArmed, onProfileContext, onFolderContext, onDb, onModal }: {
   folder: Scope; openExes: Set<string>; open: boolean; selectedProfileId?: string;
+  variablesSelected: boolean;
+  onSelectVariables: () => void;
   disabledProfiles: ReadonlySet<string>;
   visibleProfiles: Profile[];
   itemDrag?: ProfileItemDrag;
@@ -514,6 +518,9 @@ function FolderGroup({ folder, disabledProfiles, openExes, open, selectedProfile
         <IconButton icon="gear" label="Folder settings" className="icon-btn" onClick={() => onModal({ type: "editGame", game: folder })} />
       </div>
       {open && <>
+        <button className={`profile-row folder-variables ${variablesSelected ? "profile-row--active" : ""}`} onClick={onSelectVariables}>
+          <Icon name="code" /><span className="profile-row__name">Variables</span>
+        </button>
         <SortableList className="folder-group__subfolders" items={folder.subfolders ?? []} itemKey={subfolder => subfolder.id} itemLabel={subfolder => subfolder.name}
           canMove={() => !movingProfile && !itemDrag?.moving}
           onReorder={async (from, to, after) => { onDb(await api.upsertGame({ ...folder, subfolders: moveItem(folder.subfolders ?? [], subfolder => subfolder.id, from, to, after) })); }}>
@@ -569,7 +576,8 @@ function Library({ db, disabledProfiles, openExes, selection, query, collapsed, 
         }} empty={<div className="library__empty">{db.scopes.length === 0 ? "No folders yet" : "No matches"}</div>}>
         {({ f, visible }) => (
           <FolderGroup folder={f} disabledProfiles={disabledProfiles} openExes={openExes} itemDrag={itemDrag}
-            open={!collapsed.has(f.id) || filtering} selectedProfileId={selectedProfileId} visibleProfiles={visible}
+            open={!collapsed.has(f.id) || filtering} selectedProfileId={selectedProfileId}
+            variablesSelected={selection.kind === "variables" && selection.folderId === f.id} onSelectVariables={() => onSelect({ kind: "variables", folderId: f.id })} visibleProfiles={visible}
             onToggle={() => onToggleCollapse(f.id)}
             onSelectProfile={pid => onSelect({ kind: "profile", folderId: f.id, profileId: pid })}
             onToggleArmed={onToggleArmed} onProfileContext={onProfileContext} onFolderContext={onFolderContext} onDb={onDb} onModal={onModal} />
@@ -579,14 +587,13 @@ function Library({ db, disabledProfiles, openExes, selection, query, collapsed, 
         <IconButton icon="folder-plus" label="New folder" className="btn btn--ghost btn--full" onClick={() => onModal({ type: "addGame" })} />
         <IconButton icon="file-import" label="Import folder" className="btn btn--ghost btn--full" onClick={async () => {
           try {
-            const imported = await importScope(db!.variables);
+            const imported = await importScope();
             if (!imported) return;
             let updated: Database | null = null;
-            for (const scope of imported.scopes) updated = await api.upsertGame(scope, imported.variables);
+            for (const scope of imported.scopes) updated = await api.upsertGame(scope);
             if (updated) onDb(updated);
           } catch (e) { reportError(e); }
         }} />
-        <IconButton icon="code" label="Variables" className={`btn btn--ghost btn--full ${selection.kind === "variables" ? "btn--primary" : ""}`} onClick={() => onSelect({ kind: "variables" })} />
         <IconButton icon="gear" label="Settings" className={`btn btn--ghost btn--full ${selection.kind === "settings" ? "btn--primary" : ""}`} onClick={() => onSelect({ kind: "settings" })} />
       </div>
     </aside>
@@ -754,13 +761,14 @@ function SubfolderModal({ initial, onSave, onDelete, onClose }: {
 
 // ── Step sub-components ───────────────────────────────────────────────────────
 
-function HotkeyModal({ initial, overlayProfileId, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
+function HotkeyModal({ folderId, initial, overlayProfileId, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
   initial: Hotkey;
   overlayProfileId?: string;
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  folderId: string;
   variables: Variable[];
   onDb: (db: Database) => void;
   onSave: (hk: Hotkey, secureTexts: SecureTextDraft[]) => void | Promise<void>;
@@ -805,7 +813,7 @@ function HotkeyModal({ initial, overlayProfileId, gameExe, states, overlays, scr
         <input className="modal-name" value={name} onChange={e => setName(e.target.value)} placeholder="Name" autoFocus />
 
         <div className="hotkey-triggers">
-          <TriggerInput value={trigger} variables={variables} onChange={setTrigger} onDb={onDb} />
+          <TriggerInput folderId={folderId} value={trigger} variables={variables} onChange={setTrigger} onDb={onDb} />
           <CancelTriggersInput value={cancelTriggers} onChange={setCancelTriggers} cancelOnOtherBehavior={cancelOnOtherBehavior}
             onCancelOnOtherBehaviorChange={setCancelOnOtherBehavior} disabled={saving} />
         </div>
@@ -815,7 +823,7 @@ function HotkeyModal({ initial, overlayProfileId, gameExe, states, overlays, scr
           <span>Allow extra modifiers</span>
         </label>
 
-        <BehaviorStepsEditor steps={steps} overlayProfileId={overlayProfileId} {...overlayEditors} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} onChange={setSteps} secureTexts={secureTexts}
+        <BehaviorStepsEditor folderId={folderId} steps={steps} overlayProfileId={overlayProfileId} {...overlayEditors} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} onDb={onDb} onChange={setSteps} secureTexts={secureTexts}
           onSecureTextChange={(credentialId, password) => setSecureTexts(current => [...current.filter(draft => draft.credentialId !== credentialId), { credentialId, password }])} />
 
         <div className="modal__actions">
@@ -828,7 +836,7 @@ function HotkeyModal({ initial, overlayProfileId, gameExe, states, overlays, scr
   );
 }
 
-function EventModal({ initial, overlayProfileId, eventKinds, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
+function EventModal({ folderId, initial, overlayProfileId, eventKinds, gameExe, states, overlays, scripts, variables, onDb, onSave, onClose }: {
   initial: BehaviorEvent;
   overlayProfileId?: string;
   eventKinds: BehaviorEventKind[];
@@ -836,6 +844,7 @@ function EventModal({ initial, overlayProfileId, eventKinds, gameExe, states, ov
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  folderId: string;
   variables: Variable[];
   onDb: (db: Database) => void;
   onSave: (event: BehaviorEvent) => void;
@@ -855,7 +864,7 @@ function EventModal({ initial, overlayProfileId, eventKinds, gameExe, states, ov
             <option key={candidate.value} value={candidate.value}>{candidate.label}</option>
           ))}
         </select>
-        <BehaviorStepsEditor steps={steps} overlayProfileId={overlayProfileId} {...overlayEditors} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={false} onDb={onDb} onChange={setSteps} />
+        <BehaviorStepsEditor folderId={folderId} steps={steps} overlayProfileId={overlayProfileId} {...overlayEditors} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={false} onDb={onDb} onChange={setSteps} />
         <div className="modal__actions">
           <IconButton icon="arrow-left" label="Cancel" className="btn btn--secondary" onClick={onClose} />
           <IconButton icon="check" label="Save" className="btn btn--primary" disabled={overlayEditors.editingOverlay || !behavior || !areStepsValid(steps, variables, false)} onClick={() => !overlayEditors.editingOverlay && behavior && areStepsValid(steps, variables, false) && onSave({ event, behavior })} />
@@ -1695,6 +1704,7 @@ export default function App() {
     }
     // Heal a selection whose profile/folder was deleted; otherwise leave it (no auto-select).
     setSelection(sel => {
+      if (sel.kind === "variables") return db.scopes.some(folder => folder.id === sel.folderId) ? sel : { kind: "empty" };
       if (sel.kind !== "profile") return sel;
       const folder = db.scopes.find(s => s.id === sel.folderId);
       if (folder?.profiles.some(p => p.id === sel.profileId)) return sel;
@@ -1704,7 +1714,7 @@ export default function App() {
   }, [db]);
 
   useEffect(() => {
-    if (selection.kind === "profile") {
+    if (selection.kind === "profile" || selection.kind === "variables") {
       setCollapsed(prev => { if (!prev.has(selection.folderId)) return prev; const n = new Set(prev); n.delete(selection.folderId); return n; });
     }
   }, [selection]);
@@ -1728,7 +1738,7 @@ export default function App() {
       { label: p.parent_id ? "Change parent" : "Inherit from…", onClick: () => setModal({ type: "setParent", gameId: folderId, profile: p }) },
       { label: "Copy to…", onClick: () => setModal({ type: "copyProfile", sourceGameId: folderId, profile: p }) },
       { label: "Edit states…", onClick: () => { setSelection({ kind: "profile", folderId, profileId: p.id }); setStatesFor(p.id); } },
-      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!, db!.variables).catch(e => reportError(e)) },
+      { label: "Export profile", onClick: () => exportProfile(p, db!.scopes.find(folder => folder.id === folderId)!).catch(e => reportError(e)) },
       { label: "Delete profile", danger: true, onClick: async () => {
         try {
           if (!await confirmDialog(`Delete profile "${p.name}"?`)) return;
@@ -1757,13 +1767,14 @@ export default function App() {
       { label: "New profile", onClick: () => newProfile("hotkeys") },
       { label: "New subfolder", onClick: () => setModal({ type: "subfolder", gameId: folder.id, folder: { id: uid(), name: "", enabled: true, toggle_key: null } }) },
       { label: "Import profile…", onClick: async () => {
-        try { const imported = await importProfile(db!.variables); if (!imported) return; imported.profile.name = imported.profile.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported.profile, imported.variables)); }
+        try { const imported = await importProfile(folder.variables); if (!imported) return; imported.profile.name = imported.profile.name || "Imported Profile"; handleDb(await api.upsertProfile(folder.id, imported.profile, imported.variables)); }
         catch (e) { reportError(e); }
       } },
       { label: "Arm all", onClick: () => armAll(true) },
       { label: "Disarm all", onClick: () => armAll(false) },
+      { label: "Variables", onClick: () => setSelection({ kind: "variables", folderId: folder.id }) },
       { label: "Folder settings…", onClick: () => setModal({ type: "editGame", game: folder }) },
-      { label: "Export folder", onClick: () => exportScope(folder, db!.variables).catch(e => reportError(e)) },
+      { label: "Export folder", onClick: () => exportScope(folder).catch(e => reportError(e)) },
       ...(hasProcessTarget ? [
         { label: "Kill process", onClick: async () => {
           try {
@@ -1825,9 +1836,17 @@ export default function App() {
   async function handleCopyProfile(sourceGameId: string, profile: Profile, targetGameId: string, name: string) {
     try {
       const source = db!.scopes.find(folder => folder.id === sourceGameId)!;
-      const portable = withReferencedOverlayParts(materializeProfile(profile, source.profiles), source.profiles, db!.variables);
-      const copy: Profile = { ...remapProfileIds(portable, undefined, new Map()), name, parent_id: null };
-      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, profile.id, targetGameId, copy));
+      const portable = carryStates(sourceGameId, profile.id, targetGameId, materializeProfile(profile, source.profiles));
+      const target = db!.scopes.find(folder => folder.id === targetGameId)!;
+      const itemIds = new Map(portable.overlay_items.map(item => [item.id, uid()]));
+      const scriptIds = new Map(portable.scripts.map(script => [script.id, uid()]));
+      const groupIds = new Map(portable.overlay_groups.map(group => [group.id, uid()]));
+      const stateIds = new Map(portable.states.map(state => [state.id, state.id]));
+      const copy: Profile = { ...remapProfileIds(portable, undefined, stateIds, itemIds, scriptIds, groupIds), name, parent_id: null };
+      const incoming = mapVariableBehaviors(exportVariables([portable], source.variables), behavior => remapBehaviorIds(behavior, stateIds, itemIds, scriptIds, groupIds));
+      const imported = sourceGameId === targetGameId ? { profiles: [copy], variables: [] } : importVariables([copy], incoming, target.variables);
+      const transferred = { profile: imported.profiles[0], variables: imported.variables };
+      const updated = await api.upsertProfile(targetGameId, transferred.profile, transferred.variables);
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error copying profile: ${e}`); }
@@ -1838,7 +1857,7 @@ export default function App() {
     const target = db!.scopes.find(folder => folder.id === targetGameId)!;
     const sourceStates = source.states;
     const targetStates = target.states;
-    return carryReferencedScripts(carryReferencedStates(carryReferencedOverlayParts(profile, source.profiles, target.profiles, db!.variables), sourceStates, targetStates, db!.variables), source.profiles.flatMap(profile => profile.scripts), target.profiles.flatMap(profile => profile.scripts), db!.variables);
+    return carryReferencedScripts(carryReferencedStates(carryReferencedOverlayParts(profile, source.profiles, target.profiles, source.variables), sourceStates, targetStates, source.variables), source.profiles.flatMap(profile => profile.scripts), target.profiles.flatMap(profile => profile.scripts), source.variables);
   }
 
   async function handleCopyHotkey(sourceGameId: string, sourceProfileId: string, hotkey: Hotkey, targetGameId: string, targetProfileId: string) {
@@ -1850,12 +1869,19 @@ export default function App() {
       const overlays = duplicateBehaviorOverlays(hotkey.behavior, sourceProfile, source.profiles, uid);
       const isSameProfile = sourceGameId === targetGameId && sourceProfileId === targetProfileId;
       const copy = isSameProfile
-        ? { ...hotkey, name: copyName(hotkey.name, triggerLabel(hotkey.trigger, db!.variables) || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
+        ? { ...hotkey, name: copyName(hotkey.name, triggerLabel(hotkey.trigger, source.variables) || "Behavior"), trigger: "", allow_extra_modifiers: allowsExtraModifiers(hotkey) }
         : { ...hotkey };
-      const updated = await api.upsertProfile(targetGameId, carryStates(sourceGameId, sourceProfileId, targetGameId, { ...profile,
-        overlay_groups: [...profile.overlay_groups, ...overlays.overlay_groups], overlay_items: [...profile.overlay_items, ...overlays.overlay_items],
-        hotkeys: [...profile.hotkeys, { ...copy, behavior: overlays.behavior }],
-      }));
+      const transferred = transferVariables(carryStates(sourceGameId, sourceProfileId, targetGameId, { ...blankProfile("hotkeys"), id: profile.id,
+        overlay_groups: overlays.overlay_groups, overlay_items: overlays.overlay_items,
+        hotkeys: [{ ...copy, behavior: overlays.behavior }],
+      }), source, game);
+      const updated = await api.upsertProfile(targetGameId, { ...profile,
+        hotkeys: [...profile.hotkeys, ...transferred.profile.hotkeys],
+        states: [...profile.states, ...transferred.profile.states],
+        scripts: [...profile.scripts, ...transferred.profile.scripts],
+        overlay_items: [...profile.overlay_items, ...transferred.profile.overlay_items],
+        overlay_groups: [...profile.overlay_groups, ...transferred.profile.overlay_groups],
+      }, transferred.variables);
       handleDb(updated);
       setModal(null);
     } catch (e) { reportError(`Error copying hotkey: ${e}`); }
@@ -1908,15 +1934,15 @@ export default function App() {
       : "Loading…"}</div>;
   }
 
-  const selFolder = selection.kind === "profile" ? db.scopes.find(s => s.id === selection.folderId) ?? null : null;
+  const selFolder = (selection.kind === "profile" || selection.kind === "variables") ? db.scopes.find(s => s.id === selection.folderId) ?? null : null;
   const selProfile = selection.kind === "profile" ? selFolder?.profiles.find(p => p.id === selection.profileId) ?? null : null;
 
   async function importFolder() {
     try {
-      const imported = await importScope(db!.variables);
+      const imported = await importScope();
       if (!imported) return;
       let updated: Database | null = null;
-      for (const scope of imported.scopes) updated = await api.upsertGame(scope, imported.variables);
+      for (const scope of imported.scopes) updated = await api.upsertGame(scope);
       if (updated) handleDb(updated);
     }
     catch (e) { reportError(e); }
@@ -1944,11 +1970,11 @@ export default function App() {
           {selection.kind === "settings" && (
             <div className="detail__scroll"><SettingsView db={db} onDb={handleDb} onCheckUpdates={() => checkUpdate(true)} /></div>
           )}
-          {selection.kind === "variables" && (
-            <div className="detail__scroll"><VariablesView db={db} onDb={handleDb} /></div>
+          {selection.kind === "variables" && selFolder && (
+            <div className="detail__scroll"><VariablesView key={selFolder.id} folder={selFolder} onDb={handleDb} /></div>
           )}
           {selProfile && selFolder && (
-            <ProfileEditor variables={db.variables} key={selProfile.id} folder={selFolder} profile={selProfile} itemDrag={itemDrag} enabled={selProfile.armed && profileFolderEnabled(selFolder, selProfile) && !disabledProfiles.has(selProfile.id)}
+            <ProfileEditor variables={selFolder.variables} key={selProfile.id} folder={selFolder} profile={selProfile} itemDrag={itemDrag} enabled={selProfile.armed && profileFolderEnabled(selFolder, selProfile) && !disabledProfiles.has(selProfile.id)}
               showStates={statesFor === selProfile.id}
               onContext={e => onProfileContext(e, selFolder.id, selProfile)}
               onDb={handleDb} onModal={setModal} />
@@ -1992,7 +2018,7 @@ export default function App() {
         const folder = db.scopes.find(scope => scope.id === gameId)!;
         const profile = folder.profiles.find(profile => profile.id === pid)!;
         const overlays = availableOverlayTargets(folder.profiles, resolveOverlayItems(folder.profiles, profile).map(({ item }) => item), resolveOverlayGroups(folder.profiles, profile));
-        return <HotkeyModal overlayProfileId={pid} onDb={handleDb} variables={db.variables} initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={folder.profiles.flatMap(profile => profile.scripts)}
+        return <HotkeyModal overlayProfileId={pid} folderId={folder.id} onDb={handleDb} variables={folder.variables} initial={hotkey} gameExe={gameExe} states={states} overlays={overlays} scripts={folder.profiles.flatMap(profile => profile.scripts)}
           onSave={(hk, secureTexts) => handleHotkeySave(gameId, pid, index, hk, secureTexts)}
           onClose={() => setModal(null)} />;
       })()}
@@ -2001,7 +2027,7 @@ export default function App() {
         const folder = db.scopes.find(scope => scope.id === gameId)!;
         const profile = folder.profiles.find(profile => profile.id === pid)!;
         const overlays = availableOverlayTargets(folder.profiles, resolveOverlayItems(folder.profiles, profile).map(({ item }) => item), resolveOverlayGroups(folder.profiles, profile));
-        return <EventModal overlayProfileId={pid} onDb={handleDb} variables={db.variables} initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={folder.profiles.flatMap(profile => profile.scripts)}
+        return <EventModal overlayProfileId={pid} folderId={folder.id} onDb={handleDb} variables={folder.variables} initial={event} eventKinds={eventKinds} gameExe={gameExe} states={states} overlays={overlays} scripts={folder.profiles.flatMap(profile => profile.scripts)}
           onSave={next => handleEventSave(gameId, pid, index, next)}
           onClose={() => setModal(null)} />;
       })()}

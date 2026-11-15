@@ -84,7 +84,7 @@ impl Runtime {
         let game = db.games.iter().find(|game| game.profiles.iter().any(|candidate| candidate.id == profile && candidate.armed)).ok_or("Profile is unavailable.")?;
         if !self.enabled(profile) { return Err("Profile is disabled.".into()); }
         if !scope.is_active(db) || (!scope.script_owner.is_empty() && !self.enabled(&scope.script_owner)) { return Err("Behavior source is disabled.".into()); }
-        let steps = crate::behavior::resolve(source, &db.variables, None)?;
+        let steps = crate::behavior::resolve(source, &game.variables, None)?;
         crate::behavior::validate(&steps, false)?;
         self.next_command += 1;
         let mut scope = scope.clone(); scope.section = scope.section().to_string();
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn script_behavior_requests_resolve_shared_variables_without_changing_the_source() {
         let mut db = database();
-        db.variables.push(config::Variable { id: "pause".into(), name: "sleep timer".into(), value: 50.0.into() });
+        db.games[0].variables.push(config::Variable { id: "pause".into(), name: "sleep timer".into(), value: 50.0.into() });
         let mut runtime = Runtime::default(); runtime.reconcile(&db, 0);
         let scope = ExecutionScope { profile: "keys".into(), ..Default::default() };
         let source = "sleep($pause);send($pause)";

@@ -18,9 +18,9 @@ function fixture(trigger = "rctrl f1") {
   const owner = profile("source", {hotkeys:[hotkey],scripts:[script],overlay_items:[timer],
     overlay_groups:[{id:"overlay",name:"Overlay",visible_while_timer_id:"timer"}]});
   const target = profile("target", {armed:false,subfolder_id:"off",hotkeys:[{name:"Existing",trigger:"f2",behavior:"press(x)"}]});
-  const db = {version:8,settings:{},variables,scopes:[
-    {id:"source-app",states,profiles:[owner,profile("sibling")]},
-    {id:"target-app",states:[],subfolders:[{id:"off",name:"Off",enabled:false}],profiles:[target]},
+  const db = {version:16,settings:{},scopes:[
+    {id:"source-app",variables,states,profiles:[owner,profile("sibling")]},
+    {id:"target-app",variables:[],states:[],subfolders:[{id:"off",name:"Off",enabled:false}],profiles:[target]},
   ]};
   return {db,hotkey,owner,target,source:{gameId:"source-app",profileId:"source",index:0,hotkey}};
 }
@@ -28,14 +28,16 @@ function fixture(trigger = "rctrl f1") {
 test("moving across app folders carries nested behavior references without changing either saved profile", () => {
   const {db,hotkey,source,target} = fixture(), before = structuredClone(db);
   const result = prepareHotkeyMove(db,source,"target-app","target");
-  assert.deepEqual(result.hotkeys,[...target.hotkeys,hotkey]);
+  assert.deepEqual(result.hotkeys[0],target.hotkeys[0]);
+  assert.equal(result.variables[0].name,"Nested");
+  assert.notEqual(result.variables[0].id,"nested");
   assert.equal(result.armed,false);
   assert.equal(result.subfolder_id,"off");
   assert.deepEqual(result.scripts,[script]);
   assert.deepEqual(new Set(result.states.map(state => state.id)),new Set(["state","timer-state","action-state"]));
   assert.deepEqual(result.overlay_items.map(item => item.id),["timer"]);
   assert.deepEqual(result.overlay_groups.map(group => group.id),["overlay"]);
-  assert.equal(result.hotkeys[1].behavior,hotkey.behavior);
+  assert.equal(JSON.parse(result.hotkeys[1].behavior)[0].steps[0].variableId,result.variables[0].id);
   assert.deepEqual(db,before);
 });
 
@@ -63,6 +65,10 @@ test("destination resource definitions and profile settings take precedence", ()
 test("assigned literal and variable triggers cannot overwrite a destination hotkey", () => {
   for (const trigger of ["rctrl f1",{variable:"shortcuts"}]) {
     const {db,source,target} = fixture(trigger);
+    if (typeof trigger !== "string") {
+      db.scopes[0].variables.push({id:"shortcuts",name:"Shortcuts",type:"triggers",value:["f4"]});
+      db.scopes[1].variables.push({id:"shortcuts",name:"Shortcuts",type:"triggers",value:["f4"]});
+    }
     target.hotkeys.push({...source.hotkey,name:"Keep me"});
     const before = structuredClone(db);
     assert.equal(canMoveHotkey(db,source,"target-app","target"),false);
