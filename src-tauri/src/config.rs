@@ -726,6 +726,20 @@ pub fn deserialize_database<'de, D: serde::Deserializer<'de>>(deserializer: D) -
     decode_db(serde_json::Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
 }
 
+/// Inspect only the schema header so an older app can open its updater without
+/// deserializing, migrating, or replacing settings written by a newer build.
+pub fn requires_newer_app(path: &Path) -> Result<bool, String> {
+    if !path.exists() { return Ok(false); }
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(value.get("version").and_then(|version| version.as_u64()).unwrap_or(0) > u64::from(CURRENT_DB_VERSION))
+}
+
+pub fn load_startup_settings(path: &Path) -> Result<Option<Settings>, String> {
+    if requires_newer_app(path)? { return Ok(None); }
+    load_db(path).map(|db| Some(db.settings))
+}
+
 pub fn load_db(path: &Path) -> Result<Database, String> {
     if !path.exists() {
         let mut db = Database { version: CURRENT_DB_VERSION, ..Default::default() };
@@ -2003,6 +2017,46 @@ mod tests {
         assert!(load_db(&path).unwrap_err().contains("requires a newer MacroToolbox version"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
         assert!(!path.with_extension(format!("json.v{version}.bak")).exists());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_opens_the_updater_for_newer_settings_without_rewriting_them() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-startup-update-{}.json",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let source = serde_json::json!({"version":super::CURRENT_DB_VERSION + 1,
+            "future_settings":{"profiles":["preserve"],"variables":{"new_shape":true}}}).to_string();
+        std::fs::write(&path,&source).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        for _ in 0..2 {
+            assert!(super::requires_newer_app(&path).unwrap());
+            assert!(super::load_startup_settings(&path).unwrap().is_none());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+        }
+        assert!(!path.with_extension("json.tmp").exists());
+        assert!(!path.with_extension(format!("json.v{}.bak",super::CURRENT_DB_VERSION + 1)).exists());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_migrates_supported_settings_and_does_not_treat_corruption_as_an_update() {
+        let path = std::env::temp_dir().join(format!("macrotoolbox-startup-compatible-{}.json",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        assert!(!super::requires_newer_app(&path).unwrap());
+        let source = r#"{"version":7,"settings":{"ahk_exe":"ahk.exe","open_to_tray":true},"scopes":[]}"#;
+        std::fs::write(&path,source).unwrap();
+        assert!(!super::requires_newer_app(&path).unwrap());
+        let settings = super::load_startup_settings(&path).unwrap().unwrap();
+        assert!(settings.open_to_tray);
+        assert_eq!(settings.ahk_exe,"ahk.exe");
+        assert!(!super::requires_newer_app(&path).unwrap());
+        assert!(super::load_startup_settings(&path).unwrap().is_some());
+        assert_eq!(load_db(&path).unwrap().version,super::CURRENT_DB_VERSION);
+        std::fs::remove_file(path.with_extension("json.v7.bak")).unwrap();
+        std::fs::write(&path,"invalid json").unwrap();
+        assert!(super::load_startup_settings(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),"invalid json");
         std::fs::remove_file(path).unwrap();
     }
 
