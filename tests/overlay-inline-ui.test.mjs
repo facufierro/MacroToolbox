@@ -110,10 +110,10 @@ if(id==='@tauri-apps/plugin-dialog'){module.exports={open:async()=> 'fixture.png
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal,EventModal}=load(${JSON.stringify(bundle.entry)}),{VariableModal}=load(${JSON.stringify(join(root,'src/VariableModal.tsx'))}),{BehaviorStepsEditor}=load(${JSON.stringify(join(root,'src/BehaviorEditor.tsx'))}),{availableOverlayTargets}=load(${JSON.stringify(join(root,'src/overlayItems.ts'))});
 function App(){const [db,onDb]=React.useState(${JSON.stringify(initial)}),[mode,setMode]=React.useState('hotkey');window.snapshot=db;window.switchMode=setMode;
-const props={key:mode,gameExe:'game.exe',states:[],overlays:availableOverlayTargets(db.scopes[0].profiles,[]),scripts:[],variables:db.variables,onDb,onClose(){}},behavior=window.saved?.behavior??'';
-if(mode==='event')return React.createElement(EventModal,{...props,overlayProfileId:'profile',initial:{event:'focus_gained',behavior},eventKinds:['focus_gained'],onSave:event=>window.saved=event});
-if(mode==='variable')return React.createElement(VariableModal,{key:mode,initial:{id:'shared',name:'Shared',type:'behavior',value:behavior},variables:db.variables,onSaved(){},onClose(){},renderBehavior:editorProps=>React.createElement(BehaviorStepsEditor,{...props,...editorProps})});
-return React.createElement(HotkeyModal,{...props,overlayProfileId:'profile',initial:{name:'Buff',trigger:'q',behavior,state_id:null},onSave:hotkey=>window.saved=hotkey});}
+const props={folderId:'app',key:mode,gameExe:'game.exe',states:[],overlays:availableOverlayTargets(db.scopes[0].profiles,[]),scripts:[],variables:db.variables,onDb,onClose(){}},behavior=window.saved?.behavior??'';
+if(mode==='event')return React.createElement(EventModal,{folderId:'app',...props,overlayProfileId:'profile',initial:{event:'focus_gained',behavior},eventKinds:['focus_gained'],onSave:event=>window.saved=event});
+if(mode==='variable')return React.createElement(VariableModal,{folderId:'app',key:mode,initial:{id:'shared',name:'Shared',type:'behavior',value:behavior},variables:db.variables,onSaved(){},onClose(){},renderBehavior:editorProps=>React.createElement(BehaviorStepsEditor,{...props,...editorProps})});
+return React.createElement(HotkeyModal,{folderId:'app',...props,overlayProfileId:'profile',initial:{name:'Buff',trigger:'q',behavior,state_id:null},onSave:hotkey=>window.saved=hotkey});}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));`;
   const logs = join(root,'logs'); mkdirSync(logs,{recursive:true});
   for (const width of [1000,560]) for (const empty of [true,false]) await t.test(`${width}px ${empty?'empty':'configured'}`, async t => {

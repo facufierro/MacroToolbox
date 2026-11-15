@@ -1,5 +1,5 @@
 import { areStepsValid, describeBehavior, keyInputPattern, mapBehavior, mapStepValues, parseSteps } from "./behaviors.ts";
-import type { Variable, Profile } from "./types";
+import type { Variable, Profile, Scope } from "./types";
 import { isReference } from "./behaviorValues.ts";
 import { readTriggerList } from "./triggers.ts";
 
@@ -55,6 +55,12 @@ export function exportVariables(profiles: Profile[], variables: Variable[]): Var
     if (!variable) throw new Error("Missing variable");
     return variable;
   });
+}
+
+export function transferVariables(profile: Profile, source: Scope, target: Scope): { profile: Profile; variables: Variable[] } {
+  if (source.id === target.id) return { profile, variables: [] };
+  const imported = importVariables([profile], exportVariables([profile], source.variables), target.variables);
+  return { profile: imported.profiles[0], variables: imported.variables };
 }
 
 // Imports keep their values without overwriting a different variable on this machine.

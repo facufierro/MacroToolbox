@@ -6,7 +6,8 @@ import { isReference } from "./behaviorValues";
 import { variableValueText } from "./variables";
 import type { Database, Hotkey, Variable } from "./types";
 
-export function TriggerInput({ value, variables, onChange, onDb }: {
+export function TriggerInput({ folderId, value, variables, onChange, onDb }: {
+  folderId: string;
   value: Hotkey["trigger"]; variables: Variable[]; onChange: (value: Hotkey["trigger"]) => void; onDb: (db: Database) => void;
 }) {
   const [creating, setCreating] = useState(false);
@@ -36,7 +37,7 @@ export function TriggerInput({ value, variables, onChange, onDb }: {
       <IconButton showLabel={recording} icon={recording ? "arrow-left" : "keyboard"} label={recording ? "Cancel recording" : "Record hotkey"}
         className="btn btn--ghost btn--sm" onClick={() => setRecording(current => !current)} />
     </>}
-    {creating && <VariableModal variables={variables} fixedType="triggers" onClose={() => setCreating(false)} onSaved={(variable, db) => {
+    {creating && <VariableModal folderId={folderId} variables={variables} fixedType="triggers" onClose={() => setCreating(false)} onSaved={(variable, db) => {
       onDb(db); onChange({ variable: variable.id }); setCreating(false);
     }} />}
   </div>;

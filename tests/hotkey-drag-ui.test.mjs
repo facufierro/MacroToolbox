@@ -89,6 +89,8 @@ test('behavior dragging moves between sidebar profiles atomically and preserves 
     ]},
     {id:'target-app',name:'Target app',exe:'target.exe',states:[],subfolders:[{id:'off',name:'Disabled',enabled:false}],profiles:[profile('target','Across apps',{armed:false,subfolder_id:'off'})]},
   ]};
+  for (const scope of initial.scopes) scope.variables = [];
+  delete initial.variables;
   const harness=`const modules={${bundle.declarations}},cache={};window.errors=[];window.moveCalls=[];window.saved=${JSON.stringify(initial)};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
 if(id==='./api'){module.exports={api:{async upsertProfile(gameId,profile){const next=structuredClone(window.snapshot),folder=next.scopes.find(scope=>scope.id===gameId);folder.profiles=folder.profiles.map(current=>current.id===profile.id?profile:current);window.saved=next;return structuredClone(next);},async moveHotkey(sourceGameId,sourceProfileId,index,hotkey,targetGameId,dependencies){window.moveCalls.push({sourceGameId,sourceProfileId,index,hotkey:structuredClone(hotkey),targetGameId,dependencies:structuredClone(dependencies)});
@@ -103,7 +105,7 @@ const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify
 function Fixture(){const [db,onDb]=React.useState(window.saved),[revision,setRevision]=React.useState(0),itemDrag=useProfileItemDrag(db,onDb);window.snapshot=db;const folder=db.scopes[0],profile=folder.profiles[0];
 return React.createElement(React.Fragment,null,React.createElement('button',{id:'reload',onClick:()=>{onDb(structuredClone(window.saved));setRevision(revision+1);}},'Reload'),
 React.createElement('div',{className:'main-layout'},React.createElement(Library,{key:revision,db,itemDrag,disabledProfiles:new Set(),openExes:new Set(),selection:{kind:'profile',folderId:folder.id,profileId:profile.id},query:'',collapsed:new Set(),width:320,onQuery(){},onToggleCollapse(){},onSelect(){},onToggleArmed(){},onProfileContext(){},onFolderContext(){},onDb,onModal(){}}),
-React.createElement(ProfileEditor,{key:'editor'+revision,folder,profile,variables:db.variables,itemDrag,showStates:false,onContext(){},onDb,onModal(){}})));}
+React.createElement(ProfileEditor,{key:'editor'+revision,folder,profile,variables:folder.variables,itemDrag,showStates:false,onContext(){},onDb,onModal(){}})));}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Fixture));(${scenario})();`;
   const logs=join(root,'logs');mkdirSync(logs,{recursive:true});
   const directory=mkdtempSync(join(logs,'hotkey-drag-ui-'));let result;

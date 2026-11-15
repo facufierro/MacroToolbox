@@ -77,7 +77,7 @@ if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError}
 if(id==='@tauri-apps/plugin-dialog'){module.exports={confirm:async()=>window.confirmAnswer};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{HotkeyModal}=load(${JSON.stringify(bundle.entry)}),{availableOverlayTargets}=load(${JSON.stringify(join(root,'src/overlayItems.ts'))});
-function Fixture(){const [db,onDb]=React.useState(${JSON.stringify(initial)});window.snapshot=db;return React.createElement(HotkeyModal,{initial:{name:'Show',trigger:'q',behavior:'startoverlay(magic)',state_id:null},overlayProfileId:'owner',gameExe:'app.exe',states:db.scopes[0].states,overlays:availableOverlayTargets(db.scopes[0].profiles,[]),scripts:[],variables:[],onDb,onSave(){},onClose(){}});}
+function Fixture(){const [db,onDb]=React.useState(${JSON.stringify(initial)});window.snapshot=db;return React.createElement(HotkeyModal,{folderId:'app',initial:{name:'Show',trigger:'q',behavior:'startoverlay(magic)',state_id:null},overlayProfileId:'owner',gameExe:'app.exe',states:db.scopes[0].states,overlays:availableOverlayTargets(db.scopes[0].profiles,[]),scripts:[],variables:[],onDb,onSave(){},onClose(){}});}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Fixture));(${scenario})();`;
   const logs=join(root,'logs');mkdirSync(logs,{recursive:true});const directory=mkdtempSync(join(logs,'overlay-drag-ui-'));let result;
   try{

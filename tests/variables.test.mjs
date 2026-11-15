@@ -2,11 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { areStepsValid, describeBehavior, mapBehavior, mapStepValues, parseSteps, stepsToString } from "../src/behaviors.ts";
 import { isReference, resolveValue } from "../src/behaviorValues.ts";
-import { duplicateVariable, exportVariables, importVariables, profileVariableIds, readVariable, validateVariableBehaviors } from "../src/variables.ts";
+import { duplicateVariable, exportVariables, importVariables, profileVariableIds, readVariable, validateVariableBehaviors, transferVariables } from "../src/variables.ts";
 
 const buff = { id: "buff", name: "buff timer", type: "number", value: 5000 };
 const pause = { id: "pause", name: "sleep timer", type: "number", value: 50 };
 const profile = (behavior, id = "profile") => ({ id, hotkeys: [{ behavior }], events: [] });
+
+test("cross-folder copies preserve nested variable values without overwriting destination definitions", () => {
+  const variables = [buff, {id:"shared",name:"Cast",type:"behavior",value:stepsToString([{type:"sleep",ms:{variable:"buff"}}])},
+    {id:"triggers",name:"Shortcuts",type:"triggers",value:["f1","f2"]}];
+  const owner = {...profile(stepsToString([{type:"behavior",variableId:"shared"}])),hotkeys:[{
+    trigger:{variable:"triggers"},behavior:stepsToString([{type:"behavior",variableId:"shared"}]),
+  }]};
+  const source = {id:"a",variables};
+  const target = {id:"b",variables:[{...buff,value:900}]};
+  const before = structuredClone({source,target,owner});
+  const result = transferVariables(owner,source,target);
+  assert.equal(result.variables.length,3);
+  assert.equal(result.variables.find(variable=>variable.type==="number").name,"buff timer (2)");
+  assert.equal(result.variables.find(variable=>variable.type==="number").value,5000);
+  assert.notEqual(result.profile.hotkeys[0].trigger.variable,"triggers");
+  assert.equal(areStepsValid(parseSteps(result.profile.hotkeys[0].behavior),[...target.variables,...result.variables]),true);
+  assert.deepEqual({source,target,owner},before);
+  assert.deepEqual(transferVariables(owner,source,source),{profile:owner,variables:[]});
+});
 
 test("duplicating every variable type creates a separate identity and preserves its value and references", () => {
   const variables = [buff,

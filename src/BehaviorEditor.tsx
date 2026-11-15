@@ -35,7 +35,7 @@ function newStep(type: Step["type"], states: ProfileState[], overlays: OverlayTa
   }
 }
 
-function StepRow({ step, index, total, gameExe, states, overlays, scripts, variables, hasTrigger, secureTexts, editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange, onDelete, onMove }: {
+function StepRow({ folderId, step, index, total, gameExe, states, overlays, scripts, variables, hasTrigger, secureTexts, editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange, onDelete, onMove }: {
   step: Step;
   index: number;
   total: number;
@@ -43,6 +43,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  folderId: string;
   variables: Variable[];
   hasTrigger: boolean;
   secureTexts: SecureTextDraft[];
@@ -81,7 +82,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           <button type="button" className="btn btn--ghost btn--sm" onClick={() => setEditingBehavior("new")}>New variable</button>
         </>}
         {(step.type === "press" || step.type === "hold" || step.type === "toggle") && (
-          <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label={step.type === "press" ? "Input" : "Keys"} allowMatchedTrigger={step.type === "press" && hasTrigger}
+          <ValueInput folderId={folderId} type="keys" value={step.key} variables={variables} onDb={onDb} label={step.type === "press" ? "Input" : "Keys"} allowMatchedTrigger={step.type === "press" && hasTrigger}
             onChange={key => onChange({ ...step, key })} />
         )}
         {step.type === "press" && (isMousePressInput(step.key, variables) || step.compatibility || step.doubleClick) && (
@@ -105,32 +106,32 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           </select>
         )}
         {(step.type === "sequence" || step.type === "parallel") && (
-          <BehaviorStepsEditor steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={onOverlayRemoved} onSecureTextChange={onSecureTextChange} onDb={onDb}
+          <BehaviorStepsEditor folderId={folderId} steps={step.steps} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={onOverlayRemoved} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={steps => onChange({ ...step, steps })} />
         )}
         {step.type === "unknown" && <input value={step.source} readOnly aria-label="Unsupported action" />}
         {step.type === "repeat" && (
           <>
-            <ValueInput type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys"
+            <ValueInput folderId={folderId} type="keys" value={step.key} variables={variables} onDb={onDb} label="Keys"
               onChange={key => onChange({ ...step, key })} />
-            <ValueInput min={1} step={1} value={step.interval} label="Interval (ms)" variables={variables} onDb={onDb}
+            <ValueInput folderId={folderId} min={1} step={1} value={step.interval} label="Interval (ms)" variables={variables} onDb={onDb}
               onChange={interval => onChange({ ...step, interval })} />
-            <ValueInput min={0} step={1} value={step.hold} label="Hold (ms)" variables={variables} onDb={onDb}
+            <ValueInput folderId={folderId} min={0} step={1} value={step.hold} label="Hold (ms)" variables={variables} onDb={onDb}
               onChange={hold => onChange({ ...step, hold })} width={80} />
           </>
         )}
         {step.type === "goto" && (
           <div className="goto-input">
-            <ValueInput value={step.x} variables={variables} onDb={onDb} label="X (%)" min={0} max={100} step={0.1} onChange={x => onChange({ ...step, x })} />
-            <ValueInput value={step.y} variables={variables} onDb={onDb} label="Y (%)" min={0} max={100} step={0.1} onChange={y => onChange({ ...step, y })} />
+            <ValueInput folderId={folderId} value={step.x} variables={variables} onDb={onDb} label="X (%)" min={0} max={100} step={0.1} onChange={x => onChange({ ...step, x })} />
+            <ValueInput folderId={folderId} value={step.y} variables={variables} onDb={onDb} label="Y (%)" min={0} max={100} step={0.1} onChange={y => onChange({ ...step, y })} />
             <CoordinatePicker gameExe={gameExe} onPick={(x, y) => onChange({ ...step, x, y })} />
           </div>
         )}
         {step.type === "resolution" && (
           <>
-            <ValueInput min={1} step={1} value={step.width} label="Resolution width" variables={variables} onDb={onDb}
+            <ValueInput folderId={folderId} min={1} step={1} value={step.width} label="Resolution width" variables={variables} onDb={onDb}
               onChange={width => onChange({ ...step, width })} />
-            <ValueInput min={1} step={1} value={step.height} label="Resolution height" variables={variables} onDb={onDb}
+            <ValueInput folderId={folderId} min={1} step={1} value={step.height} label="Resolution height" variables={variables} onDb={onDb}
               onChange={height => onChange({ ...step, height })} />
           </>
         )}
@@ -171,7 +172,7 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
               {step.itemId && !overlays.some(item => item.id === step.itemId && item.type === "bar") && <option value={step.itemId}>Missing overlay</option>}
               {overlays.filter(item => item.type === "bar").map(item => <option key={item.id} value={item.id}>{item.name || item.type}</option>)}
             </select>
-            <ValueInput value={step.value} variables={variables} onDb={onDb} onChange={value => onChange({ ...step, value })} label="Bar value" />
+            <ValueInput folderId={folderId} value={step.value} variables={variables} onDb={onDb} onChange={value => onChange({ ...step, value })} label="Bar value" />
           </>
         )}
         {step.type === "script" && <select value={step.scriptId} onChange={e => onChange({ ...step, scriptId: e.target.value })} aria-label="Script">
@@ -179,11 +180,11 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
           {scripts.map(script => <option key={script.id} value={script.id}>{script.name || script.language}</option>)}
         </select>}
         {step.type === "sleep" && (
-          <ValueInput min={0} step={1} value={step.ms} variables={variables} onDb={onDb} label="Sleep (ms)"
+          <ValueInput folderId={folderId} min={0} step={1} value={step.ms} variables={variables} onDb={onDb} label="Sleep (ms)"
             onChange={ms => onChange({ ...step, ms })} />
         )}
         {step.type === "send" && (
-          <ValueInput type="text" value={step.text} variables={variables} onDb={onDb} label="Text"
+          <ValueInput folderId={folderId} type="text" value={step.text} variables={variables} onDb={onDb} label="Text"
             onChange={text => onChange({ ...step, text })} />
         )}
         {step.type === "securesend" && <SecureSendInput credentialId={step.credentialId} drafts={secureTexts}
@@ -195,15 +196,15 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
         <IconButton icon="trash-can" label="Delete step" className="icon-btn icon-btn--danger" disabled={editingOverlay} onClick={onDelete} />
       </div>
       {overlayEditor !== null && (step.type === "startoverlay" || step.type === "stopoverlay") && <div className="step-row__overlay">
-        <BehaviorOverlayEditor groupId={overlayEditor} defaultProfileId={overlayProfileId} onDb={onDb} onClose={() => {
+        <BehaviorOverlayEditor folderId={folderId} groupId={overlayEditor} defaultProfileId={overlayProfileId} onDb={onDb} onClose={() => {
           if (overlayEditor === "" && !step.itemIds.length) onDelete();
           else setOverlayEditor(null);
         }}
           onSaved={id => { if (overlayEditor !== id) onChange({ ...step, itemIds: [id] }); setOverlayEditor(null); }}
           onDeleted={ids => { onOverlayRemoved(ids); setOverlayEditor(null); }} />
       </div>}
-      {editingBehavior && <VariableModal initial={editingBehavior === "new" ? undefined : editingBehavior} variables={variables} fixedType="behavior"
-        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
+      {editingBehavior && <VariableModal folderId={folderId} initial={editingBehavior === "new" ? undefined : editingBehavior} variables={variables} fixedType="behavior"
+        renderBehavior={props => <BehaviorStepsEditor folderId={folderId} {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
         onClose={() => setEditingBehavior(null)} onSaved={(variable, db) => {
           onDb(db);
           if (step.type === "behavior") onChange({ ...step, variableId: variable.id });
@@ -213,12 +214,13 @@ function StepRow({ step, index, total, gameExe, states, overlays, scripts, varia
   );
 }
 
-export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts, variables = [], hasTrigger = true, secureTexts = [], editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange }: {
+export function BehaviorStepsEditor({ folderId, steps, gameExe, states, overlays, scripts, variables = [], hasTrigger = true, secureTexts = [], editingVariableId, overlayProfileId, editingOverlay = false, onOverlayEditingChange, onOverlayRemoved, onSecureTextChange, onDb, onChange }: {
   steps: Step[];
   gameExe: string;
   states: ProfileState[];
   overlays: OverlayTarget[];
   scripts: Script[];
+  folderId: string;
   variables?: Variable[];
   hasTrigger?: boolean;
   secureTexts?: SecureTextDraft[];
@@ -253,7 +255,7 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
         canMove={() => !editingOverlay} onReorder={(from, to, after) => onChange(moveItem(steps, (_step, index) => String(index), from, to, after))}
         empty={<div className="steps-empty">No steps yet</div>}>
         {(step, i) => (
-          <StepRow step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={removeOverlayTargets} onSecureTextChange={onSecureTextChange} onDb={onDb}
+          <StepRow folderId={folderId} step={step} index={i} total={steps.length} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} hasTrigger={hasTrigger} secureTexts={secureTexts} editingVariableId={editingVariableId} overlayProfileId={overlayProfileId} editingOverlay={editingOverlay} onOverlayEditingChange={onOverlayEditingChange} onOverlayRemoved={removeOverlayTargets} onSecureTextChange={onSecureTextChange} onDb={onDb}
             onChange={next => updateStep(i, next)}
             onDelete={() => removeStep(i)}
             onMove={direction => moveStep(i, direction)} />
@@ -266,8 +268,8 @@ export function BehaviorStepsEditor({ steps, gameExe, states, overlays, scripts,
       </div>
       {addingAction && <BehaviorActionPicker hasTrigger={hasTrigger} canSecureSend={!!onSecureTextChange}
         onClose={closeActions} onSelect={type => { addStep(newStep(type, states, overlays, scripts)); closeActions(); }} />}
-      {savingAsVariable && <VariableModal variables={variables} fixedType="behavior" initialBehavior={steps} initialSecureTexts={secureTexts}
-        renderBehavior={props => <BehaviorStepsEditor {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
+      {savingAsVariable && <VariableModal folderId={folderId} variables={variables} fixedType="behavior" initialBehavior={steps} initialSecureTexts={secureTexts}
+        renderBehavior={props => <BehaviorStepsEditor folderId={folderId} {...props} gameExe={gameExe} states={states} overlays={overlays} scripts={scripts} variables={variables} overlayProfileId={overlayProfileId} onDb={onDb} />}
         onClose={() => setSavingAsVariable(false)} onSaved={(variable, db) => {
           onDb(db);
           onChange([{ type: "behavior", variableId: variable.id }]);

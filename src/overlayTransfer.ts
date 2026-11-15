@@ -40,7 +40,7 @@ export function prepareOverlayMove(db: Database, source: OverlaySource, gameId: 
   const selection = { ...profile, hotkeys: [], events: [], scripts: [], states: [],
     overlay_groups: source.kind === "overlay" ? [source.group] : [], overlay_items: items,
   };
-  const portable = carryReferencedOverlayParts(selection, [...target.profiles, ...origin!.profiles], target.profiles, db.variables);
+  const portable = carryReferencedOverlayParts(selection, [...target.profiles, ...origin!.profiles], target.profiles, target.variables);
   const groups = keepGroup && !destinationGroups.some(group => group.id === keepGroup.id)
     ? [...profile.overlay_groups, keepGroup] : profile.overlay_groups;
   const withOverlays = { ...profile,
@@ -48,5 +48,5 @@ export function prepareOverlayMove(db: Database, source: OverlaySource, gameId: 
     overlay_items: [...profile.overlay_items.filter(item => !items.some(moved => moved.id === item.id)),
       ...portable.overlay_items.filter(item => items.some(moved => moved.id === item.id) || !profile.overlay_items.some(existing => existing.id === item.id))],
   };
-  return carryReferencedStates(withOverlays, origin!.states, target.states, db.variables);
+  return carryReferencedStates(withOverlays, origin!.states, target.states, target.variables);
 }

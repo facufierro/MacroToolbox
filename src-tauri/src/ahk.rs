@@ -327,6 +327,7 @@ pub struct ProfileContext<'a> {
     pub siblings: &'a [Profile],
     pub profile: &'a Profile,
     pub exe: &'a str,
+    pub variables: &'a [config::Variable],
 }
 
 fn runtime_binding(trigger: &str, steps: Vec<behavior::Action>, toggle: bool, allow_extra: Option<bool>, section: &str) -> serde_json::Value {
@@ -356,7 +357,7 @@ pub fn subfolder_controls(game: &config::Game) -> Vec<serde_json::Value> {
 }
 
 /// Serialize validated behavior data for the persistent input host.
-pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable]) -> Result<String, String> {
+pub fn runtime_config(profiles: &[ProfileContext]) -> Result<String, String> {
     use serde_json::json;
     use std::hash::{Hash, Hasher};
     let mut ordered: Vec<_> = profiles.iter().collect();
@@ -365,6 +366,7 @@ pub fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable
     for ap in ordered {
         if ap.exe.trim().is_empty() { continue; }
         let profile = ap.profile;
+        let variables = ap.variables;
         let mut bindings = Vec::new();
         let mut hotkeys = Vec::new();
         for hotkey in config::resolve_profile_hotkeys(ap.siblings, profile).into_iter().filter(|_| profile.armed && !profile.hotkeys_disabled) {
@@ -1739,13 +1741,41 @@ SpinHold(ms) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_resolves_same_variable_ids_independently_for_each_folder() {
+        let mut db = config::decode_db(serde_json::json!({"version":16,"settings":{"ahk_exe":""},"scopes":[
+            {"id":"a","name":"A","exe":"a.exe","variables":[{"id":"delay","name":"Delay","value":100}],
+                "profiles":[{"id":"a-keys","name":"A","armed":true,"hotkeys":[{"trigger":"f1","behavior":"sleep($delay)"}]}]},
+            {"id":"b","name":"B","exe":"b.exe","variables":[{"id":"delay","name":"Delay","value":900}],
+                "profiles":[{"id":"b-keys","name":"B","armed":true,"hotkeys":[{"trigger":"f1","behavior":"sleep($delay)"}]}]}
+        ]})).unwrap();
+        fn configuration(db: &config::Database) -> serde_json::Value {
+            let contexts: Vec<_> = db.games.iter().flat_map(|game| game.profiles.iter().map(move |profile| ProfileContext {
+                siblings:&game.profiles,profile,exe:&game.exe,variables:&game.variables,
+            })).collect();
+            serde_json::from_str(&super::runtime_config(&contexts).unwrap()).unwrap()
+        }
+        let before = configuration(&db);
+        assert_eq!(before[0]["bindings"][0]["steps"][0]["ms"],"100");
+        assert_eq!(before[1]["bindings"][0]["steps"][0]["ms"],"900");
+        db.games[0].variables[0].value = 200.0.into();
+        let after = configuration(&db);
+        assert_eq!(after[0]["bindings"][0]["steps"][0]["ms"],"200");
+        assert_eq!(after[1],before[1]);
+    }
+    fn runtime_config(profiles: &[ProfileContext], variables: &[config::Variable]) -> Result<String, String> {
+        let contexts: Vec<_> = profiles.iter().map(|context| ProfileContext {
+            siblings: context.siblings, profile: context.profile, exe: context.exe, variables,
+        }).collect();
+        super::runtime_config(&contexts)
+    }
     fn profile(source: &str) -> Profile {
         serde_json::from_value(serde_json::json!({"id":"profile","name":"Keys","armed":true,"hotkeys":[{"trigger":"rctrl o","behavior":source}]})).unwrap()
     }
     #[test]
     fn every_composition_uses_the_same_structured_execution_contract() {
         let profile = profile(r#"[{"type":"parallel","steps":[{"type":"hold","key":"LButton"},{"type":"repeat","key":"a","interval":"100","hold":"6"}]}]"#);
-        let profiles = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }];
+        let profiles = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }];
         let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles, &[]).unwrap()).unwrap();
         let binding = &config[0]["bindings"][0];
         assert_eq!(binding["steps"][0]["type"], "parallel");
@@ -1760,7 +1790,7 @@ mod tests {
         profile.hotkeys[0].cancel_on_other_behavior = true;
         profile.hotkeys[0].trigger = serde_json::from_value(serde_json::json!({"variable":"shortcuts"})).unwrap();
         let variables = [serde_json::from_value(serde_json::json!({"id":"shortcuts","name":"Shortcuts","type":"triggers","value":["e","rctrl e"]})).unwrap()];
-        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let contexts = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
         let expected = serde_json::to_value(behavior::parse(&profile.hotkeys[0].behavior).unwrap()).unwrap();
         for binding in data[0]["bindings"].as_array().unwrap() {
@@ -1770,13 +1800,13 @@ mod tests {
         }
         let cancelled_revision = data[0]["sectionRevisions"]["hotkeys"].clone();
         profile.hotkeys[0].cancel_triggers.clear();
-        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let contexts = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
         assert_eq!(data[0]["bindings"][0]["cancelTriggers"], serde_json::json!([]));
         assert_ne!(data[0]["sectionRevisions"]["hotkeys"], cancelled_revision);
         let enabled_revision = data[0]["sectionRevisions"]["hotkeys"].clone();
         profile.hotkeys[0].cancel_on_other_behavior = false;
-        let contexts = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+        let contexts = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
         assert_eq!(data[0]["bindings"][0]["cancelOnOtherBehavior"], false);
         assert_ne!(data[0]["sectionRevisions"]["hotkeys"], enabled_revision);
@@ -1787,7 +1817,7 @@ mod tests {
             let source = if toggle { r#"[{"type":"sequence","steps":[{"type":"toggle","key":"rshift w"}]}]"# } else { "hold(rshift w)" };
             let mut profile = profile(source);
             profile.hotkeys[0].allow_extra_modifiers = Some(false);
-            let profiles = [ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
+            let profiles = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe: "Game.exe" }];
             let config: serde_json::Value = serde_json::from_str(&runtime_config(&profiles, &[]).unwrap()).unwrap();
             let binding = &config[0]["bindings"][0];
             assert_eq!(binding["key"].as_str().unwrap().starts_with("$*>^"), toggle);
@@ -1800,7 +1830,7 @@ mod tests {
         let mut profile = profile("press(x)");
         profile.toggle_hotkeys_key = Some("lctrl lshift `".into());
         let profiles = vec![profile];
-        let contexts = [ProfileContext { siblings: &profiles, profile: &profiles[0], exe: "Game.exe" }];
+        let contexts = [ProfileContext { variables: &[], siblings: &profiles, profile: &profiles[0], exe: "Game.exe" }];
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &[]).unwrap()).unwrap();
         let control = data[0]["bindings"].as_array().unwrap().iter().find(|binding| binding["toggle"] == true).unwrap();
         assert_eq!(control["key"], "$*<^<+SC029");
@@ -1828,8 +1858,8 @@ mod tests {
     #[test]
     fn changes_update_data_without_replacing_the_shared_hook_script() {
         let first = profile("press(x)"); let second = profile("press(y)");
-        let a = [ProfileContext { siblings: std::slice::from_ref(&first), profile: &first, exe:"Game.exe" }];
-        let b = [ProfileContext { siblings: std::slice::from_ref(&second), profile: &second, exe:"Game.exe" }];
+        let a = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&first), profile: &first, exe:"Game.exe" }];
+        let b = [ProfileContext { variables: &[], siblings: std::slice::from_ref(&second), profile: &second, exe:"Game.exe" }];
         assert_eq!(input_script(), input_script());
         assert_ne!(runtime_config(&a, &[]).unwrap(), runtime_config(&b, &[]).unwrap());
     }
@@ -1840,7 +1870,7 @@ mod tests {
         base.events = vec![config::BehaviorEvent { event: "focus_gained".into(), behavior: "sleep($buff)".into() }];
         let mut child = profile(""); child.id = "child".into(); child.parent_id = Some(base.id.clone()); child.hotkeys.clear();
         let siblings = [base, child];
-        let contexts: Vec<_> = siblings.iter().map(|profile| ProfileContext { siblings: &siblings, profile, exe: "Game.exe" }).collect();
+        let contexts: Vec<_> = siblings.iter().map(|profile| ProfileContext { variables: &[], siblings: &siblings, profile, exe: "Game.exe" }).collect();
         let mut variables = [config::Variable { id: "buff".into(), name: "buff timer".into(), value: 5000.0.into() }];
         let before: serde_json::Value = serde_json::from_str(&runtime_config(&contexts, &variables).unwrap()).unwrap();
         for data in before.as_array().unwrap() {
@@ -1869,7 +1899,7 @@ mod tests {
         base.hotkeys[0].trigger = serde_json::from_value(serde_json::json!({"variable":"casts"})).unwrap();
         let mut child = profile(""); child.id = "child".into(); child.parent_id = Some(base.id.clone()); child.hotkeys.clear();
         let siblings = [base, child];
-        let contexts: Vec<_> = siblings.iter().map(|profile| ProfileContext { siblings: &siblings, profile, exe: "Game.exe" }).collect();
+        let contexts: Vec<_> = siblings.iter().map(|profile| ProfileContext { variables: &[], siblings: &siblings, profile, exe: "Game.exe" }).collect();
         let mut variables: Vec<config::Variable> = serde_json::from_value(serde_json::json!([
             {"id":"casts","name":"Cast shortcuts","type":"triggers","value":["lctrl 1","lctrl 2","lctrl 3"]}
         ])).unwrap();
@@ -1902,7 +1932,7 @@ mod tests {
         let mut overridden = siblings.clone();
         let mut replacement = overridden[0].hotkeys[0].clone(); replacement.behavior = "press(v)".into();
         overridden[1].hotkeys.push(replacement);
-        let context = [ProfileContext { siblings: &overridden, profile: &overridden[1], exe: "Game.exe" }];
+        let context = [ProfileContext { variables: &[], siblings: &overridden, profile: &overridden[1], exe: "Game.exe" }];
         let data: serde_json::Value = serde_json::from_str(&runtime_config(&context, &variables).unwrap()).unwrap();
         assert_eq!(data[0]["bindings"][0]["steps"][0]["key"], "v");
     }
@@ -1918,7 +1948,7 @@ mod tests {
         // Reopening saved settings must preserve the unassigned copy without registering it.
         let mut profile: Profile = serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
         let data = |profile: &Profile| -> serde_json::Value {
-            let contexts = [ProfileContext { siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }];
+            let contexts = [ProfileContext { variables: &[], siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }];
             serde_json::from_str(&runtime_config(&contexts, &[]).unwrap()).unwrap()
         };
         let before = data(&profile);
@@ -1938,7 +1968,7 @@ mod tests {
     fn secure_send_bindings_contain_references_without_retrieving_passwords() {
         let source = r#"[{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]"#;
         let profile = profile(source);
-        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext {
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[],
             siblings:std::slice::from_ref(&profile),profile:&profile,exe:"Game.exe"
         }], &[]).unwrap()).unwrap();
         assert_eq!(data[0]["bindings"][0]["steps"], serde_json::from_str::<serde_json::Value>(source).unwrap());
@@ -1948,12 +1978,12 @@ mod tests {
     #[test]
     fn invalid_active_behaviors_fail_before_activation() {
         let profile = profile("repeat(a,0)");
-        assert!(runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).is_err());
+        assert!(runtime_config(&[ProfileContext { variables: &[],siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).is_err());
     }
     #[test]
     fn disabled_drafts_do_not_register_or_validate_native_bindings() {
         let mut profile = profile("future(action)"); profile.armed = false;
-        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext {siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).unwrap()).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[],siblings:std::slice::from_ref(&profile),profile:&profile,exe:"*"}], &[]).unwrap()).unwrap();
         assert!(data[0]["bindings"].as_array().unwrap().is_empty());
     }
     #[test]
@@ -1981,11 +2011,11 @@ mod tests {
         for kind in ["hotkeys", "events", "scripts", "overlay"] {
             let mut profile = profile("press(x)"); profile.kind = kind.into();
             profile.overlay_items = vec![serde_json::from_value(serde_json::json!({"type":"text","id":"label","x":0,"y":0,"font_size":16,"color":"#fff","content":"Buff"})).unwrap()];
-            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
             assert_eq!(data[0]["overlay"], true);
             assert!(!data[0]["bindings"].as_array().unwrap().is_empty());
             profile.overlay_disabled = true;
-            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
+            let data: serde_json::Value = serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[], siblings: std::slice::from_ref(&profile), profile: &profile, exe:"Game.exe" }], &[]).unwrap()).unwrap();
             assert_eq!(data[0]["overlay"], false);
         }
     }
@@ -1994,7 +2024,7 @@ mod tests {
     fn diagnostic_labels_do_not_change_behavior_section_revisions() {
         let mut profile = profile("press(x)");
         let configuration = |profile: &Profile| -> serde_json::Value {
-            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }], &[]).unwrap()).unwrap()
+            serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[], siblings: std::slice::from_ref(profile), profile, exe: "Game.exe" }], &[]).unwrap()).unwrap()
         };
         let before = configuration(&profile);
         profile.name = "Renamed profile".into();
@@ -2014,7 +2044,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"id":"launch","trigger":"launch","source":"code"})).unwrap(),
         ];
         let configuration = |profile: &Profile| -> serde_json::Value {
-            serde_json::from_str(&runtime_config(&[ProfileContext { siblings: std::slice::from_ref(profile), profile, exe:"Game.exe" }], &[]).unwrap()).unwrap()
+            serde_json::from_str(&runtime_config(&[ProfileContext { variables: &[], siblings: std::slice::from_ref(profile), profile, exe:"Game.exe" }], &[]).unwrap()).unwrap()
         };
         let before = configuration(&profile);
         profile.hotkeys_disabled = true;
