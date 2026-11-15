@@ -89,7 +89,7 @@ export interface OverlayBar {
   name: string;
   x: number;
   y: number;
-  layout: "row" | "column";
+  direction: "right" | "left" | "down" | "up";
   gap: number;
   group_ids: string[];
 }

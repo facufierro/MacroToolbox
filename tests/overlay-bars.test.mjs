@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assignOverlayBar, saveOverlayBar, updateOverlayBars, getOverlayBarOffsets } from "../src/overlayBars.ts";
+import { assignOverlayBar, saveOverlayBar, updateOverlayBars, getOverlayBarOffsets, readOverlayBar } from "../src/overlayBars.ts";
 import { removeOverlayGroup } from "../src/overlayItems.ts";
 
-const bar = (id, group_ids = []) => ({ id, name: id, x: 10, y: 20, layout: "row", gap: 8, group_ids });
+const bar = (id, group_ids = []) => ({ id, name: id, x: 10, y: 20, direction: "right", gap: 8, group_ids });
+
+test("legacy exported axes become growth directions without retaining a second layout field", () => {
+  for (const [layout,direction] of [["row","right"],["column","down"]]) {
+    const {direction:_direction,...base}=bar("old",["first","second"]);
+    const converted=readOverlayBar({...base,layout});
+    assert.deepEqual(converted,{...base,direction});
+    assert.equal("layout" in converted,false);
+  }
+  for (const direction of ["right","left","down","up"]) {
+    const current={...bar("current"),direction};
+    assert.deepEqual(readOverlayBar(current),current);
+  }
+  assert.throws(()=>readOverlayBar({layout:"diagonal"}),/Invalid overlay bar direction/);
+});
 
 test("assigning a bar keeps one membership and retains its existing order", () => {
   const source = [bar("a", ["one", "two"]), bar("b", ["three"])];
@@ -32,17 +46,20 @@ test("bar gaps measure complete overlays including centered overflow and free-po
   const extents = [{ id: "icon-timer", left: -16, right: 48, top: 0, bottom: 60 },
     { id: "wide", left: -40, right: 100, top: -10, bottom: 70 },
     { id: "free", left: 20, right: 60, top: 15, bottom: 95 }];
-  for (const layout of ["row", "column"]) for (const gap of [0, 8, 42]) {
-    const offsets = getOverlayBarOffsets(extents, layout, gap);
+  for (const direction of ["right", "left", "down", "up"]) for (const gap of [0, 8, 42]) {
+    const offsets = getOverlayBarOffsets(extents, direction, gap);
     assert.equal(offsets[extents[0].id], 0);
     for (let i = 1; i < extents.length; i++) {
       const previous = extents[i - 1], current = extents[i];
-      assert.equal(offsets[current.id] + current[layout === "row" ? "left" : "top"]
-        - offsets[previous.id] - previous[layout === "row" ? "right" : "bottom"], gap);
+      const horizontal = direction === "right" || direction === "left";
+      const reverse = direction === "left" || direction === "up";
+      const previousEdge = offsets[previous.id] + previous[horizontal ? reverse ? "left" : "right" : reverse ? "top" : "bottom"];
+      const currentEdge = offsets[current.id] + current[horizontal ? reverse ? "right" : "left" : reverse ? "bottom" : "top"];
+      assert.equal(reverse ? previousEdge - currentEdge : currentEdge - previousEdge, gap);
     }
   }
-  assert.deepEqual(getOverlayBarOffsets([], "row", 8), {});
-  assert.equal(getOverlayBarOffsets([extents[2]], "row", 8).free, 0);
+  assert.deepEqual(getOverlayBarOffsets([], "right", 8), {});
+  assert.equal(getOverlayBarOffsets([extents[2]], "right", 8).free, 0);
 });
 
 test("deleting the last definition of an overlay removes its bar membership", () => {

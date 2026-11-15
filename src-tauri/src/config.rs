@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// The db.json schema version. Bumped when the shape changes so `load_db` can migrate
-/// older files. v16 moves shared variables into their owning folders.
-pub const CURRENT_DB_VERSION: u32 = 16;
+/// older files. v17 upgrades bar axes to explicit growth directions.
+pub const CURRENT_DB_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Database {
@@ -158,9 +158,21 @@ pub struct OverlayBar {
     pub name: String,
     pub x: f64,
     pub y: f64,
-    pub layout: String,
+    #[serde(alias = "layout")]
+    pub direction: OverlayBarDirection,
     pub gap: u32,
     pub group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OverlayBarDirection {
+    #[serde(alias = "row")]
+    Right,
+    Left,
+    #[serde(alias = "column")]
+    Down,
+    Up,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,7 +224,7 @@ impl Game {
         let mut members = HashSet::new();
         for bar in &self.overlay_bars {
             if bar.id.trim().is_empty() || bar.name.trim().is_empty() || !bars.insert(&bar.id)
-                || !bar.x.is_finite() || !bar.y.is_finite() || !matches!(bar.layout.as_str(), "row" | "column") {
+                || !bar.x.is_finite() || !bar.y.is_finite() {
                 return Err("Invalid or duplicate overlay bar.".into());
             }
             for id in &bar.group_ids {
@@ -699,8 +711,8 @@ pub fn decode_db(mut value: serde_json::Value) -> Result<Database, String> {
             serde_json::from_value(value).map_err(|e| e.to_string())?
         }
         // These versions share the folder-owned profile shape. Defaults, typed
-        // variable deserialization, and normalization below upgrade their fields.
-        3..=15 => {
+        // variable and bar direction deserialization, and normalization below upgrade their fields.
+        3..=16 => {
             let mut db: Database = serde_json::from_value(value).map_err(|e| e.to_string())?;
             db.version = CURRENT_DB_VERSION;
             db
@@ -1272,7 +1284,7 @@ mod tests {
             assert_eq!(group.layout,"column");
             let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
             assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
-            db.games[0].overlay_bars.push(super::OverlayBar {id:"bar".into(),name:"Buffs".into(),x:15.0,y:70.0,layout:"row".into(),gap:37,group_ids:vec!["g".into()]});
+            db.games[0].overlay_bars.push(super::OverlayBar {id:"bar".into(),name:"Buffs".into(),x:15.0,y:70.0,direction:super::OverlayBarDirection::Right,gap:37,group_ids:vec!["g".into()]});
             super::save_db(&path,&db).unwrap();
             let saved = std::fs::read(&path).unwrap();
             let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1301,6 +1313,66 @@ mod tests {
     }
 
     #[test]
+    fn bar_growth_migrates_legacy_axes_across_skipped_versions_and_reopens_once() {
+        for version in [3,15,16] {
+            let path = std::env::temp_dir().join(format!("macrotoolbox-bar-growth-{version}-{}.json",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let mut fixture = serde_json::json!({"version":version,"settings":{"ahk_exe":"ahk.exe","open_to_tray":true},
+                "scopes":[{"id":"game","name":"Game","exe":"game.exe","profiles":[{"id":"p","name":"Spells","armed":true,
+                    "hotkeys":[{"trigger":"f1","behavior":"sleep($delay);startoverlay(a)"}],
+                    "overlay_groups":[{"id":"a","name":"A"},{"id":"b","name":"B"}]}],
+                    "overlay_bars":[{"id":"horizontal","name":"Horizontal","x":15.5,"y":2,"layout":"row","gap":0,"group_ids":["b"]},
+                        {"id":"vertical","name":"Vertical","x":7,"y":20,"layout":"column","gap":8,"group_ids":["a"]}]}]});
+            let variables = serde_json::json!([{"id":"delay","name":"Delay","value":150}]);
+            if version < 16 { fixture["variables"] = variables; } else { fixture["scopes"][0]["variables"] = variables; }
+            let source = fixture.to_string(); std::fs::write(&path,&source).unwrap();
+            let mut db = load_db(&path).unwrap();
+            let bars = &db.games[0].overlay_bars;
+            assert_eq!(db.version,super::CURRENT_DB_VERSION);
+            assert_eq!(bars[0].direction,super::OverlayBarDirection::Right);
+            assert_eq!(bars[1].direction,super::OverlayBarDirection::Down);
+            assert_eq!((bars[0].x,bars[0].y,bars[0].gap),(15.5,2.0,0));
+            assert_eq!(bars[0].group_ids,["b"]); assert_eq!(bars[1].group_ids,["a"]);
+            assert_eq!(db.games[0].variables[0].id,"delay");
+            assert_eq!(crate::behavior::resolve(&db.games[0].profiles[0].hotkeys[0].behavior,&db.games[0].variables,Some("f1")).unwrap(),vec![
+                crate::behavior::Action::Sleep { ms:"150".into() },
+                crate::behavior::Action::Startoverlay { item_ids:vec!["a".into()],restart:false },
+            ]);
+            assert!(db.settings.open_to_tray);
+            let backup = std::path::PathBuf::from(format!("{}.v{version}.bak",path.display()));
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            let saved = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+            assert_eq!(value["scopes"][0]["overlay_bars"][0]["direction"],"right");
+            assert!(value["scopes"][0]["overlay_bars"][0].get("layout").is_none());
+            load_db(&path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(),saved);
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(),modified);
+            for direction in [super::OverlayBarDirection::Left,super::OverlayBarDirection::Up] {
+                db.games[0].overlay_bars[0].direction = direction;
+                super::save_db(&path,&db).unwrap();
+                assert_eq!(load_db(&path).unwrap().games[0].overlay_bars[0].direction,direction);
+            }
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(),source);
+            std::fs::remove_file(path).unwrap(); std::fs::remove_file(backup).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_bar_direction_upgrade_preserves_the_original_and_backup() {
+        let directory = std::env::temp_dir().join(format!("macrotoolbox-bar-growth-failure-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap(); let path = directory.join("db.json");
+        let source = r#"{"version":16,"settings":{"ahk_exe":""},"scopes":[{"id":"game","name":"Game","profiles":[{"id":"p","name":"P","overlay_groups":[{"id":"g","name":"G"}]}],"overlay_bars":[{"id":"bar","name":"Bar","x":0,"y":0,"layout":"row","gap":0,"group_ids":["g"]}]}]}"#;
+        std::fs::write(&path,source).unwrap(); std::fs::create_dir(directory.join("db.json.tmp")).unwrap();
+        assert!(load_db(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),source);
+        assert_eq!(std::fs::read_to_string(directory.join("db.json.v16.bak")).unwrap(),source);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn overlay_bars_reject_ambiguous_membership_and_preserve_order() {
         let mut game: super::Game = serde_json::from_value(serde_json::json!({"id":"g","name":"Game","profiles":[
             {"id":"p","name":"Spells","overlay_groups":[{"id":"a","name":"A"},{"id":"b","name":"B"}]}],
@@ -1316,9 +1388,8 @@ mod tests {
         game.overlay_bars.push(second);
         assert!(game.validate_overlay_bars().is_err());
         game.overlay_bars.pop();
-        game.overlay_bars[0].layout = "diagonal".into();
-        assert!(game.validate_overlay_bars().is_err());
-        game.overlay_bars[0].layout = "row".into();
+        let invalid = serde_json::json!({"id":"bar","name":"Buffs","x":0,"y":0,"direction":"diagonal","gap":0,"group_ids":[]});
+        assert!(serde_json::from_value::<super::OverlayBar>(invalid).is_err());
         game.profiles.clear(); game.remove_unavailable_bar_members();
         assert!(game.overlay_bars[0].group_ids.is_empty());
         assert!(game.validate_overlay_bars().is_ok());
