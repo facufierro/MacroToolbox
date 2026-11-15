@@ -9,6 +9,8 @@ import { api } from "./api";
 import { useErrorReporter } from "./AppConsole";
 import { CloudSettings } from "./CloudSettings";
 import { VariablesView } from "./VariablesView";
+import { SettingsUpdate } from "./SettingsUpdate";
+import { findUpdate, type AvailableUpdate } from "./updates";
 import { TriggerInput } from "./TriggerInput";
 import { triggerIdentity, triggerLabel, isTriggerValid, readTriggerList } from "./triggers";
 import { SortableList } from "./SortableList";
@@ -1513,20 +1515,12 @@ function SettingsView({ db, onDb, onCheckUpdates }: {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
-function semverGt(a: string, b: string): boolean {
-  const parse = (v: string) => v.replace(/^v/, "").split(".").map(Number);
-  const [aMaj, aMin, aPat] = parse(a);
-  const [bMaj, bMin, bPat] = parse(b);
-  if (aMaj !== bMaj) return aMaj > bMaj;
-  if (aMin !== bMin) return aMin > bMin;
-  return aPat > bPat;
-}
-
 export default function App() {
   const reportError = useErrorReporter();
   const [db, setDb] = useState<Database | null>(null);
   const [disabledProfiles, setDisabledProfiles] = useState<ReadonlySet<string>>(new Set());
   const [loadFailed, setLoadFailed] = useState(false);
+  const [needsUpdate, setNeedsUpdate] = useState(false);
   const [selection, setSelection] = useState<Selection>({ kind: "empty" });
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -1535,7 +1529,7 @@ export default function App() {
   const [statesFor, setStatesFor] = useState<string | null>(null);
   const collapseInited = useRef(false);
   const [modal, setModal] = useState<Modal | null>(null);
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; downloadUrl: string | null; notesUrl: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<AvailableUpdate | null>(null);
   const [updating, setUpdating] = useState(false);
   // The version the user dismissed, so the periodic re-check doesn't keep re-surfacing it.
   const dismissedUpdate = useRef<string | null>(null);
@@ -1548,6 +1542,9 @@ export default function App() {
   const loadDb = useCallback(async () => {
     setLoadFailed(false);
     try {
+      const requiresUpdate = await api.settingsRequireUpdate();
+      setNeedsUpdate(requiresUpdate);
+      if (requiresUpdate) { setDb(null); return; }
       const data = await api.getDatabase();
       const legacyWidth = Number(localStorage.getItem("libW"));
       if (data.settings.library_width == null && legacyWidth >= 240 && legacyWidth <= 520) {
@@ -1591,17 +1588,10 @@ export default function App() {
   // the banner) if one is available, null when up to date; throws on network failure. A
   // manual check (the Settings button) ignores a previous dismissal.
   const checkUpdate = useCallback(async (manual = false): Promise<string | null> => {
-    const current = await api.getAppVersion();
-    const data = await (await fetch("https://api.github.com/repos/facufierro/MacroToolbox/releases/latest")).json();
-    const latest: string = data.tag_name ?? "";
-    if (!latest || !semverGt(latest, current) || (!manual && dismissedUpdate.current === latest)) return null;
-    const asset = (data.assets as { name: string; browser_download_url: string }[])
-      ?.find(a => a.name.endsWith("-setup.exe") || a.name.endsWith(".exe"));
-    setUpdateInfo({
-      version: latest,
-      downloadUrl: asset?.browser_download_url ?? null,
-      notesUrl: data.html_url,
-    });
+    const available = await findUpdate(await api.getAppVersion());
+    if (!available || (!manual && dismissedUpdate.current === available.version)) return null;
+    const latest = available.version;
+    setUpdateInfo(available);
     // The app usually sits in the tray, so also announce the update with a system
     // notification — the in-app banner is invisible until the window is opened. A manual
     // check skips the toast: the user is already looking at the banner.
@@ -1623,6 +1613,11 @@ export default function App() {
 
   useEffect(() => {
     void loadDb().catch(reportError);
+  }, [loadDb, reportError]);
+
+  const ready = db !== null;
+  useEffect(() => {
+    if (!ready) return;
     const poll = async () => {
       try { setOpenExes(new Set((await api.listOpenExecutables()).map(e => e.toLowerCase()))); } catch { /* ignore */ }
     };
@@ -1657,7 +1652,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisible);
       unlistenShown.then(f => f());
     };
-  }, [loadDb, checkUpdate, reportError]);
+  }, [ready, checkUpdate]);
 
   // Suppress the browser's native right-click menu (this is a desktop app), but keep it in
   // text fields so paste still works.
@@ -1928,6 +1923,7 @@ export default function App() {
     } catch (e) { reportError(`Error saving event: ${e}`); }
   }
 
+  if (needsUpdate) return <SettingsUpdate />;
   if (!db) {
     return <div className="loading">{loadFailed
       ? <IconButton icon="rotate" label="Retry" className="btn btn--ghost" onClick={() => { void loadDb().catch(reportError); }} />

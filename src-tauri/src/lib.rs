@@ -341,6 +341,12 @@ fn get_window_title(hwnd: winapi::shared::windef::HWND) -> String {
 }
 
 #[tauri::command]
+fn settings_require_update(state: State<AppState>) -> Result<bool, String> {
+    let _lock = state.db_access.lock().unwrap();
+    config::requires_newer_app(&state.db_path)
+}
+
+#[tauri::command]
 fn get_database(state: State<AppState>) -> Result<Database, String> {
     let _lock = state.db_access.lock().unwrap();
     config::load_db(&state.db_path)
@@ -2009,8 +2015,8 @@ pub fn run() {
                 config::save_db(&db_path, &Database::default())
                     .expect("failed to write initial db");
             }
-            let startup_settings = match config::load_db(&db_path) {
-                Ok(db) => db.settings,
+            let startup_settings = match config::load_startup_settings(&db_path) {
+                Ok(settings) => settings,
                 Err(error) => {
                     #[cfg(target_os = "windows")]
                     {
@@ -2035,6 +2041,11 @@ pub fn run() {
                 #[cfg(target_os = "windows")]
                 window_transforms: Mutex::new(HashMap::new()),
             });
+            let Some(startup_settings) = startup_settings else {
+                diagnostics::record(app.handle(), diagnostics::Level::Warn, "Startup", "Settings require a newer MacroToolbox version; opening the updater.".into());
+                show_main_window(app.handle());
+                return Ok(());
+            };
             app.manage(firebase::Firebase::new(data_dir).map_err(std::io::Error::other)?);
             firebase::Firebase::start(app.handle().clone());
 
@@ -2141,6 +2152,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            settings_require_update,
             get_database,
             diagnostics::get_console_entries,
             get_disabled_profiles,
