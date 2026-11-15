@@ -18,7 +18,7 @@ async function scenario() {
   };
   const folder = () => window.snapshot.scopes[0];
   const group = () => folder().subfolders[0];
-  const rows = () => [...get('.folder-group').querySelectorAll('.profile-row')];
+  const rows = () => [...get('.folder-group').querySelectorAll('.profile-row:not(.folder-variables)')];
   const subfolder = name => [...document.querySelectorAll('.profile-subfolder')].find(element => element.querySelector('.folder-group__name').textContent === name);
   const handle = name => get(`.drag-handle[aria-label="Move ${name}"]`);
   async function drag(source, target, {after = false, drop = true} = {}) {

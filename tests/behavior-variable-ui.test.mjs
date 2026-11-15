@@ -17,7 +17,7 @@ async function scenario() {
     element.dispatchEvent(new Event(element.tagName === 'SELECT' ? 'change' : 'input', { bubbles:true }));
     await wait();
   }
-  const variable = name => window.snapshot.db.variables.find(value => value.name === name);
+  const variable = name => window.snapshot.db.scopes[0].variables.find(value => value.name === name);
   const row = name => [...document.querySelectorAll('.variable-row')].find(value => value.querySelector('.variable-row__name').textContent === name);
   const add = async (label, section = get('form.modal .variable-behavior-editor > .steps-section')) => {
     section.querySelector(':scope > .step-add-btns > [aria-label="Add action"]').click(); await wait();
@@ -107,7 +107,7 @@ async function scenario() {
     const importedSteps = flat(JSON.parse(window.expanded(imported.profile.hotkeys[0].behavior, imported.variables)));
     check('profile import remaps targets inside shared definitions with the imported entities', importedSteps.find(step=>step.type==='state').stateId === imported.profile.states[0].id && importedSteps.find(step=>step.type==='script').scriptId === imported.profile.scripts[0].id && importedSteps.find(step=>step.type==='startoverlay').itemIds[0] === imported.profile.overlay_groups[0].id && imported.profile.states[0].id !== 'state-old');
     check('profile import remaps every selected overlay target', importedSteps.find(step=>step.type==='startoverlay').itemIds.length === 2 && importedSteps.find(step=>step.type==='startoverlay').itemIds[1] === imported.profile.overlay_items[0].id);
-    window.importData = {type:'scope',data:window.snapshot.db.scopes[0],variables:window.snapshot.db.variables};
+    window.importData = {type:'scope',data:window.snapshot.db.scopes[0],variables:window.snapshot.db.scopes[0].variables};
     window.importData.data = {...window.importData.data,overlay_bars:[{id:'bar-old',name:'Buffs',x:15,y:70,layout:'row',gap:37,group_ids:['group-old']}]};
     const folderImport = await window.importFolder();
     const importedScope = folderImport.scopes[0], importedOwner = importedScope.profiles.find(profile=>profile.name==='Caller');
@@ -128,7 +128,7 @@ test('complete shared behaviors work through creation, editing, secure storage a
   const bundle = browserModules(['App.tsx'], {mocks,expose:{[join(root,'src/App.tsx')]:['HotkeyModal','EventModal','exportProfile','importProfile','importScope']}});
   const harness = `const modules={${bundle.declarations}},cache={};window.errors=[];window.reportError=error=>window.errors.push(String(error));window.credentials=new Map();window.passwordWrites=0;window.hotkeyDraftCounts=[];
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async getDatabase(){return structuredClone(window.snapshot.db);},async saveVariables(variables,secureTexts=[]){if(window.failSave)throw Error('simulated failure');for(const draft of secureTexts){window.credentials.set(draft.credentialId,draft.password);window.passwordWrites++;}return {...window.snapshot.db,variables};},async writeTextFile(path,text){window.exported=JSON.parse(text);},async readTextFile(){return JSON.stringify(window.importData);}}};return module.exports;}
+if(id==='./api'){module.exports={api:{async getDatabase(){return structuredClone(window.snapshot.db);},async saveVariables(gameId,variables,secureTexts=[]){if(window.failSave)throw Error('simulated failure');for(const draft of secureTexts){window.credentials.set(draft.credentialId,draft.password);window.passwordWrites++;}return {...window.snapshot.db,scopes:window.snapshot.db.scopes.map(scope=>scope.id===gameId?{...scope,variables}:scope)};},async writeTextFile(path,text){window.exported=JSON.parse(text);},async readTextFile(){return JSON.stringify(window.importData);}}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>window.reportError};return module.exports;}
 if(id==='@tauri-apps/plugin-dialog'){module.exports={open:async()=> 'fixture.hkm-profile',save:async()=> 'fixture.hkm-profile'};return module.exports;}
 if(${JSON.stringify(mocks)}.includes(id))return module.exports;
@@ -137,11 +137,11 @@ const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify
 const initial=[{type:'press',key:{variable:'keys'},onRelease:true},{type:'sleep',ms:{variable:'delay'}},{type:'mousepress',key:'LButton',doubleClick:true}];
 const profile={id:'caller',name:'Caller',kind:'hotkeys',parent_id:null,armed:false,states:[],scripts:[],overlay_items:[],overlay_groups:[],events:[],hotkeys:[{trigger:'f1',name:'Cast',behavior:JSON.stringify(initial),state_id:null}]};
 const source={...profile,id:'source',name:'Resources',hotkeys:[],scripts:[{id:'script-old',name:'Cast script',language:'python',code:''}],overlay_groups:[{id:'group-old',name:'Cast overlay'}],overlay_items:[{id:'item-old',type:'timer',group_id:'group-old',duration_ms:1000}]};
-function App(){const [db,onDb]=React.useState({version:7,variables:[{id:'delay',name:'Delay',type:'number',value:150},{id:'keys',name:'Cast keys',type:'keys',value:'rctrl shift n'}],scopes:[{id:'scope',name:'Game',exe:'Game.exe',states:[{id:'state-old',name:'Buff',duration_ms:null}],profiles:[profile,source]}]}),[mode,setMode]=React.useState('hotkey'),[revision,setRevision]=React.useState(0);window.snapshot={db};
-window.expanded=(source,variables=db.variables)=>expandBehavior(source,variables);window.makeExport=async()=>{await exportProfile(db.scopes[0].profiles[0],db.scopes[0],db.variables);return window.exported;};window.importOne=()=>importProfile([]);window.importFolder=()=>importScope([]);
-const common={variables:db.variables,onDb,onClose(){},gameExe:'Game.exe',states:db.scopes[0].states,overlays:[],scripts:[]};
+function App(){const [db,onDb]=React.useState({version:16,scopes:[{id:'scope',name:'Game',exe:'Game.exe',variables:[{id:'delay',name:'Delay',type:'number',value:150},{id:'keys',name:'Cast keys',type:'keys',value:'rctrl shift n'}],states:[{id:'state-old',name:'Buff',duration_ms:null}],profiles:[profile,source]}]}),[mode,setMode]=React.useState('hotkey'),[revision,setRevision]=React.useState(0);window.snapshot={db};
+window.expanded=(source,variables=db.scopes[0].variables)=>expandBehavior(source,variables);window.makeExport=async()=>{await exportProfile(db.scopes[0].profiles[0],db.scopes[0],db.scopes[0].variables);return window.exported;};window.importOne=()=>importProfile([]);window.importFolder=()=>importScope([]);
+const common={folderId:'scope',variables:db.scopes[0].variables,onDb,onClose(){},gameExe:'Game.exe',states:db.scopes[0].states,overlays:[],scripts:[]};
 return React.createElement(React.Fragment,null,React.createElement('nav',null,...['manage','hotkey','event'].map(value=>React.createElement('button',{key:value,id:value,onClick:()=>setMode(value)},value))),
-mode==='manage'?React.createElement(VariablesView,{db,onDb}):mode==='event'?React.createElement(EventModal,{...common,initial:{event:'focus_gained',behavior:db.scopes[0].profiles[0].hotkeys[0].behavior},eventKinds:['focus_gained'],onSave(){}}):React.createElement(HotkeyModal,{...common,key:revision,initial:db.scopes[0].profiles[0].hotkeys[0],onSave:(hotkey,drafts)=>{window.hotkeyDraftCounts.push(drafts.length);onDb({...db,scopes:[{...db.scopes[0],profiles:[{...db.scopes[0].profiles[0],hotkeys:[hotkey]},db.scopes[0].profiles[1]]}]});setRevision(revision+1);}}));}
+mode==='manage'?React.createElement(VariablesView,{folder:db.scopes[0],onDb}):mode==='event'?React.createElement(EventModal,{...common,initial:{event:'focus_gained',behavior:db.scopes[0].profiles[0].hotkeys[0].behavior},eventKinds:['focus_gained'],onSave(){}}):React.createElement(HotkeyModal,{...common,key:revision,initial:db.scopes[0].profiles[0].hotkeys[0],onSave:(hotkey,drafts)=>{window.hotkeyDraftCounts.push(drafts.length);onDb({...db,scopes:[{...db.scopes[0],profiles:[{...db.scopes[0].profiles[0],hotkeys:[hotkey]},db.scopes[0].profiles[1]]}]});setRevision(revision+1);}}));}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));(${scenario})();`;
   const logs = resolve(root,'logs'); mkdirSync(logs,{recursive:true});
   for(const width of [1000,800]) await t.test(`${width}px window`,async t=>{

@@ -34,15 +34,15 @@ async function scenario() {
     await set('[aria-label="Sleep (ms) source"]', "variable");
     check("creating from Sleep opens a Number variable with Save and use", get('[aria-label="Variable type"]').value === "number" && get('[aria-label="Variable type"]').disabled);
     await button("Cancel");
-    check("cancelling creation preserves the original Sleep value", window.snapshot.steps[0].ms === "100" && window.snapshot.db.variables.length === 0);
+    check("cancelling creation preserves the original Sleep value", window.snapshot.steps[0].ms === "100" && window.snapshot.db.scopes[0].variables.length === 0);
     await set('[aria-label="Sleep (ms) source"]', "variable");
     await set('[aria-label="Variable name"]', "buff timer");
     await set('[aria-label="Variable value"]', "");
     check("an empty number cannot be saved", get('button[type="submit"]').disabled);
     await set('[aria-label="Variable value"]', "5000");
     await button("Save and use");
-    const id = window.snapshot.db.variables[0].id;
-    check("Save and use persists a typed number and selects it for Sleep", window.snapshot.db.variables[0].type === "number" && window.snapshot.db.variables[0].value === 5000 && window.snapshot.steps[0].ms.variable === id);
+    const id = window.snapshot.db.scopes[0].variables[0].id;
+    check("Save and use persists a typed number and selects it for Sleep", window.snapshot.db.scopes[0].variables[0].type === "number" && window.snapshot.db.scopes[0].variables[0].value === 5000 && window.snapshot.steps[0].ms.variable === id);
     check("Sleep displays the selected variable's current value", get('[aria-label="Sleep (ms) value"]').textContent === "5000");
     await click("#save-behavior");
     check("saving and reopening the behavior preserves its explicit reference", window.snapshot.steps[0].ms.variable === id && get('[aria-label="Sleep (ms) variable"]').value === id);
@@ -64,15 +64,15 @@ async function scenario() {
     await set('[aria-label="Variable type"]', "keys");
     await set('input[placeholder="Key"]', "rctrl shift n");
     await button("Save");
-    check("Text and Keys variables save with their values intact", window.snapshot.db.variables[1].type === "text" && window.snapshot.db.variables[1].value === "$buff; hello\nworld" && window.snapshot.db.variables[2].type === "keys" && window.snapshot.db.variables[2].value === "rctrl shift n");
+    check("Text and Keys variables save with their values intact", window.snapshot.db.scopes[0].variables[1].type === "text" && window.snapshot.db.scopes[0].variables[1].value === "$buff; hello\nworld" && window.snapshot.db.scopes[0].variables[2].type === "keys" && window.snapshot.db.scopes[0].variables[2].value === "rctrl shift n");
     await button("Add variable");
     await set('[aria-label="Variable name"]', "failed save");
     window.failSave = true;
     await button("Save");
-    check("failed persistence retains the edit and does not create an unsaved library row", get('[aria-label="Variable name"]').value === "failed save" && window.snapshot.db.variables.length === 3 && window.errors.length === 1);
+    check("failed persistence retains the edit and does not create an unsaved library row", get('[aria-label="Variable name"]').value === "failed save" && window.snapshot.db.scopes[0].variables.length === 3 && window.errors.length === 1);
     window.failSave = false;
     await button("Cancel");
-    const variables = () => window.snapshot.db.variables;
+    const variables = () => window.snapshot.db.scopes[0].variables;
     const variableRow = name => [...document.querySelectorAll('.variable-row')].find(row => row.querySelector('.variable-row__name').textContent === name);
     const duplicate = async name => { variableRow(name).querySelector('[aria-label="Duplicate variable"]').click(); await wait(); };
     window.failSave = true;
@@ -156,14 +156,14 @@ test("variable creation, selection, editing and persistence work through actual 
   const bundle = browserModules(["BehaviorEditor.tsx", "VariablesView.tsx"]);
   const harness = `const modules={${bundle.declarations}},cache={};
 function load(id){if(cache[id])return cache[id].exports;const module={exports:{}};cache[id]=module;
-if(id==='./api'){module.exports={api:{async saveVariables(variables){window.saveCalls.push(structuredClone(variables));if(window.failSave)throw Error('simulated save failure');if(window.holdSave)await new Promise(resolve=>window.resumeSave=resolve);return {...window.snapshot.db,variables};}}};return module.exports;}
+if(id==='./api'){module.exports={api:{async saveVariables(gameId,variables){window.saveCalls.push(structuredClone(variables));if(window.failSave)throw Error('simulated save failure');if(window.holdSave)await new Promise(resolve=>window.resumeSave=resolve);return {...window.snapshot.db,scopes:window.snapshot.db.scopes.map(scope=>scope.id===gameId?{...scope,variables}:scope)};}}};return module.exports;}
 if(id==='./AppConsole'){module.exports={useErrorReporter:()=>error=>window.errors.push(String(error))};return module.exports;}
 const [code,dependencies]=modules[id];code(module,module.exports,name=>load(dependencies[name]),{env:{NODE_ENV:'production'}});return module.exports;}
 window.saveCalls=[];window.errors=[];
 const React=load(${JSON.stringify(bundle.react)}),ReactDOM=load(${JSON.stringify(bundle.client)}),{BehaviorStepsEditor}=load(${JSON.stringify(bundle.entry)}),{VariablesView}=load(${JSON.stringify(join(root, "src/VariablesView.tsx"))}),{areStepsValid,parseSteps,stepsToString}=load(${JSON.stringify(join(root, "src/behaviors.ts"))});
-function App(){const [db,onDb]=React.useState({version:7,variables:[],scopes:[{profiles:[{hotkeys:[],events:[]}]}]}),[steps,onChange]=React.useState([{type:'sleep',ms:'100'}]),[manage,setManage]=React.useState(false),[revision,setRevision]=React.useState(0),[hasTrigger,setHasTrigger]=React.useState(true);window.snapshot={db,steps};return React.createElement(React.Fragment,null,
+function App(){const [db,onDb]=React.useState({version:16,scopes:[{id:'scope',name:'Game',exe:'game.exe',states:[],variables:[],profiles:[{hotkeys:[],events:[]}]}]}),[steps,onChange]=React.useState([{type:'sleep',ms:'100'}]),[manage,setManage]=React.useState(false),[revision,setRevision]=React.useState(0),[hasTrigger,setHasTrigger]=React.useState(true);window.snapshot={db,steps};return React.createElement(React.Fragment,null,
 React.createElement('nav',null,React.createElement('button',{id:'manage',onClick:()=>setManage(true)},'Manage variables'),React.createElement('button',{id:'behavior',onClick:()=>setManage(false)},'Behavior'),React.createElement('button',{id:'event-mode',onClick:()=>setHasTrigger(false)},'Event mode')),
-manage?React.createElement(VariablesView,{db,onDb}):React.createElement('section',{id:'editor',className:'modal modal--wide'},React.createElement(BehaviorStepsEditor,{key:revision,steps,variables:db.variables,hasTrigger,onChange,onDb,gameExe:'',states:[],scripts:[],overlays:[]}),React.createElement('button',{id:'save-behavior',disabled:!areStepsValid(steps,db.variables,hasTrigger),onClick:()=>{const behavior=stepsToString(steps);onDb({...db,scopes:[{profiles:[{hotkeys:[{behavior}],events:[]}]}]});onChange(parseSteps(behavior));setRevision(revision+1);}},'Save behavior')));}
+manage?React.createElement(VariablesView,{folder:db.scopes[0],onDb}):React.createElement('section',{id:'editor',className:'modal modal--wide'},React.createElement(BehaviorStepsEditor,{folderId:'scope',key:revision,steps,variables:db.scopes[0].variables,hasTrigger,onChange,onDb,gameExe:'',states:[],scripts:[],overlays:[]}),React.createElement('button',{id:'save-behavior',disabled:!areStepsValid(steps,db.scopes[0].variables,hasTrigger),onClick:()=>{const behavior=stepsToString(steps);onDb({...db,scopes:[{...db.scopes[0],profiles:[{hotkeys:[{behavior}],events:[]}]}]});onChange(parseSteps(behavior));setRevision(revision+1);}},'Save behavior')));}
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));(${scenario})();`;
   const logs = resolve(root, "logs"); mkdirSync(logs, { recursive: true });
   const directory = mkdtempSync(join(logs, "variable-ui-"));

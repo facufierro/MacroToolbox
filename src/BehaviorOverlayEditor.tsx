@@ -23,7 +23,8 @@ export function useOverlayEditors() {
   return { editingOverlay: editors.length > 0, onOverlayEditingChange };
 }
 
-export function BehaviorOverlayEditor({ groupId, defaultProfileId, onDb, onSaved, onDeleted, onClose }: {
+export function BehaviorOverlayEditor({ folderId, groupId, defaultProfileId, onDb, onSaved, onDeleted, onClose }: {
+  folderId: string;
   groupId: string;
   defaultProfileId?: string;
   onDb: (db: Database) => void;
@@ -45,7 +46,7 @@ export function BehaviorOverlayEditor({ groupId, defaultProfileId, onDb, onSaved
     let cancelled = false;
     api.getDatabase().then(database => {
       if (cancelled) return;
-      const profiles = database.scopes.flatMap(scope => scope.profiles);
+      const profiles = database.scopes.filter(scope => scope.id === folderId).flatMap(scope => scope.profiles);
       const owner = groupId ? findOverlayOwner(profiles, groupId, defaultProfileId) : profiles.find(profile => profile.id === defaultProfileId);
       if (groupId && !owner) throw new Error("Overlay not found.");
       if (owner) {
@@ -59,7 +60,7 @@ export function BehaviorOverlayEditor({ groupId, defaultProfileId, onDb, onSaved
       setDb(database);
     }).catch(error => { if (!cancelled) { setFailed(true); reportError(error); } });
     return () => { cancelled = true; };
-  }, [groupId, defaultProfileId, reportError]);
+  }, [folderId, groupId, defaultProfileId, reportError]);
   const scope = db?.scopes.find(scope => scope.profiles.some(profile => profile.id === profileId));
   const profile = scope?.profiles.find(profile => profile.id === profileId);
   const bar = bars.find(bar => bar.group_ids.includes(group.id));
@@ -112,7 +113,7 @@ export function BehaviorOverlayEditor({ groupId, defaultProfileId, onDb, onSaved
         setEditingBar(null);
       }}>
         <option value="">Select profile</option>
-        {db.scopes.map(scope => <optgroup key={scope.id} label={scope.name}>{scope.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</optgroup>)}
+        {db.scopes.filter(scope => scope.id === folderId).map(scope => <optgroup key={scope.id} label={scope.name}>{scope.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</optgroup>)}
       </select>}
       <OverlayGroupPanel group={group} timers={timers} gameExe={scope?.exe ?? "*"} partsEditable={!editingPart && !editingBar} positioned={!bar}
         barControls={<div className="overlay-bar-controls">

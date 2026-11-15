@@ -11,6 +11,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     format: u32,
+    #[serde(deserialize_with = "config::deserialize_database")]
     pub database: Database,
     files: BTreeMap<String, String>,
 }
@@ -53,8 +54,12 @@ pub fn capture(database: Database) -> Result<Capture, String> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
-    let snapshot: Snapshot =
-        serde_json::from_slice(bytes).map_err(|_| "Cloud backup has an invalid format.")?;
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| "Cloud backup has an invalid format.")?;
+    let version = value["database"]["version"].as_u64().unwrap_or(0);
+    if !(4..=u64::from(config::CURRENT_DB_VERSION)).contains(&version) {
+        return Err("This backup requires a different MacroToolbox version.".into());
+    }
+    let snapshot: Snapshot = serde_json::from_value(value).map_err(|_| "Cloud backup has an invalid format.")?;
     if snapshot.format != 1 || !(4..=config::CURRENT_DB_VERSION).contains(&snapshot.database.version) {
         return Err("This backup requires a different MacroToolbox version.".into());
     }
@@ -130,6 +135,16 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_cloud_backups_migrate_variables_into_each_folder_before_restore() {
+        let source = serde_json::json!({"format":1,"files":{},"database":{"version":15,
+            "settings":{"ahk_exe":""},"variables":[{"id":"delay","name":"Delay","value":150}],
+            "scopes":[{"id":"a","name":"A"},{"id":"b","name":"B"}]}});
+        let snapshot = decode(&serde_json::to_vec(&source).unwrap()).unwrap();
+        assert_eq!(snapshot.database.version,config::CURRENT_DB_VERSION);
+        assert_eq!(snapshot.database.games[0].variables,snapshot.database.games[1].variables);
+        assert_eq!(snapshot.database.games[0].variables[0].value,crate::variables::VariableValue::Number(150.0));
+    }
     #[test]
     fn secure_send_backups_contain_only_the_local_credential_reference() {
         let source = r#"[{"type":"securesend","credentialId":"b8483943-e86c-41aa-a593-7388833369cd"}]"#;

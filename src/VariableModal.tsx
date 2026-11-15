@@ -22,7 +22,8 @@ export interface VariableBehaviorEditorProps {
   onOverlayEditingChange: OverlayEditingChange;
 }
 
-export function VariableModal({ initial, initialBehavior, initialSecureTexts = [], variables, fixedType, lockType = false, renderBehavior, onSaved, onClose }: {
+export function VariableModal({ folderId, initial, initialBehavior, initialSecureTexts = [], variables, fixedType, lockType = false, renderBehavior, onSaved, onClose }: {
+  folderId: string;
   initial?: Variable;
   initialBehavior?: Step[];
   initialSecureTexts?: SecureTextDraft[];
@@ -63,7 +64,7 @@ export function VariableModal({ initial, initialBehavior, initialSecureTexts = [
     try {
       const next = variables.some(current => current.id === id)
         ? variables.map(current => current.id === id ? saved : current) : [...variables, saved];
-      onSaved(saved, await api.saveVariables(next, saved.type === "behavior" ? usedSecureTexts(parseSteps(saved.value), secureTexts) : []));
+      onSaved(saved, await api.saveVariables(folderId, next, saved.type === "behavior" ? usedSecureTexts(parseSteps(saved.value), secureTexts) : []));
     } catch (error) { reportError(error); }
     finally { setSaving(false); }
   }

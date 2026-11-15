@@ -146,6 +146,7 @@ export interface Subfolder {
 
 /** A folder owns the application target shared by its profiles. */
 export interface Scope {
+  variables: Variable[];
   overlay_bars?: OverlayBar[];
   states: ProfileState[];
   states_disabled?: boolean;
@@ -170,7 +171,6 @@ export interface Database {
   version: number;
   scopes: Scope[];
   settings: Settings;
-  variables: Variable[];
 }
 
 export type VariableType = "number" | "text" | "keys" | "triggers" | "behavior";
