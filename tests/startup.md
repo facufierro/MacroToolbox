@@ -33,3 +33,16 @@ without its frontend server; they do not establish that it caused that occurrenc
 2. Repeat with older saved formats and skipped releases. Upgrades must happen
    during the normal settings load, without a separate command or resetting the
    user's configuration. A failed backup must leave the original file untouched.
+
+## Newer settings with an older installed app
+
+1. In a test installation, use settings whose schema is newer than the installed
+   app supports. Startup must show Update required, automatically check the latest
+   release, and run its installer when a newer version is available. The installer
+   must relaunch the app and preserve the settings file. Test both normal startup
+   and an installation configured to open to the tray.
+2. With the network unavailable, no newer release, or a failed download, the app
+   must keep the update screen open and allow Retry update. The settings file must
+   remain byte-for-byte unchanged, and hotkeys and cloud sync must not start.
+3. Relaunch with the latest released app and a still-newer test schema. It must
+   report that no newer release is available rather than reinstalling in a loop.
